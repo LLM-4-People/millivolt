@@ -89,6 +89,33 @@ def number(entry: dict, key: str, what: str) -> float:
     return float(value)
 
 
+def fixture_shape(workload: dict, path: Path) -> dict:
+    """The fixture a stage actually drove, recorded by cmd/stress itself.
+
+    The page describes the response shape beside every table. Reading it from
+    the workload line keeps that description tied to the run rather than to
+    defaults in this module.
+    """
+    hold = workload.get("stream_duration")
+    if not isinstance(hold, str) or not re.fullmatch(r"[0-9]+s", hold):
+        raise CollectError(f"{path}: workload stream_duration is not whole seconds")
+    chunks = workload.get("chunks")
+    if isinstance(chunks, bool) or not isinstance(chunks, int) or chunks < 1:
+        raise CollectError(f"{path}: workload chunks is not a positive integer")
+    inputs = workload.get("fixture_input_tokens")
+    if isinstance(inputs, bool) or not isinstance(inputs, int) or inputs < 1:
+        raise CollectError(f"{path}: workload fixture_input_tokens is not a positive integer")
+    cost = number(workload, "fixture_cost", str(path))
+    if cost <= 0:
+        raise CollectError(f"{path}: workload fixture_cost is not positive")
+    return {
+        "chunks": chunks,
+        "hold_s": int(hold[:-1]),
+        "input_tokens": inputs,
+        "cost_usd": cost,
+    }
+
+
 def normalize_stage(path: Path) -> tuple[dict, dict]:
     workload, result = stress_result(path)
     if number(result, "Failures", str(path)) != 0:
@@ -118,6 +145,10 @@ def normalize_stage(path: Path) -> tuple[dict, dict]:
         "drops": int(number(result, "storage_dropped", str(path))) if "storage_dropped" in result else 0,
         "accounting_ok": True,
     }
+    stage.update(fixture_shape(workload, path))
+    if stage["successes"] != stage["requests"]:
+        raise CollectError(
+            f"{path}: {stage['successes']} successful responses for {stage['requests']} requests")
     if stage["drops"]:
         kept = stage["durable"]
         if kept + stage["drops"] != stage["successes"]:
@@ -204,6 +235,14 @@ def method_section(manifest: dict, workload: dict, load: dict) -> dict:
         platform_name += " under WSL2"
     settings = workload.get("performance_settings") or {}
     now = dt.datetime.now(dt.timezone.utc)
+    for key in ("debug_captures", "body_previews", "live_observer", "upstream"):
+        if key not in manifest:
+            raise CollectError(f"manifest has no {key} declaration")
+    for key in ("debug_captures", "body_previews", "live_observer"):
+        if not isinstance(manifest[key], bool):
+            raise CollectError(f"manifest {key} is not a boolean")
+    if not isinstance(manifest["upstream"], str) or not manifest["upstream"]:
+        raise CollectError("manifest upstream is not a description")
     return {
         "revision": revision,
         "dirty": dirty,
@@ -218,6 +257,10 @@ def method_section(manifest: dict, workload: dict, load: dict) -> dict:
         "ram_gib": ram_gib,
         "rss_sampling_ms": manifest["rss_sampling_ms"],
         "config": "Public example with private listen and database paths",
+        "debug_captures": manifest["debug_captures"],
+        "body_previews": manifest["body_previews"],
+        "live_observer": manifest["live_observer"],
+        "upstream": manifest["upstream"],
         "max_conns_per_host": settings.get("max_conns_per_host"),
         "fast_duration_s": manifest["fast_duration_s"],
         "fast_long_duration_s": manifest["fast_long_duration_s"],
@@ -232,6 +275,14 @@ def method_section(manifest: dict, workload: dict, load: dict) -> dict:
 
 def collect(raw: Path, out: Path) -> dict:
     manifest = read_json(raw / "manifest.json")
+    if not isinstance(manifest, dict):
+        raise CollectError("manifest is not an object")
+    for key in ("artifacts", "idle", "load", "rss_sampling_ms", "fast_duration_s",
+                "fast_long_duration_s", "sustained_duration_s", "streaming_duration_s",
+                "streaming_hold_s", "streaming_chunks", "fast", "sustained",
+                "streaming_concurrency", "streaming_throughput", "benchmarks"):
+        if key not in manifest:
+            raise CollectError(f"manifest has no {key}")
     artifacts = read_json(raw / manifest["artifacts"])
     idle = read_json(raw / manifest["idle"])
     load = read_json(raw / manifest["load"])

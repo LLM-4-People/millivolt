@@ -16,6 +16,7 @@ stale bundle fails the unit job. Regenerate with:
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -39,6 +40,12 @@ def load_bundle(root: Path = ROOT) -> dict:
         raise DataError(f"{path.relative_to(root)} is not valid JSON: {exc}") from exc
     if bundle.get("generated_by") != GENERATED_BY:
         raise DataError(f"{path.relative_to(root)} was not written by {GENERATED_BY}")
+    for key in ("method", "artifacts", "fast", "sustained", "streaming_concurrency",
+                "streaming_throughput", "benchmarks"):
+        if key not in bundle:
+            raise DataError(f"{path.relative_to(root)} has no {key} section")
+    if not isinstance(bundle["method"], dict):
+        raise DataError(f"{path.relative_to(root)} method is not an object")
     return bundle
 
 
@@ -83,6 +90,63 @@ def _per_second(value: float) -> str:
     return f"{value:,.1f}"
 
 
+def _flag(method: dict, key: str) -> bool:
+    """A harness declaration the page publishes; missing is an error, not false."""
+    value = method.get(key)
+    if not isinstance(value, bool):
+        raise DataError(f"method has no boolean {key}; rerun {GENERATED_BY}")
+    return value
+
+
+def _text(method: dict, key: str) -> str:
+    value = method.get(key)
+    if not isinstance(value, str) or not value:
+        raise DataError(f"method has no text {key}; rerun {GENERATED_BY}")
+    return value
+
+
+def _fixture_shape(stages: list[dict], what: str) -> dict:
+    """The one response shape every stage in a group drove.
+
+    A table that describes "the synthetic response" is only honest when the
+    stages agree; a mixed group would make the sentence describe some rows and
+    not others.
+    """
+    if not stages:
+        raise DataError(f"no {what} stage to describe")
+    keys = ("chunks", "hold_s", "input_tokens", "cost_usd")
+    shape = {key: _number(stages[0][key], f"{what} {key}") for key in keys}
+    for stage in stages[1:]:
+        for key, value in shape.items():
+            if _number(stage[key], f"{what} {key}") != value:
+                raise DataError(f"{what} stages disagree about fixture {key}")
+    return shape
+
+
+def _bytes_label(n: float) -> str:
+    """A fixture body size taken from the benchmark's own sub-name."""
+    for unit, size in (("MiB", 1 << 20), ("KiB", 1 << 10)):
+        if n >= size and n % size == 0:
+            return f"{int(n // size)} {unit}"
+    return f"{_num(n)} bytes"
+
+
+def _records_in(name: str) -> float:
+    """The record count a benchmark sub-name declares (`records=100000`)."""
+    match = re.search(r"records=(\d+)", name)
+    if not match:
+        raise DataError(f"benchmark {name!r} does not declare its record count")
+    return float(match.group(1))
+
+
+def _body_in(name: str) -> float:
+    """The body size a benchmark sub-name declares (`bytes102400`)."""
+    match = re.search(r"bytes(\d+)", name)
+    if not match:
+        raise DataError(f"benchmark {name!r} does not declare its body size")
+    return float(match.group(1))
+
+
 def _table(headers: list[str], rows: list[list[str]], numeric: list[int] = ()) -> str:
     if not rows:
         raise DataError("a generated table has no rows")
@@ -113,17 +177,6 @@ def _metric(bench: dict, unit: str) -> float:
     return _number(metrics[unit], f"{bench.get('name')} {unit}")
 
 
-def _stage(bundle: dict, key: str, workers: int, seconds: float | None = None) -> dict:
-    for entry in bundle.get(key, []):
-        if entry.get("workers") != workers:
-            continue
-        if seconds is not None and abs(_number(entry.get("seconds"), "stage seconds") - seconds) > 0.75:
-            continue
-        return entry
-    suffix = "" if seconds is None else f" for {seconds:g}s"
-    raise DataError(f"bundle is missing {key} stage with {workers} workers{suffix}")
-
-
 def _method_table(method: dict) -> str:
     revision = method.get("revision") or ""
     link = f"[`{revision[:12]}`](https://github.com/LLM-4-People/millivolt/commit/{revision})"
@@ -137,13 +190,16 @@ def _method_table(method: dict) -> str:
         ["CPU", f"{method['cpu']}, {_num(_number(method['cpus'], 'cpus'))} visible logical CPUs"],
         ["Visible RAM", f"{_num(_number(method['ram_gib'], 'ram'))} GiB"],
         ["Configuration", method["config"]],
-        ["Debug and body previews", "Off"],
-        ["Browser and live observer", "None during load stages"],
-        ["Upstream", "Local synthetic server on loopback"],
+        ["Debug captures", "Off" if not _flag(method, "debug_captures") else "On"],
+        ["Body previews", "Off" if not _flag(method, "body_previews") else "On"],
+        ["Browser and live observer",
+         "None during load stages" if not _flag(method, "live_observer") else "Attached during load stages"],
+        ["Upstream", _text(method, "upstream")],
         ["Load shape", "Closed-loop HTTP stages, then drain"],
         ["RSS sampling", f"{_num(_number(method['rss_sampling_ms'], 'rss sampling'))} ms"],
         ["CPU unit", "100% equals one logical CPU"],
-        ["Accounting check", "Durable rows, tokens, cost and drop delta"],
+        ["Accounting check",
+         "Exact stages reconcile rows, tokens and cost; a dropping stage reconciles durable plus dropped"],
         ["Host load (1-minute)", f"{method['load_1m_start']:g} at start, {method['load_1m_end']:g} at end"],
     ]
     return _table(["Item", "Setting"], rows)
@@ -320,6 +376,29 @@ def render(bundle: dict) -> str:
     meta1 = _bench(bundle, "BenchmarkRequestMetadata/bytes1024")
     meta100 = _bench(bundle, "BenchmarkRequestMetadata/bytes102400")
     meta1m = _bench(bundle, "BenchmarkRequestMetadata/bytes1048576")
+    query_fixture = _bench(bundle, "BenchmarkQueryBeforeEquality")
+
+    fast_shape = _fixture_shape(fast, "fast")
+    sustained_shape = _fixture_shape(sustained, "sustained")
+    if sustained_shape != fast_shape:
+        raise DataError("sustained stages do not use the fast-response fixture")
+    for shape, what in ((fast_shape, "fast"), (sustained_shape, "sustained")):
+        if _number(shape["hold_s"], "stream hold") != 0:
+            raise DataError(f"{what} stages used a stream hold; the page describes a buffered response")
+    streaming_shape = _fixture_shape(concurrency, "concurrency")
+    throughput_shape = _fixture_shape(throughput, "throughput")
+    fixture_text = (
+        f"{_num(_number(fast_shape['chunks'], 'chunks'))} content frames, usage "
+        f"`{_num(_number(fast_shape['input_tokens'], 'input tokens'))}/"
+        f"{_num(_number(fast_shape['chunks'], 'chunks'))}`, and fixture cost "
+        f"`{_number(fast_shape['cost_usd'], 'fixture cost'):g}`"
+    )
+    chunk_label = f"{_num(_number(streaming_shape['chunks'], 'chunks'))}-frame"
+    hold_label = f"{_num(_number(streaming_shape['hold_s'], 'hold'))}-second"
+    throughput_chunks = f"{_num(_number(throughput_shape['chunks'], 'chunks'))}"
+    throughput_hold = _num(_number(throughput_shape['hold_s'], 'hold'))
+    fast_duration = _num(_number(method["fast_duration_s"], "fast duration"))
+    sustained_duration = _num(_number(method["sustained_duration_s"], "sustained duration"))
 
     query_rows = []
     for field, label in (("provider", "Provider equality"), ("model", "Model equality"),
@@ -352,7 +431,7 @@ def render(bundle: dict) -> str:
     )
 
     sustained_note = (
-        f"The exact five-minute point is {_one(_number(sustained_best['rps'], 'rps'))} requests/s "
+        f"The exact {sustained_duration}-second point is {_one(_number(sustained_best['rps'], 'rps'))} requests/s "
         f"at {_num(_number(sustained_best['workers'], 'workers'))} workers, with p95 "
         f"{_two(_number(sustained_best['p95_ms'], 'p95'))} ms and p99 "
         f"{_two(_number(sustained_best['p99_ms'], 'p99'))} ms."
@@ -416,17 +495,17 @@ resources.
 {_method_table(method)}
 
 The public example configuration was used, with private listen and database
-paths supplied by `scripts/dev.sh`. Debug captures and body previews were off.
-No browser or live observer was attached during the load stages. CPU and RSS
+paths supplied by `scripts/dev.sh`. The method table records the harness
+declarations for captures, previews, the observer and the upstream. CPU and RSS
 describe the native Go process, not Docker's container-wide accounting.
 Percentiles are nearest-rank.
 
 ## Fast-response throughput
 
 Each stage used a fresh disposable database and the same synthetic response:
-ten content frames, usage `100/10`, and fixture cost `0.001`. The upstream added
-no intentional delay. Each stage started requests for five seconds, then let
-active requests drain. The final row is a separate
+{fixture_text}. The upstream added no intentional delay. Each stage started
+requests for {fast_duration} seconds, then let active requests drain. The final
+row is a separate
 {_num(_number(method['fast_long_duration_s'], 'long duration'))}-second run used
 to reach about {_num(_number(fast_long['durable'], 'durable rows'))} durable rows
 without a storage drop.
@@ -444,10 +523,10 @@ below shows what a drop result looks like.
 ## Sustained capacity
 
 The sustained capacity point is the highest tested closed-loop level that
-completed five minutes with zero durable drops and exact accounting. Each level
-started from a fresh disposable database. The upstream response and client
-shape were the same as the fast-response table: ten content frames, usage
-`100/10`, and fixture cost `0.001`.
+completed a {sustained_duration}-second run with zero durable drops and exact
+accounting. Each level started from a fresh disposable database. The upstream
+response and client shape were the same as the fast-response table:
+{fixture_text}.
 
 {_sustained_table(sustained)}
 
@@ -455,10 +534,10 @@ shape were the same as the fast-response table: ten content frames, usage
 
 ## Streaming concurrency
 
-The synthetic upstream emitted ten content frames across approximately one
-second, followed by usage and a terminator. Each stage started requests for five
-seconds and then drained. Latency includes the intentional upstream delay, so
-these numbers are not proxy-only overhead.
+The synthetic upstream emitted {chunk_label} response across approximately
+{hold_label} stream, followed by usage and a terminator. Each stage started its
+fixed number of requests and then drained. Latency includes the intentional
+upstream delay, so these numbers are not proxy-only overhead.
 
 {_streaming_rate_table(concurrency)}
 
@@ -484,8 +563,8 @@ streaming stage, or automatic saturation sweep was run; see
 level starts a fresh private `scripts/dev.sh` instance and sends requests
 through the real proxy to a local synthetic SSE upstream. Each level ran for
 {_num(_number(method['streaming_duration_s'], 'streaming duration'))} seconds
-with {_num(_number(method['streaming_chunks'], 'chunks'))} content frames over a
-roughly one-second stream.
+with {throughput_chunks} content frames over a roughly {throughput_hold}-second
+stream.
 
 {_streaming_rate_table(throughput)}
 
@@ -505,10 +584,10 @@ benchmark deliberately fills the bounded queue, so its drop count is a fixture
 result, not a recommended operating point.
 
 {_table(["Path", "Durable rows/s", "Allocations"], [
-    ["Direct batch insert, 256 records per batch",
+    ["Direct batch insert at the configured batch capacity",
      _num(_metric(writer_batch, "records/s")),
      f"{_num(_metric(writer_batch, 'B/op'))} B/op, {_num(_metric(writer_batch, 'allocs/op'))} allocs/op"],
-    ["Queued `Record` plus `Flush`, 8,192 records per batch",
+    ["Queued `Record` plus `Flush` at the queue capacity",
      _num(_metric(writer_queued, "records/s")),
      f"{_num(_metric(writer_queued, 'B/op'))} B/op, {_num(_metric(writer_queued, 'allocs/op'))} allocs/op"],
 ], [1, 2])}
@@ -531,7 +610,7 @@ The storage fixture stores complete records, indexes, projection triggers, and
 marshaled response headers in SQLite. Disk bytes include the database, WAL, and
 shared-memory sidecar after a final flush.
 
-{_table(["Measure", "10,000 records", "100,000 records"], [
+{_table(["Measure", f"{_num(_records_in(disk10['name']))} records", f"{_num(_records_in(disk100['name']))} records"], [
     ["SQLite bytes total", f"{_metric(disk10, 'MiB-total'):,.2f} MiB",
      f"{_metric(disk100, 'MiB-total'):,.2f} MiB"],
     ["SQLite bytes per record", _one(_metric(disk10, "B/record")), _one(_metric(disk100, "B/record"))],
@@ -546,10 +625,11 @@ shared-memory sidecar after a final flush.
 ], [1, 2])}
 
 The projection process benchmark is a relative measure inside the test binary,
-not the deployed proxy's RSS. At 100,000 records it measured
-{_one(_metric(rss100, "MiB"))} MiB process RSS and a
-{_one(_metric(rss100, "projection-MiB"))} MiB projection delta; at 10,000 records
-it measured {_one(_metric(rss10, "MiB"))} MiB process RSS and a
+not the deployed proxy's RSS. At {_num(_records_in(rss100['name']))} records it
+measured {_one(_metric(rss100, "MiB"))} MiB process RSS and a
+{_one(_metric(rss100, "projection-MiB"))} MiB projection delta; at
+{_num(_records_in(rss10['name']))} records it measured
+{_one(_metric(rss10, "MiB"))} MiB process RSS and a
 {_one(_metric(rss10, "projection-MiB"))} MiB delta. The test binary and its
 linked packages are part of the absolute figure.
 
@@ -560,23 +640,24 @@ retained analytical cost, not the loaded-process peak as a substitute.
 
 ## Query and metadata paths
 
-The query benchmarks seed a 100,000-row scratch database and decode a 200-row
+The query benchmarks seed a {_num(_metric(query_fixture, 'fixture-rows'))}-row
+scratch database and decode a {_num(_metric(query_fixture, 'fixture-page'))}-row
 page. These are single-iteration measurements on a shared host, so small
 differences are not meaningful.
 
 {_table(["Query", "Before cursor", "With cursor", "Allocations before cursor"], query_rows, [1, 2])}
 
-The request metadata path performs one bounded metadata decode and allocates
-16 bytes per call.
+The request metadata path performs one bounded metadata decode; the allocation
+column is measured per call.
 
 {_table(["Metadata body", "Time per request", "Throughput", "Allocations"], [
-    ["1 KiB", f"{_num(_number(meta1['ns_per_op'], 'ns'))} ns",
+    [_bytes_label(_body_in(meta1['name'])), f"{_num(_number(meta1['ns_per_op'], 'ns'))} ns",
      f"{_one(_metric(meta1, 'MB/s'))} MB/s",
      f"{_num(_metric(meta1, 'B/op'))} B, {_num(_metric(meta1, 'allocs/op'))} alloc"],
-    ["100 KiB", f"{_num(_number(meta100['ns_per_op'], 'ns'))} ns",
+    [_bytes_label(_body_in(meta100['name'])), f"{_num(_number(meta100['ns_per_op'], 'ns'))} ns",
      f"{_one(_metric(meta100, 'MB/s'))} MB/s",
      f"{_num(_metric(meta100, 'B/op'))} B, {_num(_metric(meta100, 'allocs/op'))} alloc"],
-    ["1 MiB", f"{_num(_number(meta1m['ns_per_op'], 'ns'))} ns",
+    [_bytes_label(_body_in(meta1m['name'])), f"{_num(_number(meta1m['ns_per_op'], 'ns'))} ns",
      f"{_one(_metric(meta1m, 'MB/s'))} MB/s",
      f"{_num(_metric(meta1m, 'B/op'))} B, {_num(_metric(meta1m, 'allocs/op'))} alloc"],
 ], [1, 2, 3])}
@@ -654,18 +735,18 @@ docker save millivolt-perf | gzip -9 | wc -c
   payload shape, and real identity cardinality are not represented.
 - These are short closed-loop bursts, not sustained production capacity. No
   result here is a capacity ceiling or a guarantee.
-- The streaming concurrency table is a five-second ramp on a ten-frame, roughly
-  one-second fixture. The streaming throughput table is a
+- The streaming concurrency table is a short ramp on a {chunk_label}, roughly
+  {hold_label} fixture. The streaming throughput table is a
   {_num(_number(method['streaming_duration_s'], 'streaming duration'))}-second
   per-level ramp on a
-  {_num(_number(method['streaming_chunks'], 'chunks'))}-frame, roughly one-second
+  {throughput_chunks}-frame, roughly {throughput_hold}-second
   fixture. Both are synthetic-fixture measurements, not universal maxima. The
   throughput table's
   {_num(_number(throughput[-1]['workers'], 'workers'))}-client level is above the
   example `max_conns_per_host` of {max_conns} and measures queueing; it is a
   fixed level list, not an automatic saturation search. Its token rate is the
   fixture's usage count, not provider-token throughput.
-- The five-minute sustained sweep uses the fast-response fixture with no
+- The {sustained_duration}-second sustained sweep uses the fast-response fixture with no
   intentional stream hold (`-stream-duration 0`). A level with durable drops is
   an overload observation, not a maximum streaming rate. The streaming
   throughput ramp is the only sustained held-stream run; it stops at its fixed
@@ -718,11 +799,29 @@ def landing_metrics(root: Path = ROOT) -> dict[str, str]:
     if not exact:
         raise DataError("bundle has no exact sustained stage")
     point = next((s for s in exact if s.get("workers") == 48), max(exact, key=lambda s: s["rps"]))
+    seconds = _number(point["seconds"], "sustained seconds")
+    workers = _num(_number(point["workers"], "workers"))
+    if seconds >= 120 and seconds % 60 == 0:
+        sustained = f"{int(seconds // 60)} minutes at {workers} workers"
+    else:
+        sustained = f"{_num(seconds)} s at {workers} workers"
+    method = bundle["method"]
+    revision = str(method.get("revision") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise DataError("method revision is not a full commit hash")
+    date = _text(method, "date_utc")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise DataError("method date is not an ISO date")
     return {
         "perf_image": _mib(_number(artifacts["image_bytes"], "image bytes")),
         "perf_idle": _kib_mib(_number(artifacts["idle_rss_kib"], "idle rss")),
         "perf_loaded": f"{_one(_number(loaded['peak_rss_mib'], 'rss'))} MiB",
         "perf_rps": _one(_number(point["rps"], "rps")),
+        "perf_sustained": sustained,
+        "perf_date": date,
+        "perf_revision": revision[:7],
+        "perf_revision_full": revision,
+        "perf_platform": _text(method, "platform"),
     }
 
 

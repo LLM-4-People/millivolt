@@ -327,41 +327,34 @@ def content_safety_errors() -> list[str]:
 
 
 def performance_headline_escape_errors() -> list[str]:
-    """The landing headline values are the one doc-derived sink outside the
-    sanitizer.
+    """The landing headline values are the one bundle-derived sink outside the
+    Markdown sanitizer.
 
-    The landing page is assembled from `site-src/templates/landing.html`, not
-    from `md.convert`, so `sanitize_content` never sees it. `perf_*` comes from
-    a table cell in `docs/performance.md`, which is author-controlled Markdown:
-    before the fix that cell was interpolated raw and a payload with an
-    `onerror` handler executed on the published landing page. Pin the escaping
-    by driving the real extractor over a poisoned canonical page.
+    The landing page is assembled from `site-src/templates/landing.html`, so
+    `sanitize_content` never sees it. The values come from
+    `perf/results.json`; a hand-edited or hostile bundle must reach the page as
+    literal text, never as markup. The date and revision are format-checked in
+    the reader, and every value is escaped at the sink.
     """
     import scripts.build_site as build_site
 
-    original = build_site.DOCS
-    errors = []
-    with tempfile.TemporaryDirectory(prefix="millivolt-perf-") as temp:
-        docs = Path(temp) / "docs"
-        docs.mkdir()
-        (docs / "performance.md").write_text(
-            "| Label | A | B | C |\n"
-            '| amd64 runtime image | 1 | <img src="https://e.test/x.png" '
-            'onerror="window.__pwned=1">PAWNED | note |\n'
-            "| Idle process, empty SQLite | 1 | 2 MiB | note |\n"
-            "| 128 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 114 MiB | note |\n"
-            "| 48 | 1 | 2 | 14166 | 4 |\n",
-            encoding="utf-8")
-        build_site.DOCS = docs
-        try:
-            headline = build_site.performance_headline()
-        finally:
-            build_site.DOCS = original
-    for key, value in headline.items():
-        if "<" in value or "onerror" in value.lower():
-            errors.append(f"site: {key} reaches the landing template as markup: {value!r}")
-    if "PAWNED" not in headline.get("perf_image", ""):
-        errors.append("site: the poisoned cell's text did not survive as escaped display text")
+    errors: list[str] = []
+    payload = '<img src="https://e.test/x.png" onerror="window.__pwned=1">PAWNED'
+    original = build_site.performance_headline
+    build_site.performance_headline = lambda: {
+        key: payload for key in ("perf_image", "perf_idle", "perf_loaded", "perf_rps",
+                                 "perf_sustained", "perf_date", "perf_revision",
+                                 "perf_revision_full", "perf_platform")
+    }
+    try:
+        page = build_site.render_landing(version="0.0.0", base_url="https://example.test/",
+                                         theme_color="#000000")
+    finally:
+        build_site.performance_headline = original
+    if "<img" in page or "onerror=" in page:
+        errors.append("site: a performance value reaches the landing template as markup")
+    if "PAWNED" not in page:
+        errors.append("site: an escaped performance value lost its literal text")
     return errors
 
 

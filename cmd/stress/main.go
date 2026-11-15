@@ -766,7 +766,11 @@ func run(ctx context.Context, o options) (err error) {
 		clients = append(clients, localClient(o.timeout, transport))
 	}
 	enc := json.NewEncoder(os.Stdout)
-	if err := enc.Encode(map[string]any{"kind": "workload", "pid": pid, "target": c.base, "model": "closed-loop", "stream_duration": o.hold.String(), "chunks": o.chunks, "duration_per_level": o.duration.String(), "upstreams": o.upstreams, "source_ips": o.sources, "performance_settings": performanceSettings(cfg.Effective)}); err != nil {
+	// The fixture shape is published beside the results, so the run records the
+	// exact frame count, usage and unit cost it drove rather than leaving the
+	// page to restate defaults that can drift. Output tokens per request are the
+	// frame count, the same value the usage line emits.
+	if err := enc.Encode(map[string]any{"kind": "workload", "pid": pid, "target": c.base, "model": "closed-loop", "stream_duration": o.hold.String(), "chunks": o.chunks, "fixture_input_tokens": fixtureInputTokens, "fixture_cost": fixtureCost, "duration_per_level": o.duration.String(), "upstreams": o.upstreams, "source_ips": o.sources, "performance_settings": performanceSettings(cfg.Effective)}); err != nil {
 		return err
 	}
 	durable := cfg.Effective["db_path"] != ""

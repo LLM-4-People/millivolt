@@ -498,7 +498,7 @@ scripts/perf.sh docs      # every published measurement, bundle and page
 scripts/perf.sh bench     # isolated Go benchmarks
 scripts/perf.sh stress    # private fast and streaming ramps
 scripts/perf.sh streaming # sustained end-to-end SSE throughput ramp
-scripts/perf.sh sustained # five-minute fast-response capacity levels
+scripts/perf.sh sustained # fixed-duration fast-response capacity levels
 scripts/perf.sh image     # disposable image content and compressed size
 scripts/perf.sh all       # image, bench, then stress
 ```
@@ -508,6 +508,15 @@ scripts/perf.sh all       # image, bench, then stress
 and the page together. Never hand-edit either one; a missing stage, failed
 response or unbalanced durable result aborts the run instead of publishing a
 partial page.
+
+The bundle is also the source of the facts the page describes: the commit, date
+and platform, each stage's response shape (frame count, usage and unit cost),
+the configured durations, and the harness declarations for captures, previews
+and the observer. `cmd/stress` records the fixture shape in its workload line
+and the collector validates it per stage, so a table and the sentence beside it
+cannot describe different runs. The landing headline reads the same bundle;
+`tests/python/performance.py` renders two bundles that differ only in those
+fields and fails if any published sentence keeps its old text.
 
 For request, SSE-event, response-byte and output-token rates, use the
 `streaming` mode. It derives those rates from responses the client accepted

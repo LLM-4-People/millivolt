@@ -321,6 +321,12 @@ manifest = {
     "idle": "idle.json",
     "load": "load.json",
     "rss_sampling_ms": int(rss),
+    # Harness facts the page publishes. They are declarations by the script
+    # that ran the stages, not values the renderer may assume.
+    "debug_captures": False,
+    "body_previews": False,
+    "live_observer": False,
+    "upstream": "Local synthetic server on loopback",
     "fast_duration_s": int(fast_s),
     "fast_long_duration_s": int(fast_long.rstrip("s")),
     "sustained_duration_s": int(sustained_s),

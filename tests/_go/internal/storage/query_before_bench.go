@@ -99,6 +99,10 @@ func benchmarkQueryBeforeStore(b *testing.B) *Store {
 // unique key hashes and conversation ids, and a rare status every 1,000 rows;
 // BenchmarkQueryBeforeCount isolates the same predicates without row decode.
 func BenchmarkQueryBeforeEquality(b *testing.B) {
+	// The fixture shape is published beside the result, so the benchmark reports
+	// it rather than leaving the page to restate these constants.
+	b.ReportMetric(benchQueryBeforeRows, "fixture-rows")
+	b.ReportMetric(benchQueryBeforePage, "fixture-page")
 	s := benchmarkQueryBeforeStore(b)
 	cursor := &LogCursor{StartMs: queryBeforeFixtureStartMs + 50_000, ID: "row-050000"}
 	for _, tc := range []struct {

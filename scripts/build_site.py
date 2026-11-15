@@ -820,7 +820,7 @@ def render_landing(*, version: str, base_url: str, theme_color: str) -> str:
         head_extra=head_extra,
         active="overview",
     )
-    values.update(perf)
+    values.update({key: html.escape(value) for key, value in perf.items()})
     return render_base(values)
 
 

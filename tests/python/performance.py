@@ -10,6 +10,7 @@ partial run. They never start a proxy or run a benchmark.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,7 +25,8 @@ def benchmark_line(name: str, ns: float, **metrics) -> str:
     return "\t".join(fields)
 
 
-def stage(workers: int, seconds: float, rps: float, *, drops: int = 0) -> dict:
+def stage(workers: int, seconds: float, rps: float, *, drops: int = 0,
+          chunks: int = 10, hold: int = 0) -> dict:
     requests = int(rps * seconds)
     return {
         "workers": workers, "requests": requests, "successes": requests,
@@ -35,6 +37,7 @@ def stage(workers: int, seconds: float, rps: float, *, drops: int = 0) -> dict:
         "upstream_peak": min(workers, 512), "sse_per_s": rps * 10,
         "tokens_per_s": rps * 9, "stream_kib_per_s": rps, "durable": requests - drops,
         "drops": drops, "accounting_ok": True,
+        "chunks": chunks, "hold_s": hold, "input_tokens": 100, "cost_usd": 0.001,
     }
 
 
@@ -60,6 +63,8 @@ def bundle() -> dict:
             "go": "go1.27.4", "platform": "Linux/amd64", "cpu": "Fixture CPU",
             "cpus": 12, "ram_gib": 62, "rss_sampling_ms": 100,
             "config": "Public example with private listen and database paths",
+            "debug_captures": False, "body_previews": False,
+            "live_observer": False, "upstream": "Local synthetic server on loopback",
             "max_conns_per_host": 512, "fast_duration_s": 5, "fast_long_duration_s": 10,
             "sustained_duration_s": 300, "streaming_duration_s": 60,
             "streaming_hold_s": 1, "streaming_chunks": 100,
@@ -73,9 +78,10 @@ def bundle() -> dict:
         },
         "fast": [stage(1, 5, 800), stage(128, 5, 11000), stage(128, 10, 9000)],
         "sustained": [stage(48, 300, 14000), stage(64, 300, 13000, drops=10)],
-        "streaming_concurrency": [stage(1, 5, 1), stage(512, 5, 480)],
-        "streaming_throughput": [stage(1, 60, 1), stage(512, 60, 470),
-                                 stage(1024, 60, 460)],
+        "streaming_concurrency": [stage(1, 5, 1, hold=1), stage(512, 5, 480, hold=1)],
+        "streaming_throughput": [stage(1, 60, 1, chunks=100, hold=1),
+                                 stage(512, 60, 470, chunks=100, hold=1),
+                                 stage(1024, 60, 460, chunks=100, hold=1)],
         "benchmarks": [
             bench("BenchmarkStorageWriter/batch", "writer",
                  metrics={"records/s": 15000.0, "B/op": 400.0, "allocs/op": 7.0}),
@@ -100,6 +106,8 @@ def bundle() -> dict:
             bench("BenchmarkProjectionProcessRSS/records=100000", "process_rss",
                  metrics={"MiB": 93.0, "projection-MiB": 76.0}),
             *query,
+            bench("BenchmarkQueryBeforeEquality", "query",
+                 metrics={"fixture-rows": 100000.0, "fixture-page": 200.0}),
             bench("BenchmarkRequestMetadata/bytes1024", "metadata",
                  metrics={"MB/s": 2500.0, "B/op": 16.0, "allocs/op": 1.0}),
             bench("BenchmarkRequestMetadata/bytes102400", "metadata",
@@ -152,6 +160,7 @@ class CollectorTests(unittest.TestCase):
             "GeneratorPeakRSSMiB": 10, "sse_events_per_second": 20,
             "output_tokens_per_second": 18, "stream_bytes_per_second": 1024,
             "DurableRequests": 10, "storage_dropped": 0, "AccountingOK": True,
+            "chunks": 10, "fixture_input_tokens": 100, "fixture_cost": 0.001,
         }
         entry.update(overrides)
         return json.dumps(entry)
@@ -160,7 +169,9 @@ class CollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "stage.jsonl"
             path.write_text("\n".join([
-                json.dumps({"kind": "workload", "performance_settings": {"max_conns_per_host": 512}}),
+                json.dumps({"kind": "workload", "chunks": 10, "stream_duration": "0s",
+                            "fixture_input_tokens": 100, "fixture_cost": 0.001,
+                            "performance_settings": {"max_conns_per_host": 512}}),
                 self.stress_line()]), encoding="utf-8")
             _workload, stage = perf_collect.normalize_stage(path)
             self.assertEqual(10, stage["requests"])
@@ -172,12 +183,16 @@ class CollectorTests(unittest.TestCase):
                 self.stress_line(Successes=10, DurableRequests=6, storage_dropped=3),
             ):
                 path.write_text("\n".join([
-                    json.dumps({"kind": "workload", "performance_settings": {"max_conns_per_host": 512}}),
+                    json.dumps({"kind": "workload", "chunks": 10, "stream_duration": "0s",
+                            "fixture_input_tokens": 100, "fixture_cost": 0.001,
+                            "performance_settings": {"max_conns_per_host": 512}}),
                     bad]), encoding="utf-8")
                 with self.assertRaises(perf_collect.CollectError):
                     perf_collect.normalize_stage(path)
             path.write_text("\n".join([
-                json.dumps({"kind": "workload", "performance_settings": {"max_conns_per_host": 512}}),
+                json.dumps({"kind": "workload", "chunks": 10, "stream_duration": "0s",
+                            "fixture_input_tokens": 100, "fixture_cost": 0.001,
+                            "performance_settings": {"max_conns_per_host": 512}}),
                 self.stress_line(Successes=10, DurableRequests=6, storage_dropped=4)]),
                 encoding="utf-8")
             _workload, dropped = perf_collect.normalize_stage(path)
@@ -207,6 +222,27 @@ class RendererTests(unittest.TestCase):
         with self.assertRaises(perf_docs.DataError):
             perf_docs.render(data)
 
+    def test_mixed_fixture_shape_is_not_described_as_one_response(self):
+        data = bundle()
+        data["fast"][1]["chunks"] = 12
+        with self.assertRaises(perf_docs.DataError):
+            perf_docs.render(data)
+
+    def test_malformed_bundles_raise_a_data_error(self):
+        for key in ("artifacts", "method", "benchmarks"):
+            data = bundle()
+            del data[key]
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "perf").mkdir()
+                (root / "perf" / "results.json").write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(perf_docs.DataError):
+                    perf_docs.load_bundle(root)
+        data = bundle()
+        del data["method"]["debug_captures"]
+        with self.assertRaises(perf_docs.DataError):
+            perf_docs.render(data)
+
     def test_landing_metrics_come_from_the_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -215,6 +251,86 @@ class RendererTests(unittest.TestCase):
             values = perf_docs.landing_metrics(root)
         self.assertEqual("28.6 MiB", values["perf_image"])
         self.assertEqual("14,000.0", values["perf_rps"])
+        self.assertEqual("5 minutes at 48 workers", values["perf_sustained"])
+        self.assertEqual("2026-11-15", values["perf_date"])
+        self.assertEqual("0123456", values["perf_revision"])
+        self.assertEqual("0123456789abcdef0123456789abcdef01234567", values["perf_revision_full"])
+        self.assertEqual("Linux/amd64", values["perf_platform"])
+
+    def test_every_published_claim_follows_the_bundle(self):
+        """Render two bundles that differ only in their recorded facts.
+
+        A sentence that keeps its old number across both renders is a hand
+        copy, not a measurement. This is the guard that would have caught the
+        stale landing date, the fixed "five-minute" label and the fixture shape
+        restated as prose.
+        """
+        first = bundle()
+        second = bundle()
+        method = second["method"]
+        method["date_utc"] = "2026-03-02"
+        method["revision"] = "f" * 40
+        method["platform"] = "Linux/arm64"
+        method["fast_duration_s"] = 3
+        method["sustained_duration_s"] = 120
+        second["artifacts"]["image_bytes"] = 40 * 1024 * 1024
+        for entry in second["fast"]:
+            entry["seconds"] = 3
+        for entry in second["sustained"]:
+            entry["seconds"] = 120
+        for group in ("fast", "sustained"):
+            for entry in second[group]:
+                entry["chunks"] = 12
+                entry["input_tokens"] = 120
+                entry["cost_usd"] = 0.002
+        for bench_entry in second["benchmarks"]:
+            if bench_entry["name"] == "BenchmarkQueryBeforeEquality":
+                bench_entry["metrics"] = {"fixture-rows": 5000.0, "fixture-page": 50.0}
+        page = perf_docs.render(first)
+        moved = perf_docs.render(second)
+        for old, new in (
+            ("The page was regenerated from the result bundle on\n2026-11-15", "2026-03-02"),
+            ("requests for 5 seconds", "requests for 3 seconds"),
+            ("completed a 300-second run", "completed a 120-second run"),
+            ("10 content frames, usage `100/10`", "12 content frames, usage `120/12`"),
+            ("fixture cost `0.001`", "fixture cost `0.002`"),
+            ("seed a 100,000-row", "seed a 5,000-row"),
+            ("decode a 200-row", "decode a 50-row"),
+        ):
+            self.assertIn(old, page)
+            self.assertIn(new, moved)
+            self.assertNotIn(old, moved)
+
+    def test_provenance_must_look_like_a_real_measurement(self):
+        for field, value in (("revision", "not-a-hash"), ("date_utc", "20 March")):
+            data = bundle()
+            data["method"][field] = value
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "perf").mkdir()
+                (root / "perf" / "results.json").write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(perf_docs.DataError):
+                    perf_docs.landing_metrics(root)
+
+    def test_design_note_promises_have_published_benchmarks(self):
+        """A design note that links to the measured page must keep its promise.
+
+        A paragraph may name the benchmark that protects a path. When the same
+        paragraph points at the published table, that benchmark has to be in the
+        current bundle, or the link leads to a row the run no longer produces.
+        """
+        bundle = perf_docs.load_bundle()
+        available = {entry["name"].split("/", 1)[0] for entry in bundle["benchmarks"]}
+        text = (perf_docs.ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
+        missing = []
+        for block in re.split(r"\n\s*\n", text):
+            if "performance.md" not in block:
+                continue
+            for name in re.findall(r"`(Benchmark[A-Za-z0-9_]+)", block):
+                if name not in available:
+                    missing.append(name)
+        self.assertEqual([], missing,
+                         "a design note promises a benchmark the page does not publish")
 
     def test_foreign_bundle_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
