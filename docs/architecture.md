@@ -308,7 +308,10 @@ including over-cap, invalid archive, apply failure and client disconnect. A
 boot-time sweep reclaims only known staging names older than a safety age,
 examining the directory in bounded batches up to a per-boot entry budget; the
 live database, pending snapshot, rollback set, state marker and quarantined
-admission evidence are outside that registry. The attached inspect/merge and
+admission evidence are outside that registry. A rejected or interrupted pending
+file is preserved under a unique `.incoming.invalid-<token>` or
+`.incoming.invalid-interrupted-<token>` name with its sidecars, so a later
+rejection cannot overwrite earlier evidence. The attached inspect/merge and
 decoded source use the shared `SQLiteURI` with `mode=ro`, so a snapshot path
 with URI metacharacters stays literal and writes through the attached schema
 fail.

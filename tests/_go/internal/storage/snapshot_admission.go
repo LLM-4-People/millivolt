@@ -77,9 +77,7 @@ func TestAdmissionRejectsUnwritableWriterSchema(t *testing.T) {
 	if _, err := os.Stat(incoming); !os.IsNotExist(err) {
 		t.Fatal("rejected pending snapshot was not consumed")
 	}
-	if _, err := os.Stat(incoming + pendingSnapshotInvalidSuffix); err != nil {
-		t.Fatalf("rejected pending snapshot was not quarantined: %v", err)
-	}
+	requireQuarantined(t, incoming)
 
 	// The live store still accepts writes on the same database.
 	reopened.Record(&metrics.Record{ID: "after-reject", Provider: "neutral.example", Model: "n", StatusCode: 200})
@@ -254,9 +252,7 @@ func TestAdmissionRejectsIDWithoutUniqueKey(t *testing.T) {
 	if len(rows) != 1 || rows[0].ID != "keep-old" {
 		t.Fatalf("live rows after rejection = %#v, want keep-old", rows)
 	}
-	if _, err := os.Stat(PendingSnapshotPath(dstPath) + pendingSnapshotInvalidSuffix); err != nil {
-		t.Fatalf("rejected pending snapshot was not quarantined: %v", err)
-	}
+	requireQuarantined(t, PendingSnapshotPath(dstPath))
 	reopened.Record(&metrics.Record{ID: "after-reject", Provider: "neutral.example", Model: "n", StatusCode: 200, Start: time.Now()})
 	if err := reopened.Flush(); err != nil {
 		t.Fatalf("live ingestion after rejection: %v", err)

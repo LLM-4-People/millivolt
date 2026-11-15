@@ -140,9 +140,7 @@ func TestOpenQuarantinesInvalidPendingSnapshot(t *testing.T) {
 	if _, err := os.Stat(incoming); !os.IsNotExist(err) {
 		t.Fatal("invalid pending was not consumed")
 	}
-	if _, err := os.Stat(incoming + ".invalid"); err != nil {
-		t.Fatalf("invalid pending was not quarantined: %v", err)
-	}
+	requireQuarantined(t, incoming)
 	got, err := reopened.LoadRecent(t.Context(), 10)
 	if err != nil {
 		t.Fatal(err)
@@ -208,9 +206,7 @@ func TestOpenQuarantinesIncompatiblePendingSnapshot(t *testing.T) {
 	if _, err := os.Stat(incoming); !os.IsNotExist(err) {
 		t.Fatal("incompatible pending was not consumed")
 	}
-	if _, err := os.Stat(incoming + ".invalid"); err != nil {
-		t.Fatalf("incompatible pending was not quarantined: %v", err)
-	}
+	requireQuarantined(t, incoming)
 	if _, err := os.Stat(dstPath + ".previous"); !os.IsNotExist(err) {
 		t.Fatal("rejected pending left a rollback sibling")
 	}
@@ -320,9 +316,7 @@ func TestOpenRecoversInterruptedPendingSnapshot(t *testing.T) {
 	if _, err := os.Stat(incoming); !os.IsNotExist(err) {
 		t.Fatal("boot recovery re-admitted the interrupted incoming file")
 	}
-	if _, err := os.Stat(incoming + ".invalid-interrupted"); err != nil {
-		t.Fatalf("boot recovery did not quarantine the interrupted incoming file: %v", err)
-	}
+	requireQuarantined(t, incoming)
 }
 
 // TestOpenRecoversInterruptedPendingSnapshotAfterInstall covers the other

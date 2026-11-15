@@ -238,9 +238,7 @@ func TestOpenQuarantinesNullScanRequiredColumnSnapshot(t *testing.T) {
 			if len(rows) != 1 || rows[0].ID != "keep-old" {
 				t.Fatalf("live rows after rejection = %#v, want keep-old", rows)
 			}
-			if _, err := os.Stat(PendingSnapshotPath(dstPath) + pendingSnapshotInvalidSuffix); err != nil {
-				t.Fatalf("rejected pending snapshot was not quarantined: %v", err)
-			}
+			requireQuarantined(t, PendingSnapshotPath(dstPath))
 		})
 	}
 }
@@ -512,9 +510,7 @@ func TestOpenQuarantinesNullRequestIDSnapshot(t *testing.T) {
 	if len(rows) != 1 || rows[0].ID != "keep-old" {
 		t.Fatalf("live rows after rejection = %#v, want keep-old", rows)
 	}
-	if _, err := os.Stat(PendingSnapshotPath(dstPath) + pendingSnapshotInvalidSuffix); err != nil {
-		t.Fatalf("rejected pending snapshot was not quarantined: %v", err)
-	}
+	requireQuarantined(t, PendingSnapshotPath(dstPath))
 }
 
 // TestFreshRequestSchemaRequiresID pins the fresh DDL. Existing tables keep
@@ -649,9 +645,7 @@ func TestOpenQuarantinesUnscannableScanColumnSnapshot(t *testing.T) {
 			if len(rows) != 1 || rows[0].ID != "keep-old" {
 				t.Fatalf("live rows after rejection = %#v, want keep-old", rows)
 			}
-			if _, err := os.Stat(PendingSnapshotPath(dstPath) + pendingSnapshotInvalidSuffix); err != nil {
-				t.Fatalf("rejected pending snapshot was not quarantined: %v", err)
-			}
+			requireQuarantined(t, PendingSnapshotPath(dstPath))
 		})
 	}
 }

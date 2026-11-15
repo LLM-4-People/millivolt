@@ -702,9 +702,12 @@ successful live merge has no rollback: if the later config phase fails, the
 merged rows stay applied. A crash between the database and config phases is
 likewise not atomic; the pending snapshot or completed merge can be durable
 while the config file still has its previous bytes. Preserved `.incoming`,
+`.incoming.invalid-<token>`, `.incoming.invalid-interrupted-<token>`,
 `.previous`, `.snapshot-state`, and `.millivolt-restore-pending-*` files next to
 `db_path` are boot-recovery evidence and may need operator inspection after such
-a crash; do not remove them while a restore may have been in flight. The
+a crash; do not remove them while a restore may have been in flight. Quarantine
+names carry a unique token and keep their sidecars beside them, so repeated
+rejections accumulate instead of overwriting the previous one. The
 `.millivolt-restore-pending-*` copy is a hard link to the snapshot that was
 queued before the restore; it is created before the successor replaces the slot,
 so the pending queue is never empty, and a crash on either side leaves a

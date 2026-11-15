@@ -41,10 +41,7 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 		if !errors.Is(err, backup.ErrInvalidSnapshot) {
 			return nil, err
 		}
-		if qerr := quarantinePendingSnapshot(incoming, pendingSnapshotInvalidSuffix); qerr != nil {
-			log.Printf("storage: quarantine pending snapshot %s: %v", incoming, qerr)
-		}
-		log.Printf("storage: pending snapshot rejected: %v", err)
+		rejectPendingSnapshot(incoming, err)
 		return nil, nil
 	}
 	// A packed pending snapshot is a self-contained file. Any sidecar beside
@@ -62,20 +59,14 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 		if !errors.Is(err, backup.ErrInvalidSnapshot) {
 			return nil, err
 		}
-		if qerr := quarantinePendingSnapshot(incoming, pendingSnapshotInvalidSuffix); qerr != nil {
-			log.Printf("storage: quarantine pending snapshot %s: %v", incoming, qerr)
-		}
-		log.Printf("storage: pending snapshot rejected: %v", err)
+		rejectPendingSnapshot(incoming, err)
 		return nil, nil
 	}
 	if err := preflightPendingSnapshot(incoming); err != nil {
 		// An incoming file that cannot be initialized in place is no more
 		// usable than an integrity-invalid one: preserve its bytes as
 		// quarantine and keep serving the live database.
-		if qerr := quarantinePendingSnapshot(incoming, pendingSnapshotInvalidSuffix); qerr != nil {
-			log.Printf("storage: quarantine pending snapshot %s: %v", incoming, qerr)
-		}
-		log.Printf("storage: pending snapshot rejected: %v", err)
+		rejectPendingSnapshot(incoming, err)
 		return nil, nil
 	}
 	a := &snapshotAdmission{path: path}
@@ -83,6 +74,22 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+// rejectPendingSnapshot preserves a rejected incoming file and logs both the
+// rejection and the preserved name. A failed quarantine logs the rename error
+// too but leaves the file at its original name for the next boot to classify
+// again, so admission still declines to install it.
+func rejectPendingSnapshot(incoming string, reason error) {
+	quarantined, err := quarantinePendingSnapshot(incoming, pendingSnapshotInvalidSuffix)
+	if err != nil {
+		log.Printf("storage: quarantine pending snapshot %s: %v", incoming, err)
+	}
+	if quarantined != "" {
+		log.Printf("storage: pending snapshot rejected: %v (preserved as %s)", reason, quarantined)
+		return
+	}
+	log.Printf("storage: pending snapshot rejected: %v", reason)
 }
 
 // install moves the live database aside and renames the preflighted incoming

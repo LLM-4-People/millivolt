@@ -274,9 +274,11 @@ func restorePendingSnapshot(path, previous, state string) error {
 	if _, err := os.Stat(incoming); err == nil {
 		// Failing here must not fall through to admission: re-admitting the
 		// interrupted file is exactly what this fence exists to prevent.
-		if err := quarantinePendingSnapshot(incoming, pendingSnapshotInterruptedSuffix); err != nil {
+		quarantined, err := quarantinePendingSnapshot(incoming, pendingSnapshotInterruptedSuffix)
+		if err != nil {
 			return fmt.Errorf("quarantine interrupted pending snapshot: %w", err)
 		}
+		log.Printf("storage: preserved interrupted pending snapshot as %s", quarantined)
 	} else if !os.IsNotExist(err) {
 		return err
 	}

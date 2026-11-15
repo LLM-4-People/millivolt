@@ -3,6 +3,8 @@ package storage
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 )
 
 // pendingSnapshotSuffix is the validated SQLite file a Settings restore
@@ -84,23 +86,76 @@ func RemovePendingSnapshot(path string) error {
 	return removeIfExists(path)
 }
 
-// quarantinePendingSnapshot preserves rejected bytes under a diagnostic name
-// instead of deleting them. Callers decide whether a failed rename is fatal:
-// an integrity/preflight rejection can leave the file for the next boot, while
-// interrupted-admission recovery must not fall through to admitting it again.
+// quarantinePendingSnapshot preserves rejected bytes under a unique
+// diagnostic name instead of deleting them, and returns the preserved name so
+// the caller can report it. A fixed name would overwrite the evidence of an
+// earlier rejection, so the suffix carries a monotonic token; a genuinely
+// occupied candidate (clock collision or a manual copy) steps to the next
+// number and never reuses a name. Callers decide whether a failed rename is
+// fatal: an integrity/preflight rejection can leave the file for the next boot,
+// while interrupted-admission recovery must not fall through to admitting it
+// again.
+//
 // Sidecars move first: a crash leaves the main at its original name so the next
 // boot classifies the whole set again, and no stale WAL can attach to a later
 // incoming file. The quarantine suffix goes on the main name before the SQLite
-// sidecar suffix (incoming.invalid-wal), so the whole quarantined set shares
-// the protected base spelling the startup sweep's path fence knows.
-func quarantinePendingSnapshot(incoming, suffix string) error {
-	quarantined := incoming + suffix
+// sidecar suffix (incoming.invalid-<token>-wal), so the whole quarantined set
+// shares the protected base spelling the startup sweep's path fence knows.
+func quarantinePendingSnapshot(incoming, suffix string) (string, error) {
+	quarantined, err := uniqueQuarantinePath(incoming, suffix)
+	if err != nil {
+		return "", err
+	}
 	for _, sidecar := range snapshotSidecarSuffixes {
 		if err := os.Rename(incoming+sidecar, quarantined+sidecar); err != nil && !os.IsNotExist(err) {
-			return err
+			return quarantined, err
 		}
 	}
-	return os.Rename(incoming, quarantined)
+	if err := os.Rename(incoming, quarantined); err != nil {
+		return quarantined, err
+	}
+	return quarantined, nil
+}
+
+// uniqueQuarantinePath picks the diagnostic name for one preserved rejection.
+// The token is the current nanosecond in base 36; an existing main or sidecar
+// of the same candidate increments a numeric tail, so two rejections in the
+// same clock tick still keep both files.
+func uniqueQuarantinePath(incoming, suffix string) (string, error) {
+	base := incoming + suffix + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	for n := 0; ; n++ {
+		candidate := base
+		if n > 0 {
+			candidate = base + "-" + strconv.Itoa(n)
+		}
+		used, err := quarantineNameUsed(candidate)
+		if err != nil {
+			return "", err
+		}
+		if !used {
+			return candidate, nil
+		}
+	}
+}
+
+func quarantineNameUsed(path string) (bool, error) {
+	names := append([]string{path}, path+"-wal", path+"-shm", path+"-journal")
+	for _, name := range names {
+		if _, err := os.Lstat(name); err == nil {
+			return true, nil
+		} else if !os.IsNotExist(err) {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+// quarantinedPendingGlob matches every preserved rejection name for incoming,
+// including the interrupted spelling: both begin with the invalid suffix and a
+// separation hyphen. Callers that only need "some evidence was kept" (tests,
+// operator tooling) match the glob instead of one exact name.
+func quarantinedPendingGlob(incoming string) string {
+	return incoming + pendingSnapshotInvalidSuffix + "-*"
 }
 
 // removeSnapshotSidecars removes every SQLite sidecar for path. It is the one

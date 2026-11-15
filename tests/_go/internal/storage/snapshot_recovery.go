@@ -202,8 +202,8 @@ func TestRecoveryPreservesCommittedWALAcrossRenameSteps(t *testing.T) {
 				t.Fatalf("recovery left the incoming file: %v", err)
 			}
 			if !tc.wantCommitted {
-				if _, err := os.Stat(incoming + ".invalid-interrupted"); err != nil && tc.incoming != nil {
-					t.Fatalf("interrupted incoming was not quarantined: %v", err)
+				if tc.incoming != nil {
+					requireQuarantined(t, incoming)
 				}
 				if state, err := readSnapshotState(path); err != nil || state != "" {
 					t.Fatalf("pending marker after recovery = %q, %v; want removed", state, err)

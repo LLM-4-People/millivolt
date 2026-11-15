@@ -47,6 +47,21 @@ func requireLiveRow(t *testing.T, path, id string) {
 	}
 }
 
+// requireQuarantined fails unless incoming left at least one preserved
+// rejection behind, and returns the preserved main name. Quarantine names are
+// unique, so callers match the diagnostic prefix instead of one fixed name.
+func requireQuarantined(t *testing.T, incoming string) string {
+	t.Helper()
+	matches, err := filepath.Glob(quarantinedPendingGlob(incoming))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 {
+		t.Fatalf("pending snapshot %s was not quarantined", incoming)
+	}
+	return matches[0]
+}
+
 func TestAdmissionRejectsSymlinkedPendingSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	dstPath := filepath.Join(dir, "dst.db")
@@ -74,9 +89,7 @@ func TestAdmissionRejectsSymlinkedPendingSnapshot(t *testing.T) {
 	if _, err := os.Lstat(incoming); !os.IsNotExist(err) {
 		t.Fatalf("symlinked pending snapshot was not consumed: %v", err)
 	}
-	if _, err := os.Lstat(incoming + pendingSnapshotInvalidSuffix); err != nil {
-		t.Fatalf("symlinked pending snapshot was not quarantined: %v", err)
-	}
+	requireQuarantined(t, incoming)
 }
 
 func TestAdmissionRejectsDirectoryPendingSnapshot(t *testing.T) {
@@ -95,9 +108,7 @@ func TestAdmissionRejectsDirectoryPendingSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireLiveRow(t, dstPath, "keep-old")
-	if _, err := os.Lstat(incoming + pendingSnapshotInvalidSuffix); err != nil {
-		t.Fatalf("directory pending snapshot was not quarantined: %v", err)
-	}
+	requireQuarantined(t, incoming)
 }
 
 func TestValidatePendingSnapshotRejectsEmptyAndHeaderless(t *testing.T) {

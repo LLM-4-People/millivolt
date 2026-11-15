@@ -76,20 +76,55 @@ func (s *Store) isBaseStagingName(base string) bool {
 	return false
 }
 
-// protectedLivePaths is the absolute safety fence for the startup sweep: the
-// live database and every file the pending-admission protocol derives from it
-// are excluded by path, regardless of whether their names happen to match a
+// livePathFence is the absolute safety fence for the startup sweep: the live
+// database and every file the pending-admission protocol derives from it are
+// excluded by path, regardless of whether their names happen to match a
 // staging pattern. This covers a db_path whose basename itself looks like
 // millivolt-snapshot-* or millivolt-backup-*, including its SQLite sidecars,
 // the pending .incoming slot, the .previous rollback set, the durable state
 // marker and quarantined admission evidence.
 //
-// The configured path is not always the live file's identity: db_path may be a
-// symlink whose resolved target has a staging-shaped basename. Both identities
-// are protected, and the admission-derived names are built from each resolved
-// directory/name, so a sweep can never unlink the file SQLite actually opened.
-// An unresolvable existing path fails the sweep closed instead of guessing.
-func (s *Store) protectedLivePaths() (map[string]struct{}, error) {
+// Quarantined evidence carries a unique token, so those names are matched by
+// prefix instead of by exact key: every preserved name begins with a base
+// quarantine spelling and the token follows the separating hyphen.
+type livePathFence struct {
+	exact              map[string]struct{}
+	quarantinePrefixes []string
+}
+
+// covers reports whether path is protected. A resolved spelling is checked too:
+// the sweep lists lexical entry names, while the fence holds the real target
+// path of a symlinked db_path.
+func (f livePathFence) covers(path string) bool {
+	if f.coversKey(protectedPathKey(path)) {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	return f.coversKey(protectedPathKey(resolved))
+}
+
+func (f livePathFence) coversKey(key string) bool {
+	if _, ok := f.exact[key]; ok {
+		return true
+	}
+	for _, prefix := range f.quarantinePrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// protectedLivePaths builds the fence. The configured path is not always the
+// live file's identity: db_path may be a symlink whose resolved target has a
+// staging-shaped basename. Both identities are protected, and the
+// admission-derived names are built from each resolved directory/name, so a
+// sweep can never unlink the file SQLite actually opened. An unresolvable
+// existing path fails the sweep closed instead of guessing.
+func (s *Store) protectedLivePaths() (livePathFence, error) {
 	bases := []string{s.path}
 	resolved, err := filepath.EvalSymlinks(s.path)
 	if err == nil {
@@ -97,9 +132,10 @@ func (s *Store) protectedLivePaths() (map[string]struct{}, error) {
 			bases = append(bases, resolved)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("resolve live database path %q: %w", s.path, err)
+		return livePathFence{}, fmt.Errorf("resolve live database path %q: %w", s.path, err)
 	}
 	derived := make([]string, 0, len(bases)*6)
+	fence := livePathFence{}
 	for _, base := range bases {
 		derived = append(derived,
 			base,
@@ -109,12 +145,14 @@ func (s *Store) protectedLivePaths() (map[string]struct{}, error) {
 			PendingSnapshotPath(base)+pendingSnapshotInvalidSuffix,
 			PendingSnapshotPath(base)+pendingSnapshotInterruptedSuffix,
 		)
+		fence.quarantinePrefixes = append(fence.quarantinePrefixes,
+			protectedPathKey(PendingSnapshotPath(base)+pendingSnapshotInvalidSuffix+"-"))
 	}
-	protected := make(map[string]struct{}, len(derived)*(len(snapshotSidecarSuffixes)+1))
+	fence.exact = make(map[string]struct{}, len(derived)*(len(snapshotSidecarSuffixes)+1))
 	for _, base := range derived {
-		protected[protectedPathKey(base)] = struct{}{}
+		fence.exact[protectedPathKey(base)] = struct{}{}
 		for _, suffix := range snapshotSidecarSuffixes {
-			protected[protectedPathKey(base+suffix)] = struct{}{}
+			fence.exact[protectedPathKey(base+suffix)] = struct{}{}
 		}
 	}
 	// Quarantine places every sidecar beside the quarantined main, so the
@@ -125,11 +163,11 @@ func (s *Store) protectedLivePaths() (map[string]struct{}, error) {
 		incoming := PendingSnapshotPath(base)
 		for _, quarantine := range []string{pendingSnapshotInvalidSuffix, pendingSnapshotInterruptedSuffix} {
 			for _, sidecar := range snapshotSidecarSuffixes {
-				protected[protectedPathKey(incoming+sidecar+quarantine)] = struct{}{}
+				fence.exact[protectedPathKey(incoming+sidecar+quarantine)] = struct{}{}
 			}
 		}
 	}
-	return protected, nil
+	return fence, nil
 }
 
 // protectedPathKey normalizes a path for identity comparison. Absolute keys
@@ -140,22 +178,6 @@ func protectedPathKey(path string) string {
 		return filepath.Clean(abs)
 	}
 	return filepath.Clean(path)
-}
-
-// isProtectedLivePath reports whether path is the configured live spelling or
-// resolves to the protected identity. The second check covers a database
-// directory reached through a symlink: the sweep lists lexical entry names,
-// while protectedLivePaths holds the real target path.
-func (s *Store) isProtectedLivePath(protected map[string]struct{}, path string) bool {
-	if _, ok := protected[protectedPathKey(path)]; ok {
-		return true
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return false
-	}
-	_, ok := protected[protectedPathKey(resolved)]
-	return ok
 }
 
 // sweepOrphanedStaging reclaims known snapshot/archive staging entries left by
@@ -200,7 +222,7 @@ func (s *Store) sweepOrphanedStaging(now time.Time) int {
 			// matches snapshotStagingPattern, and so must a symlink target with
 			// that shape. Resolving the entry also matches a lexical directory
 			// alias (a symlinked db_path parent) to the resolved live identity.
-			if s.isProtectedLivePath(protected, path) {
+			if protected.covers(path) {
 				continue
 			}
 			if !s.isStagingName(name) {
