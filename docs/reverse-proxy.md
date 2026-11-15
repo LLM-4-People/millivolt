@@ -69,24 +69,49 @@ It preserves the external `Host`, including a nondefault port, so browser-origin
 checks on Settings and other mutations keep working. It also overwrites
 `X-Forwarded-Proto` with this server's `$scheme`, so a TLS presentation reaches
 millivolt as `https` and the session cookie carries `Secure`; a client-supplied
-value cannot spoof it. NGINX's body-size gate is
+value cannot spoof it.
+
+The sample also resolves the client address with `real_ip`:
+
+```nginx
+set_real_ip_from 127.0.0.1;
+real_ip_header X-Forwarded-For;
+```
+
+Without it, millivolt sees this hop's address as `RemoteAddr` for every request
+and the per-source authentication throttle gets one bucket, so a single wrong
+guess locks out every operator. `set_real_ip_from` lists the addresses allowed
+to send a replacement address: this host's own loopback. If another load
+balancer, tunnel or proxy fronts NGINX, add its address range there and set
+`real_ip_recursive on` once every hop in the chain is listed. `real_ip` walks
+`X-Forwarded-For` from the right and keeps the last untrusted address, so a
+client that prepends a forged entry cannot displace the real one; NGINX's
+default `$proxy_add_x_forwarded_for` then appends the resolved address on the
+way inbound. The application reads the rightmost element and never trusts the
+left side. The resolved address is a throttle key, not an identity: keep the
+location allowlists in force.
+
+NGINX's body-size gate is
 disabled in the sample: millivolt's existing `max_request_bytes` remains the
 application limit, rather than an accidentally smaller duplicate at ingress.
 Choose edge idle timeouts for your deployment. `proxy_read_timeout` limits the
 gap between upstream reads, not the total lifetime of a stream.
 
 These behaviors follow the official [proxy module](https://nginx.org/en/docs/http/ngx_http_proxy_module.html),
-[HTTP core module](https://nginx.org/en/docs/http/ngx_http_core_module.html) and
-[HTTP/2 module](https://nginx.org/en/docs/http/ngx_http_v2_module.html).
+[HTTP core module](https://nginx.org/en/docs/http/ngx_http_core_module.html),
+[HTTP/2 module](https://nginx.org/en/docs/http/ngx_http_v2_module.html) and
+[realip module](https://nginx.org/en/docs/http/ngx_http_realip_module.html).
 
 ## Credentials and access control
 
 The sample uses a trusted IP/VPN allowlist on each location, preserving
 provider `Authorization` on `/v1` and the operator Bearer or session cookie on
 `/`. Replace each placeholder with the addresses you intend to trust for that
-plane. If another load balancer is in front of NGINX, do not trust arbitrary
-forwarded client-address headers; configure that trusted proxy boundary
-deliberately. TLS encrypts traffic but does not authorize callers.
+plane. If another load balancer is in front of NGINX, list its addresses in
+`set_real_ip_from` and switch `real_ip_recursive` on, so the trusted chain
+matches reality; a hop that appends to `X-Forwarded-For` without being listed
+is ignored on the left of the real client. TLS encrypts traffic but does not
+authorize callers.
 See NGINX's [access module](https://nginx.org/en/docs/http/ngx_http_access_module.html)
 and [TLS configuration](https://nginx.org/en/docs/http/ngx_http_ssl_module.html).
 

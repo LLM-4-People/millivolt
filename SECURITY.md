@@ -67,11 +67,14 @@ including the "new clients" comparison, and the Cursor parked-run scope. The
 recorded client, and therefore dashboard grouping and the `client` filter, also
 follow the claim.
 
-The recorded client address (`client_ip`) is likewise a hint. `X-Forwarded-For`
-is honored as sent, so a directly reachable caller can claim any address in
-it; only the operator gate's brute-force limiter keys on the real socket
-address. Do not treat `client_ip` as a verified source for rate limiting,
-allowlisting or attribution outside the proxy.
+The recorded client address (`client_ip`) is likewise a hint. It is the socket
+peer, so behind an ingress it is the ingress address; `X-Forwarded-For` is
+never read for the record. Do not treat `client_ip` as a verified source for
+rate limiting, allowlisting or attribution outside the proxy. The operator
+gate's brute-force limiter is the one exception: it keys on the rightmost
+`X-Forwarded-For` element (the address the immediate hop appended) and falls
+back to the socket address, so it distinguishes clients behind a correct
+ingress but a directly reachable caller can still pick its own bundle.
 
 Treat client scoping as a way to separate your own tools and traffic, not as a
 security boundary between mutually untrusted parties. A proxy reachable by

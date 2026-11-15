@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -1127,5 +1130,104 @@ func TestOperatorSessionCookieSecureFlag(t *testing.T) {
 				t.Fatalf("session cookie lost a canonical attribute: %+v", cookie)
 			}
 		})
+	}
+}
+
+// TestClientIPPrefersTheRightmostForwardedAddress pins the throttle key: the
+// immediate hop is the only trusted one, so only the address that hop appended
+// may count. A client can prepend anything to X-Forwarded-For, and using the
+// first element would hand it a fresh bucket per guess.
+func TestClientIPPrefersTheRightmostForwardedAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		remote    string
+		forwarded string
+		want      string
+	}{
+		{"no header falls back to the peer", "192.0.2.9:5000", "", "192.0.2.9"},
+		{"the appended element wins over a forged prefix", "127.0.0.1:5000", "10.9.9.9, 198.51.100.7", "198.51.100.7"},
+		{"a forged suffix after whitespace still loses", "127.0.0.1:5000", "198.51.100.7 ,  10.0.0.1", "10.0.0.1"},
+		{"a port is stripped", "127.0.0.1:5000", "198.51.100.7:44321", "198.51.100.7"},
+		{"a bracketed IPv6 is normalized", "127.0.0.1:5000", "[2001:db8::7]:443", "2001:db8::7"},
+		{"bare IPv6 is accepted", "127.0.0.1:5000", "2001:db8::7", "2001:db8::7"},
+		{"unparseable elements are skipped", "127.0.0.1:5000", "junk, 198.51.100.7, not-an-ip", "198.51.100.7"},
+		{"an all-junk header falls back to the peer", "192.0.2.9:5000", "junk", "192.0.2.9"},
+		{"an unparseable peer is named", "not-an-address", "", "invalid"},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil)
+		r.RemoteAddr = tc.remote
+		if tc.forwarded != "" {
+			r.Header.Set("X-Forwarded-For", tc.forwarded)
+		}
+		if got := clientIP(r); got != tc.want {
+			t.Errorf("%s: clientIP = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestAuthLimiterLogsTheThresholdCrossingOnce pins the observable side of the
+// throttle: crossing the threshold is logged exactly once per source, so an
+// operator can see a brute-force run begin without a line per guess.
+func TestAuthLimiterLogsTheThresholdCrossingOnce(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	var l authLimiter
+	now := time.Now()
+	for range 3 * authFailureThreshold {
+		l.failure("198.51.100.7", now)
+	}
+	if got := strings.Count(buf.String(), "crossed 5 rejected credentials"); got != 1 {
+		t.Fatalf("threshold crossing logged %d times, want 1; log: %s", got, buf.String())
+	}
+	// A different source logs its own crossing.
+	l.failure("198.51.100.8", now)
+	l.failure("198.51.100.8", now)
+	l.failure("198.51.100.8", now)
+	l.failure("198.51.100.8", now)
+	l.failure("198.51.100.8", now)
+	if got := strings.Count(buf.String(), "198.51.100.8 crossed"); got != 1 {
+		t.Fatalf("second source crossing logged %d times, want 1; log: %s", got, buf.String())
+	}
+}
+
+// TestAuthLimiterLogsAFullTable pins the other silent bound: at the hard
+// address cap every new source costs an eviction, so previously tracked
+// sources start being forgotten. That must be visible, and only once per full
+// episode because a spoofed flood would otherwise log per request.
+func TestAuthLimiterLogsAFullTable(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	var l authLimiter
+	now := time.Now()
+	// Every entry stays fresh and unlocked, so no idle expiry frees a slot.
+	for i := range authMaxIPs {
+		l.failure(strconv.Itoa(i), now)
+	}
+	// Attempts past the cap evict, and log only the first of them.
+	for i := range 5 {
+		l.failure("overflow-"+strconv.Itoa(i), now)
+	}
+	if got := strings.Count(buf.String(), "address cap"); got != 1 {
+		t.Fatalf("full table logged %d times, want 1; log: %s", got, buf.String())
+	}
+	if len(l.entries) != authMaxIPs {
+		t.Fatalf("limiter holds %d entries, want the cap %d", len(l.entries), authMaxIPs)
+	}
+	// A lull (len drops below the cap) re-arms the report for the next
+	// episode instead of staying quiet forever.
+	l.mu.Lock()
+	for key := range l.entries {
+		delete(l.entries, key)
+		break
+	}
+	l.mu.Unlock()
+	l.failure("after-lull", now)
+	for i := range 5 {
+		l.failure("again-"+strconv.Itoa(i), now)
+	}
+	if got := strings.Count(buf.String(), "address cap"); got != 2 {
+		t.Fatalf("table refilled and logged %d times total, want 2; log: %s", got, buf.String())
 	}
 }

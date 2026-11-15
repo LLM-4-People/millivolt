@@ -1035,16 +1035,24 @@ would otherwise fall through to inference. A double-encoded separator
 inside one segment, matches no reserved route, and is ordinary inference
 traffic.
 
-Failed authentications are throttled per source IP (RemoteAddr only;
-forwarded-header chains are never trusted, since no trusted-proxy model
-exists): after five rejected credentials the IP is locked out with a window
-that doubles from 10 seconds to a 15 minute ceiling. The throttle counts only
+Failed authentications are throttled per source IP. The immediate hop is the
+only trusted one, so the throttle key is the rightmost `X-Forwarded-For`
+element (the address that hop appended) and `RemoteAddr` when the header is
+absent; a client can prepend anything, and an unparseable element is skipped.
+The shipped [NGINX example](../deploy/nginx.conf) resolves its own peer with
+`real_ip` first, so the rightmost element is the real client. A directly
+exposed instance lets a client choose its own key, which only ever relaxes the
+throttle, never the credential decision: after five rejected credentials the IP
+is locked out with a window that doubles from 10 seconds to a 15 minute
+ceiling. The throttle counts only
 presented-but-wrong credentials, so an expired-cookie dashboard polling in a
 background tab cannot lock its own operator out, and a verified credential is
 always admission: presenting the correct Bearer during a lockout clears the
 budget, because the lockout exists to rate-limit guessing, not to lock the
 operator out of their own dashboard. The map is hard-capped at 4096 source
-IPs with idle expiry, so spoofed-address floods cannot grow it. A lockout
+IPs with idle expiry, so spoofed-address floods cannot grow it; reaching the
+cap is logged once per episode, because from then on a new source evicts a
+tracked one. Crossing the five-failure threshold is logged once per source. A lockout
 response is `429` with a coarse rounded `Retry-After` and a generic JSON body,
 except `GET /` (and `/index.html`): the sign-in page is still served, read-only,
 with the same `Retry-After`, the form intact and the lockout named in its

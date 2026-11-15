@@ -286,6 +286,10 @@ func (g *operatorGate) validSession(c *http.Cookie) bool {
 type authLimiter struct {
 	mu      sync.Mutex
 	entries map[string]*ipState
+	// fullLogged makes the at-capacity report one line per full episode
+	// instead of one per evicted request; it clears as soon as the table has
+	// room again.
+	fullLogged bool
 }
 
 type ipState struct {
@@ -294,12 +298,47 @@ type ipState struct {
 	lastSeen    time.Time
 }
 
+// clientIP is the throttle key for one request: the source address the client
+// was seen from. The immediate hop is the only trusted one, so the RIGHTMOST
+// X-Forwarded-For element wins - that is the address the last proxy appended,
+// which a client cannot forge by prepending to the header. NGINX's default
+// $proxy_add_x_forwarded_for appends rather than overwrites, and the shipped
+// example resolves its own peer first (real_ip), so the rightmost element is
+// the real client. A parser-friendly address is required; an element that is
+// not an IP (a hostname, junk) is skipped rather than used as a fresh,
+// attacker-chosen bucket. A directly exposed instance still lets a client pick
+// its own key by setting the header: the throttle is a rate limit, never the
+// credential decision.
 func clientIP(r *http.Request) string {
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			if addr, ok := forwardedAddress(parts[i]); ok {
+				return addr
+			}
+		}
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return "invalid"
 	}
 	return host
+}
+
+// forwardedAddress normalizes one X-Forwarded-For element. Proxies send a bare
+// address; some append a port or bracket an IPv6 literal, so both shapes are
+// accepted through the same split.
+func forwardedAddress(element string) (string, bool) {
+	element = strings.TrimSpace(element)
+	if host, _, err := net.SplitHostPort(element); err == nil {
+		element = host
+	}
+	element = strings.Trim(element, "[]")
+	ip := net.ParseIP(element)
+	if ip == nil {
+		return "", false
+	}
+	return ip.String(), true
 }
 
 // locked reports whether the IP is currently locked out and for how long
@@ -334,9 +373,25 @@ func (l *authLimiter) failure(ip string, now time.Time) time.Duration {
 	if !ok {
 		if len(l.entries) >= authMaxIPs {
 			l.evictLocked(now)
-		}
-		if len(l.entries) >= authMaxIPs {
-			return 0 // at capacity even after eviction: deny without tracking
+			if len(l.entries) >= authMaxIPs {
+				// Nothing could be freed: the source is denied without being
+				// tracked, so its failures never escalate to a lockout.
+				if !l.fullLogged {
+					log.Printf("operator gate: failure table holds its %d address cap and cannot free a slot; new sources are denied without tracking", authMaxIPs)
+					l.fullLogged = true
+				}
+				return 0
+			}
+			// The cap is a hard memory bound, so a genuinely new source costs
+			// an eviction and a previously tracked source is forgotten from
+			// now on. Logged once per full episode, not per request: under a
+			// spoofed flood every request would otherwise add a line.
+			if !l.fullLogged {
+				log.Printf("operator gate: failure table at its %d address cap; the oldest entry was evicted for a new source", authMaxIPs)
+				l.fullLogged = true
+			}
+		} else {
+			l.fullLogged = false
 		}
 		state = &ipState{}
 		l.entries[ip] = state
@@ -345,6 +400,11 @@ func (l *authLimiter) failure(ip string, now time.Time) time.Duration {
 	state.failures++
 	if state.failures < authFailureThreshold {
 		return 0
+	}
+	if state.failures == authFailureThreshold {
+		// The crossing is logged once per source, not on every later attempt:
+		// the dashboard would otherwise gain a line per guess.
+		log.Printf("operator gate: %s crossed %d rejected credentials; lockouts start now", ip, authFailureThreshold)
 	}
 	lockout := authLockoutBase << min(state.failures-authFailureThreshold, 16)
 	if lockout > authLockoutMax || lockout <= 0 {
