@@ -1206,6 +1206,12 @@ module.exports = async function operatorMenus(H) {
           // parks everything lived only in a hover title.
           check('the pause head offers a one-click hold naming its scope and bound',
             text('#oc-pane [data-oc-quick-hold]') === 'hold all 15m');
+          // The incident shortcut is the section's one filled commit; the
+          // sibling "new hold" is a plain control, so two accents never sit
+          // side by side.
+          check('the incident shortcut alone carries the accent',
+            d.querySelector('#oc-pane [data-oc-quick-hold]').classList.contains('btn-accent') &&
+            !d.querySelector('#oc-pane [data-oc-new="pause"]').classList.contains('btn-accent'));
           click('#oc-pane [data-oc-quick-hold]');
           check('a one-click hold posts a bounded all-traffic hold',
             await settleUntil(() => posts.length === 1) &&

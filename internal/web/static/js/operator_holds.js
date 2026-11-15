@@ -125,9 +125,10 @@ function ocRenderPause() {
       // The label names the scope. "hold 15m" read as a duration preset for
       // the composer beside it, and its blast radius lived only in the title,
       // which a touch operator never sees. It stays one click: this is the
-      // incident shortcut, and a dialog would defeat it.
-      : `<button type="button" class="btn" data-oc-quick-hold title="hold all traffic for ${escapeHtml(ocDurationText('pause', ocQuickHoldDuration))}">hold all ${escapeHtml(ocQuickHoldDuration)}</button>` +
-        `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button>`;
+      // incident shortcut, so it is the one accent action on the section and
+      // "new hold" beside it is a plain control.
+      : `<button type="button" class="btn btn-accent" data-oc-quick-hold title="hold all traffic for ${escapeHtml(ocDurationText('pause', ocQuickHoldDuration))}">hold all ${escapeHtml(ocQuickHoldDuration)}</button>` +
+        `<button type="button" class="btn" data-oc-new="pause">new hold</button>`;
   const entries = holds.map(hold => {
     const scope = ocHoldScopePhrase(hold);
     // The countdown is the side column's fact; the meta line carries only the
