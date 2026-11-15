@@ -272,25 +272,33 @@ function renderRequests(recs) {
   scheduleLogFill();
 }
 
+// PILL_EDITS is the pill's data-edit vocabulary in one table: a state pill
+// opens its matching operator rule, or a new draft scoped to the record when
+// the rule has ended. The pills are painted in two places (the log rows and
+// the detail drawer), so activation is one function both roots delegate to.
+const PILL_EDITS = [
+  ['.pill.paused[data-edit-pause]', 'pause'],
+  ['.pill.debug[data-edit-debug]', 'capture'],
+  ['.pill.throttled[data-edit-limit]', 'limit'],
+];
+function activatePillEdit(e) {
+  const hit = PILL_EDITS.find(([sel]) => e.target.closest(sel));
+  if (!hit) return false;
+  e.stopPropagation();
+  const tr = e.target.closest('.exp-row[data-id]');
+  // In the drawer the record identity is the open drawer's; the drawer is a
+  // modal, so it closes first or the console would open inert behind it.
+  const id = tr ? tr.dataset.id : drawerId;
+  if (!tr) closeDrawer();
+  if (id) ocOpenOperatorForRecord(hit[1], recordById(id));
+  return true;
+}
+
 // Delegated row clicks - no inline onclick interpolating the record id.
 $('tbl-requests').addEventListener('click', e => {
   // A pivot/entity link navigates via the hash router - never open the drawer.
   if (e.target.closest('a.ent-link')) return;
-  // A state pill opens its matching operator rule, or a new draft scoped to
-  // the record when the rule has ended: one table keyed by the pill's
-  // data-edit vocabulary, one branch.
-  const pillEdits = [
-    ['.pill.paused[data-edit-pause]', 'pause'],
-    ['.pill.debug[data-edit-debug]', 'capture'],
-    ['.pill.throttled[data-edit-limit]', 'limit'],
-  ];
-  for (const [sel, kind] of pillEdits) {
-    if (!e.target.closest(sel)) continue;
-    e.stopPropagation();
-    const tr = e.target.closest('.exp-row[data-id]');
-    if (tr) ocOpenOperatorForRecord(kind, recordById(tr.dataset.id));
-    return;
-  }
+  if (activatePillEdit(e)) return;
   // The retry badge toggles the absorbed-attempt sub-rows (collapsed default).
   const tog = e.target.closest('.retry-toggle[data-retry-for]');
   if (tog) {
@@ -309,6 +317,10 @@ $('tbl-requests').addEventListener('click', e => {
   if (tr && tr.dataset.attempt !== undefined) openDrawerAttempt(tr.dataset.id, tr.dataset.attempt);
   else if (tr) openDrawer(tr.dataset.id);
 });
+
+// The drawer paints the same live pills in its status row; a pressed pill must
+// act there too, not only in the log.
+$('drawer').addEventListener('click', activatePillEdit);
 
 // An attempt sub-row is a row, not a control, so it needs the keyboard press
 // that a row cannot get from the browser. The main rows already carry the

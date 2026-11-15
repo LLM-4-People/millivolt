@@ -76,6 +76,30 @@ module.exports = async function drawerRedesign(H) {
   check('live pause and throttle flags are explicit rows',
     pausedDetail.includes('<span class="k">paused</span><span class="v">true</span>') &&
     pausedDetail.includes('<span class="k">throttled</span><span class="v">true</span>'));
+  check('the drawer paints the live pill as a button too', (() => {
+    const root = d.createElement('div');
+    root.innerHTML = pausedDetail;
+    const pill = root.querySelector('.d-hero .pill.paused');
+    return pill?.tagName === 'BUTTON' && pill.type === 'button' &&
+      pill.hasAttribute('data-edit-pause');
+  })());
+  {
+    // Pressing it must act where it is painted: the drawer closes (it is the
+    // modal) and the console opens on the record's hold.
+    const liveId = 'drawer-pill-live';
+    fire('begin', {record: {...mkRec(liveId, 0), live: true, paused: true, stream: true}, in_flight: 1});
+    await settleUntil(() => !!w.eval(`recordById('${liveId}')`));
+    w.openDrawer(liveId);
+    d.querySelector('#drawer .d-hero .pill.paused')?.click();
+    check('a pressed pill in the drawer closes it and opens the console',
+      !d.getElementById('drawer').classList.contains('open') &&
+      !d.getElementById('operator-console').hidden);
+    w.closeOperatorConsole();
+    fire('end', {record: {...mkRec(liveId, 0), paused: false}, in_flight: 0});
+    await settleUntil(() => !w.eval(`!!recordById('${liveId}')?.live`));
+    // The rest of the section reads the original drawer.
+    w.openDrawer('redesign');
+  }
 
   const cleanDetail = w.formatDetail({...mkRec('clean-200'), status_code: 200});
   const limitedDetail = w.formatDetail({...mkRec('limited-429'), status_code: 429});
