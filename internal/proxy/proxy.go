@@ -246,6 +246,10 @@ type Server struct {
 	// tokenRefresh coalesces concurrent expired-token exchanges for the same
 	// provider + refresh token, holding no credentials after completion.
 	tokenRefresh tokenRefreshCoalescer
+	// namePinHook is nil in production. It runs inside syncNamePins after the
+	// roster is derived and before the pins are applied, so a test can hold one
+	// derivation open while a newer roster is committed.
+	namePinHook func()
 }
 
 // cfg returns the current config snapshot. Cheap (atomic load); safe to call

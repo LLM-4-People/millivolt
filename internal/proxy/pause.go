@@ -773,6 +773,14 @@ func (s *Server) applyHolds(holds []persistedPause) error {
 // document releases its names instead of pinning them for the process lifetime.
 // Names that could not be stored because the vocabulary is entirely pinned are
 // logged, never dropped silently.
+//
+// The roster is both read and applied under the document locks. Every writer
+// commits its document under the same lock and syncs right after, so the last
+// applier is also the freshest reader: a derivation that started before a
+// commit cannot land its older roster after the newer derivation and unpin a
+// scope that now exists. Without that, the read spans (holds, sessions,
+// policies) were three independent windows and a stale writer won the apply.
+//
 // firstN returns at most n entries, for a bounded log line.
 func firstN(in []string, n int) []string {
 	if len(in) <= n {
@@ -783,6 +791,9 @@ func firstN(in []string, n int) []string {
 
 func (s *Server) syncNamePins() {
 	s.pause.mu.Lock()
+	defer s.pause.mu.Unlock()
+	s.debug.mu.Lock()
+	defer s.debug.mu.Unlock()
 	var holdClients, holdProviders, holdModels []string
 	for _, h := range s.pause.holds {
 		holdClients = append(holdClients, h.Clients...)
@@ -792,16 +803,13 @@ func (s *Server) syncNamePins() {
 		// introduced it has left the bounded ring.
 		holdModels = append(holdModels, canonicalModelList(h.Models)...)
 	}
-	s.pause.mu.Unlock()
 
-	s.debug.mu.Lock()
 	var debugClients, debugProviders, debugModels []string
 	for _, d := range s.debug.sessions {
 		debugClients = append(debugClients, d.Clients...)
 		debugProviders = append(debugProviders, d.Providers...)
 		debugModels = append(debugModels, canonicalModelList(d.Models)...)
 	}
-	s.debug.mu.Unlock()
 
 	var policyClients, policyProviders, policyModels []string
 	for _, policy := range s.scheduler.ThrottlePolicies() {
@@ -811,6 +819,9 @@ func (s *Server) syncNamePins() {
 	}
 
 	var dropped []string
+	if s.namePinHook != nil {
+		s.namePinHook()
+	}
 	dropped = append(dropped, s.pause.clients.setPins("pause", holdClients)...)
 	dropped = append(dropped, s.pause.clients.setPins("debug", debugClients)...)
 	dropped = append(dropped, s.pause.clients.setPins("limit", policyClients)...)

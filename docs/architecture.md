@@ -506,6 +506,12 @@ known-name vocabulary caches its sorted view under a set revision. Both caches
 are bounded and invalidate on content change, so bootstrap polls do not re-run
 the rules or re-sort thousands of names.
 
+Pinned names are derived from the live holds, debug sessions and limit policies,
+never accumulated, so a removed document releases its scope. The derivation
+reads and applies the whole roster under the owning document locks: every
+document commit happens under the same lock and re-derives right after, so a
+stale derivation can never overwrite a newer roster and unpin a live scope.
+
 Observer records carry server-local `time_bucket`; browser-local dates are
 presentation only. Raw names remain raw for exact export/delete semantics.
 
