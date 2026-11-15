@@ -446,6 +446,14 @@ removed, and recorded timing, token and cost values are retained. The raw online
 snapshot is temporary and never served. Treat even the derived database as
 sensitive; retained usage and timestamps can reveal activity patterns.
 
+Capture last. The gallery is a picture of the shipped dashboard, so a markup,
+CSS or layout change dates every image that shows the affected surface. Recapture
+in the same branch once the last layout edit is in, never before it, and
+recapture again if a later edit moves what an image shows. A recapture diff is
+the review set: inspect each changed file, and expect geometry changes (for
+example the request table's 8px cell padding and retry sub-rows) to come with
+them.
+
 The capture mode revalidates every row and its provenance, plus exact public
 configuration bytes, before and after browser capture. It permits only read-only
 same-origin requests: no inference, POST, purge or Settings save. Images are
