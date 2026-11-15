@@ -52,12 +52,14 @@ type aggregateFlight struct {
 // lineage read, which the fixed explorer builds under the projection read
 // lease; tests use it to sequence an append against that boundary. scan runs
 // per streamed projection row, so a test can fail inside the builder's own
-// callback.
+// callback. fold runs inside one metric-order fold body, between the captured
+// delta and the merge.
 type aggregateTestHooks struct {
 	cold    func()
 	wait    func()
 	lineage func()
 	scan    func()
+	fold    func()
 }
 
 func (a *AggAPI) testColdHook() {

@@ -273,7 +273,7 @@ func BenchmarkProjectionMetricCompact(b *testing.B) {
 				p.mu.Lock()
 				p.data.metrics = armed
 				p.mu.Unlock()
-				p.compactMetrics()
+				p.compactMetrics(nil)
 			}
 			benchmarkProjectionMetrics = p.data.metrics
 		})

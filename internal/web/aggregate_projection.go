@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"sync"
 
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
@@ -416,7 +417,7 @@ func (p *historyProjection) buildProjectionOnce(ctx context.Context, store *stor
 	p.data = data
 	p.finishBuildLocked(done)
 	if compacting {
-		go p.compactMetrics()
+		go p.compactMetrics(hooks)
 	}
 	return false, nil
 }
@@ -472,13 +473,26 @@ func (p *historyProjection) finishBuild(done chan struct{}) {
 // the write lock in one assignment. A fold whose base was replaced meanwhile is
 // discarded and retried against the live snapshot, and a shutdown that
 // interrupts a fold leaves the published order exactly as it was.
-func (p *historyProjection) compactMetrics() {
+//
+// The goroutine owns the armed flag from the moment needsCompaction set it and
+// releases it on every exit. An unwind that skipped the release would keep
+// needsCompaction from ever arming again, so pending would keep the whole delta
+// for the process lifetime. The fold body runs off the lock and mutates nothing
+// published, so a panic there only costs the fold: it is recovered and logged,
+// pending stays intact and the next append re-arms it.
+func (p *historyProjection) compactMetrics(hooks *aggregateTestHooks) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			p.releaseCompaction()
+			logging.Printf("", "aggregate: metric-order fold panicked: %v", recovered)
+		}
+	}()
 	for {
 		p.mu.Lock()
 		m := &p.data.metrics
 		if m.pending.sampleCount() < metricOrderPendingSamples {
-			m.compacting = false
 			p.mu.Unlock()
+			p.releaseCompaction()
 			return
 		}
 		base, pending := m.base, m.pending
@@ -488,6 +502,9 @@ func (p *historyProjection) compactMetrics() {
 		covered := pending.maxRow()
 		p.mu.Unlock()
 
+		if hooks != nil && hooks.fold != nil {
+			hooks.fold()
+		}
 		merged := mergeMetricOrderSets(base, pending)
 
 		p.mu.Lock()
@@ -502,6 +519,15 @@ func (p *historyProjection) compactMetrics() {
 		m.view = &metricOrderView{}
 		p.mu.Unlock()
 	}
+}
+
+// releaseCompaction clears the arm so a later threshold crossing folds again. It
+// is the one release owner for the normal exit and the panic recovery; the fold
+// body never panics while holding the projection lock.
+func (p *historyProjection) releaseCompaction() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.data.metrics.compacting = false
 }
 
 func (p *historyProjection) finishBuildLocked(done chan struct{}) {

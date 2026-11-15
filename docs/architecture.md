@@ -500,7 +500,11 @@ samples): a catch-up append folds only its new samples, so it stays
 O(delta log delta) regardless of history, and reaching the bound arms one
 background fold that runs off the request and publishes the merged base under a
 one-assignment write. Readers keep the current base and pending until then, so
-an interrupted fold only leaves the published order in place. An append that
+an interrupted fold only leaves the published order in place. The fold owns its
+armed flag behind a deferred release: an unwind there (recovered and logged)
+clears the arm with the pending delta intact, so the next append folds again
+instead of the flag staying set and pending keeping the whole delta for the
+process lifetime. An append that
 crosses the bound at one million rows costs 0.47-1.54 ms and 3.96 MB instead of
 12.0-15.7 ms and 52.2 MB; the fold itself still costs 12.9 ms and 48 MB, now off
 the request (`BenchmarkProjectionMetricAppend`). Chart and explorer
