@@ -850,33 +850,35 @@ func (f PurgeFilterInput) Validate() error {
 }
 
 // IsEmpty reports whether the filter constrains nothing. An empty filter is the
-// delete-everything command, and the MCP server refuses to send it.
+// delete-everything command, and the MCP server refuses to send it. It reads the
+// rendered document so a whitespace-only field counts as unset exactly like the
+// wire does.
 func (f PurgeFilterInput) IsEmpty() bool {
-	return f.Provider == "" && f.Model == "" && f.Client == "" && f.ConversationID == "" &&
-		f.ErrorType == "" && f.StatusCode == 0 && !f.HasError && !f.HasDebug &&
-		f.BeforeMs == 0 && f.AfterMs == 0
+	return len(f.Document()) == 0
 }
 
-// Document renders the filter in the proxy's exact wire shape. Zero values are
-// omitted so the proxy reads them as "no constraint", never as a match on 0.
-// This is the one owner of the purge request shape, shared with the operator
-// command; the tool-facing field "has_debug" maps to the proxy's "debug" here.
+// Document renders the filter in the proxy's exact wire shape. String fields
+// are trimmed once here, so a padded model or provider name previews its own
+// rows instead of zero. Zero values are omitted so the proxy reads them as "no
+// constraint", never as a match on 0. This is the one owner of the purge
+// request shape, shared with the operator command; the tool-facing field
+// "has_debug" maps to the proxy's "debug" here.
 func (f PurgeFilterInput) Document() map[string]any {
 	document := map[string]any{}
-	if f.Provider != "" {
-		document["provider"] = f.Provider
+	if v := strings.TrimSpace(f.Provider); v != "" {
+		document["provider"] = v
 	}
-	if f.Model != "" {
-		document["model"] = f.Model
+	if v := strings.TrimSpace(f.Model); v != "" {
+		document["model"] = v
 	}
-	if f.Client != "" {
-		document["client"] = f.Client
+	if v := strings.TrimSpace(f.Client); v != "" {
+		document["client"] = v
 	}
-	if f.ConversationID != "" {
-		document["conversation_id"] = f.ConversationID
+	if v := strings.TrimSpace(f.ConversationID); v != "" {
+		document["conversation_id"] = v
 	}
-	if f.ErrorType != "" {
-		document["error_type"] = f.ErrorType
+	if v := strings.TrimSpace(f.ErrorType); v != "" {
+		document["error_type"] = v
 	}
 	if f.StatusCode != 0 {
 		document["status_code"] = f.StatusCode

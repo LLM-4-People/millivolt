@@ -1557,3 +1557,44 @@ func TestCaptureDurationVocabularyMatchesSchemaTags(t *testing.T) {
 		t.Fatal("validateCaptureDuration accepted a value outside the shared list")
 	}
 }
+
+// TestPurgeFilterTrimsNames pins H22: a padded stored name is trimmed once in
+// the wire owner, so the preview counts the named rows instead of zero, and a
+// whitespace-only field counts as unset for the empty-filter guard.
+func TestPurgeFilterTrimsNames(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodPost, purgeCountPat, `{"count":1}`)
+	service := newTestService(t, proxy, Limits{})
+	filter := PurgeFilterInput{
+		Provider: " local ", Model: " model ", Client: " client ",
+		ConversationID: " conversation ", ErrorType: " upstream ",
+	}
+	if _, err := service.purgePreview(context.Background(), PurgePreviewInput{Filter: filter}); err != nil {
+		t.Fatal(err)
+	}
+	requests := proxy.requests()
+	if len(requests) != 1 {
+		t.Fatalf("preview requests = %d, want 1", len(requests))
+	}
+	var document struct {
+		Filter map[string]string `json:"filter"`
+	}
+	if err := json.Unmarshal([]byte(requests[0].Body), &document); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"provider": "local", "model": "model", "client": "client",
+		"conversation_id": "conversation", "error_type": "upstream",
+	}
+	if !reflect.DeepEqual(document.Filter, want) {
+		t.Fatalf("preview filter = %#v, want %#v", document.Filter, want)
+	}
+	if !(PurgeFilterInput{Provider: "   ", Model: "\t"}).IsEmpty() {
+		t.Fatal("whitespace-only fields must count as an empty filter")
+	}
+	if _, err := service.purge(context.Background(), PurgeInput{
+		Filter: PurgeFilterInput{Provider: " "}, Confirmation: PurgeConfirmation, PreviewToken: "x",
+	}); err == nil || !strings.Contains(err.Error(), "constrain at least one") {
+		t.Fatalf("purge with a blank filter = %v, want the empty-filter refusal", err)
+	}
+}
