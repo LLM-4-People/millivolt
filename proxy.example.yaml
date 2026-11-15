@@ -147,8 +147,9 @@ capture_body_preview: false
 #   type: duration · range 1h..168h · default 24h
 debug_capture_ttl: 24h
 
-# Cap on one debug capture (request body plus client-facing response bytes). Past the cap
-# the rest is dropped and the capture is marked truncated.
+# Cap on one debug capture: retained headers are charged first and the remainder is split
+# between the request body and the client-facing response bytes. Past the cap the rest is
+# dropped and the capture is marked truncated.
 # Hot-reload: yes.
 #   type: bytes · range 4KiB..16MiB · default 1MiB
 debug_capture_max_bytes: 1MiB

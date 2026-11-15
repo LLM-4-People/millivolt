@@ -207,6 +207,34 @@ func headersToHAR(h http.Header, authHeader string) []harNV {
 	return out
 }
 
+// harBytes is the retained name+value weight of one header list. The capture
+// cap charges it like body bytes; JSON escaping can add a little more, but the
+// budget needs a deterministic measure, not an encoded-size estimate.
+func harBytes(h []harNV) int {
+	total := 0
+	for _, field := range h {
+		total += len(field.Name) + len(field.Value)
+	}
+	return total
+}
+
+// capDebugBody cuts an already captured body view down to limit and keeps the
+// observed size. The cut backs off to a rune boundary for the same reason as
+// every other retained string: the document is JSON text, not raw bytes.
+func capDebugBody(b debugBody, limit int) debugBody {
+	if limit >= len(b.Raw) {
+		return b
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(b.Raw[cut]) {
+		cut--
+	}
+	return debugBody{Raw: b.Raw[:cut], Bytes: b.Bytes, Truncated: true}
+}
+
 type debugTap struct {
 	reqHdr   []harNV
 	reqBody  debugBody
@@ -310,6 +338,16 @@ func (s *Server) prepareDebugCapture(tap *debugTap, rec *metrics.Record) func() 
 // completed record is published, so its cost delays neither the live end nor
 // durable accounting; the pending marker stays registered until it returns.
 func (s *Server) saveDebugCapture(tap *debugTap, rec *metrics.Record, now, expires time.Time) {
+	// The cap is one capture budget, not a body-only budget: the retained
+	// header maps are charged first and the remainder is split between the two
+	// bodies. Without the charge a hostile header set could multiply the
+	// document far past the configured size while the bodies stayed at half
+	// each. The streaming caps in beginDebugTap still bound memory before this.
+	reqHdr := tap.reqHdr
+	respHdr := headersToHAR(headerFromMap(rec.ResponseHeaders), "")
+	remaining := max(int(s.cfg().DebugCaptureMaxBytes)-harBytes(reqHdr)-harBytes(respHdr), 0)
+	reqBody := capDebugBody(tap.reqBody, remaining/2)
+	respBody := capDebugBody(tap.respBody.body(), remaining-remaining/2)
 	doc := map[string]any{
 		"schema":           debugSchema,
 		"id":               rec.ID,
@@ -351,13 +389,13 @@ func (s *Server) saveDebugCapture(tap *debugTap, rec *metrics.Record, now, expir
 		"usage": rec.Usage,
 		"cost":  rec.Cost,
 		"request": map[string]any{
-			"headers": tap.reqHdr,
-			"body":    tap.reqBody,
+			"headers": reqHdr,
+			"body":    reqBody,
 			"url":     tap.upstream,
 		},
 		"response": map[string]any{
-			"headers": headersToHAR(headerFromMap(rec.ResponseHeaders), ""),
-			"body":    tap.respBody.body(),
+			"headers": respHdr,
+			"body":    respBody,
 		},
 		"attempts": rec.Attempts,
 	}

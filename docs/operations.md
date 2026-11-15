@@ -1358,8 +1358,9 @@ Do not assume that every model spelling is an independent exact scope.
 
 The session timer selects future captures. `debug_capture_ttl` separately
 controls retained capture lifetime after completion, and
-`debug_capture_max_bytes` bounds captured request plus client-facing response
-bytes. Oversized captures are marked truncated. `debug_store_max_bytes`
+`debug_capture_max_bytes` bounds one capture document: retained headers are
+charged first and the remainder is split between the request and the
+client-facing response body. Oversized captures are marked truncated. `debug_store_max_bytes`
 (default 512 MiB) caps the whole capture sidecar; once the next write would
 exceed it, new captures are skipped and TTL expiry frees capacity again.
 Capture writes are counted in bytes, not characters. The request drawer loads an

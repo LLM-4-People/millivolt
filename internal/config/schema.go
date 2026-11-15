@@ -144,7 +144,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "How long a full debug capture (bodies and headers) is kept after the request finishes. Operator debug sessions choose which traffic is captured; this is blob retention, not the session timer.",
 			Kind: KindDuration, HotReload: true, Min: num(float64(DebugCaptureTTLMin)), Max: num(float64(DebugCaptureTTLMax))},
 		{Key: "debug_capture_max_bytes", Category: "request", Label: "Debug capture max bytes",
-			Help: "Cap on one debug capture (request body plus client-facing response bytes). Past the cap the rest is dropped and the capture is marked truncated.",
+			Help: "Cap on one debug capture: retained headers are charged first and the remainder is split between the request body and the client-facing response bytes. Past the cap the rest is dropped and the capture is marked truncated.",
 			Kind: KindBytes, HotReload: true, Min: num(float64(DebugCaptureMaxBytesMin)), Max: num(float64(DebugCaptureMaxBytesMax))},
 		{Key: "debug_store_max_bytes", Category: "request", Label: "Debug store max bytes",
 			Help: "Total durable debug-capture sidecar cap. New captures are skipped once the next write would exceed it; TTL expiry frees capacity. Bytes, not characters. 0 = unlimited. Restart required.",

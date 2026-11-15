@@ -665,3 +665,55 @@ func TestDebugCaptureFetchesBeforeAndAfterMarkerResolve(t *testing.T) {
 		t.Fatal("fetch after marker removal differs from the waiting fetches")
 	}
 }
+
+// TestDebugCaptureChargesHeadersAgainstTheCap pins H23: the configured capture
+// cap is one document budget. Retained headers are charged against it before
+// the bodies get the remainder, so a hostile header set cannot multiply the
+// stored document past the cap while each body stays at half.
+func TestDebugCaptureChargesHeadersAgainstTheCap(t *testing.T) {
+	const captureCap = 4 << 10
+	spy := &liveSpy{}
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-cap.db"))
+	t.Cleanup(func() { store.Close() })
+	cfg := config.Default()
+	cfg.DebugCaptureMaxBytes = captureCap
+	p := New(cfg, spy)
+	p.AttachPausePersist(store)
+	startDebugSession(t, p)
+
+	extra := http.Header{}
+	for i := range 3 {
+		extra.Set(fmt.Sprintf("X-Fill-%d", i), strings.Repeat("h", 1<<10))
+	}
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(strings.Repeat("r", 4<<10)))
+	})
+	rec := runDebugCaptureRequest(t, p, spy, upstream, `{"model":"m","messages":[]}`, extra)
+	raw := fetchDebugCapture(t, p, rec.ID)
+
+	var doc struct {
+		Request struct {
+			Headers []harNV   `json:"headers"`
+			Body    debugBody `json:"body"`
+		} `json:"request"`
+		Response struct {
+			Headers []harNV   `json:"headers"`
+			Body    debugBody `json:"body"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Request.Headers) < 3 {
+		t.Fatalf("retained %d request headers, want the charged set", len(doc.Request.Headers))
+	}
+	if !doc.Response.Body.Truncated {
+		t.Fatal("oversized response body was not truncated by the shared budget")
+	}
+	total := harBytes(doc.Request.Headers) + harBytes(doc.Response.Headers) +
+		len(doc.Request.Body.Raw) + len(doc.Response.Body.Raw)
+	if total > captureCap {
+		t.Fatalf("retained capture content = %d bytes, want within the %d cap", total, captureCap)
+	}
+}
