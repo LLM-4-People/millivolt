@@ -31,6 +31,24 @@ func joinUpstreamURL(baseURL, path string) string {
 // escaped path (client request or validated X-Proxy-Path) and is never
 // re-parsed as part of a concatenated URL, so an encoded ? or # cannot become
 // a query or fragment delimiter.
+// upstreamPath resolves the target's configured path override, else the
+// caller's default, and guarantees the leading slash upstreamURL expects. An
+// absent path is "/". One owner, so passthrough, discovery and the Cursor
+// transport cannot normalize differently.
+func upstreamPath(configured, fallback string) string {
+	path := configured
+	if path == "" {
+		path = fallback
+	}
+	if path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		return "/" + path
+	}
+	return path
+}
+
 func upstreamURL(baseURL, escapedPath, queryOverride, clientQuery string) (*url.URL, error) {
 	base, err := url.Parse(baseURL)
 	if err != nil {

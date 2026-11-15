@@ -33,19 +33,10 @@ func setResolvedAuth(h http.Header, t *target, key string) {
 }
 
 func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *target, key string, body []byte) (*http.Request, error) {
-	path := t.path
-	if path == "" {
-		// EscapedPath preserves the client's percent-encoding: Path alone
-		// would turn %2F, %3F and %23 into path separators or query/fragment
-		// delimiters before the upstream sees them.
-		path = r.URL.EscapedPath()
-		if path == "" {
-			path = "/"
-		}
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
+	// EscapedPath preserves the client's percent-encoding: Path alone would
+	// turn %2F, %3F and %23 into path separators or query/fragment delimiters
+	// before the upstream sees them.
+	path := upstreamPath(t.path, r.URL.EscapedPath())
 	u, err := upstreamURL(t.baseURL, path, t.query, r.URL.RawQuery)
 	if err != nil {
 		return nil, err

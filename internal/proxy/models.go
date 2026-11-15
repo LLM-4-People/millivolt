@@ -123,14 +123,7 @@ func (s *Server) serveModels(w http.ResponseWriter, r *http.Request, t *target, 
 // the base-relative default. The client's own query is empty on a discovery
 // call, so only the header override can set one.
 func modelsUpstreamURL(t *target, defaultPath string) (*url.URL, error) {
-	path := t.path
-	if path == "" {
-		path = defaultPath
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	return upstreamURL(t.baseURL, path, t.query, "")
+	return upstreamURL(t.baseURL, upstreamPath(t.path, defaultPath), t.query, "")
 }
 
 // serveOpenAIModels fetches an OpenAI-compatible upstream's /v1/models and

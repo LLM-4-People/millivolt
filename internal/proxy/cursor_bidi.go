@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"strings"
 	"time"
 
@@ -445,12 +446,21 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		pr, pw := io.Pipe()
 		upstreamCtx, cancel := context.WithCancel(httptrace.WithClientTrace(context.Background(), timing.trace(t.tlsPossible())))
 		upstreamCancel := func() { cancel(); pr.Close(); pw.Close() }
-		req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, cursorRunURL(t), pr)
+		runTarget, err := cursorRunURL(t)
 		if err != nil {
 			permit.Cancel()
 			upstreamCancel()
 			return nil, nil, nil, err
 		}
+		req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, runTarget.String(), pr)
+		if err != nil {
+			permit.Cancel()
+			upstreamCancel()
+			return nil, nil, nil, err
+		}
+		// NewRequest re-parses its URL string, where a literal "#" in the
+		// query would become a fragment; keep the structurally built URL.
+		req.URL = runTarget
 		s.setCursorHeaders(req, t, key)
 		initialFrame := providerformat.AppendConnectEnvelope(nil, clientMessage)
 		go func() { _, _ = pw.Write(initialFrame) }()
@@ -530,15 +540,15 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 	}
 }
 
-func cursorRunURL(t *target) string {
-	path := t.path
-	if path == "" {
-		path = providerformat.CursorConnectPath()
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	return t.baseURL + path
+// cursorRunURL builds the Connect run URL through the shared target owner, so
+// a base URL with a trailing slash, an X-Proxy-Path override and an
+// X-Proxy-Query override join and validate exactly like a relayed request.
+// Cursor differs from the generic builder only in the wire: a POST whose
+// enveloped duplex body is framed here, and headers from setCursorHeaders
+// rather than client forwarding.
+func cursorRunURL(t *target) (*url.URL, error) {
+	path := upstreamPath(t.path, providerformat.CursorConnectPath())
+	return upstreamURL(t.baseURL, path, t.query, "")
 }
 
 // cursorEndSend releases the send token through the shared verdict. A
