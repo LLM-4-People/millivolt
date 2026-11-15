@@ -106,7 +106,8 @@ pid_file_pid() {
   [ -f "$pid_file" ] || return 1
   pid="$(cat "$pid_file")"
   [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 )) || return 1
-  pid_carries_pid_file "$pid" "$pid_file"
+  pid_carries_pid_file "$pid" "$pid_file" || return 1
+  printf '%s' "$pid"
 }
 
 # pid_carries_pid_file reports whether pid is alive and was started with this

@@ -25,7 +25,8 @@ from .workflows_support import shell_declaration
 
 DEV_SH = ROOT / "scripts" / "dev.sh"
 PORTCLAIM = ROOT / "cmd" / "proxy" / "portclaim.go"
-OWNERS = ("go_duration_tenths", "shutdown_timeout_value", "stop_grace_tenths", "dev_db_path")
+OWNERS = ("go_duration_tenths", "shutdown_timeout_value", "stop_grace_tenths", "dev_db_path",
+          "pid_carries_pid_file", "pid_file_pid", "port_owner_pid", "running_pid", "is_running")
 
 
 def dev_script_text():
@@ -53,6 +54,42 @@ def run_bash(script, *args):
     return subprocess.run(
         ["bash", "-c", script, "bash", *args],
         capture_output=True, text=True, timeout=30, check=False)
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash is required to drive the dev lifecycle owners")
+class InstanceIdentityTests(unittest.TestCase):
+    """The pid file alone is a claim; the socket owner and its own -pid-file
+    argument are the proof. running_pid must print the proven pid, because stop
+    signals exactly that string."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="millivolt-identity-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def holder(self, port, flag=True):
+        """A live process whose cmdline carries this pid file when asked."""
+        pid_file = self.root / f"millivolt-dev-{port}.pid"
+        argv = ["bash", "-c", "sleep 10; exit 0", "bash"]
+        if flag:
+            argv += ["-pid-file", str(pid_file)]
+        proc = subprocess.Popen(argv)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.terminate)
+        pid_file.write_text(f"{proc.pid}\n", encoding="utf-8")
+        return pid_file, proc.pid
+
+    def test_running_pid_prints_the_pid_file_owner(self):
+        pid_file, pid = self.holder(18099)
+        result = run_bash(shell_harness(f'\nrunning_pid "{pid_file}"\n'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, str(pid))
+
+    def test_running_pid_refuses_a_reused_pid(self):
+        pid_file, _ = self.holder(18098, flag=False)
+        result = run_bash(shell_harness(f'\nrunning_pid "{pid_file}"\n'))
+        self.assertNotEqual(result.returncode, 0, "a process without the flag was accepted")
+        self.assertEqual(result.stdout, "")
 
 
 @unittest.skipUnless(shutil.which("bash"), "bash is required to drive the dev lifecycle owners")
