@@ -511,8 +511,12 @@
        it never shrinks and never grows, so it barely touches the log's space. */
     footer { flex-shrink: 0; }
     .kpis { flex-shrink: 0; }
+    /* Tall enough for the whole nine-dimension rail plus its toolbar. The
+       rail used to scroll after four rows in the locked layout, so half the
+       dimensions were invisible until scrolled; the pair below keeps its own
+       floor. */
     #explorer {
-      flex: 0 1 220px; min-height: 0; max-height: 220px;
+      flex: 0 1 400px; min-height: 0; max-height: 400px;
       display: flex; flex-direction: column; min-width: 0;
     }
     #explorer .xp-body { flex: 1 1 0; min-height: 0; }
