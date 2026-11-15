@@ -379,6 +379,22 @@ module.exports = async function operatorMenus(H) {
       check('the overview empty state does not promise unrestricted flow',
         emptySays('overview').includes('still apply') &&
         !emptySays('overview').includes('flow unrestricted'));
+      // The overview opens with the same four facts the page band carries, in
+      // the same readout recipe, so an operator reading the policy register
+      // first sees the traffic it acts on. Only a real failure flags the tick.
+      w.eval('kpiAgg = { requests: 2000, errors: 0, in_flight: 0, cost: 1.25, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null }');
+      w.openOperatorConsole('overview');
+      const heads = qa('#oc-pane .oc-kpis .kpi h2').map(h => h.textContent);
+      check('the overview opens with the four traffic facts in the band recipe (' + heads.join('/') + ' ' + (d.querySelector('#oc-pane .oc-kpis .kpi .val')||{textContent:''}).textContent + ')',
+        JSON.stringify(heads) === JSON.stringify(['Requests', 'In-flight', 'Error rate', 'Total cost']) &&
+        qa('#oc-pane .oc-kpis .kpi .val')[0].textContent === '2K' &&
+        !d.querySelector('#oc-pane .oc-kpis .kpi.k-err'));
+      w.eval('kpiAgg = { requests: 2000, errors: 4, in_flight: 0, cost: 1.25, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null }');
+      w.openOperatorConsole('overview');
+      check('the overview error tile flags only a real failure (' + (qa('#oc-pane .oc-kpis .kpi.k-err .val')[0]||{textContent:'none'}).textContent + ')',
+        !!d.querySelector('#oc-pane .oc-kpis .kpi.k-err') &&
+        qa('#oc-pane .oc-kpis .kpi.k-err .val')[0].textContent === '0.2%');
+      w.eval('kpiAgg = null');
       w.closeOperatorConsole();
     }
 

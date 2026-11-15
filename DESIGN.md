@@ -313,10 +313,10 @@ The shared `.mn` foundation the timeframe control and generated choice menus use
 ### Operator Console
 The header's one operator surface. A compact readout button carries a state dot and the current state words: `steady`, `paused 1 · capture 1 · limits 2`, or `restarting · step N`. The dot is muted at steady, accent when a policy is active and amber and pulsing during a restart; the trigger border follows the same state. It is a status summary, not a live region, and its accessible label carries the same words.
 
-- **Frame:** `.mn.oc` uses the shared panel shell at a 940px preferred width and `min(680px, 100dvh - 32px)` height. At 800px and below it is a bottom sheet of up to 86dvh over the shared scrim.
-- **Head:** console mark, 15px mono title and a 10px state line, the shared close button with its `esc` hint, and a 5px tick strip along the bottom edge.
-- **Rail:** six lowercase sections (overview, limits, pause, capture, export, system) in a 152px column. The active row takes the accent left edge; limits, pause and capture carry a tabular count badge. As a sheet the rail is one horizontal, thumb-scrollable strip and the active row takes an accent bottom edge.
-- **Pane:** the section workspace scrolls on its own inside the fixed frame. Rule rows are one calibration line: a 56px kind tag in the state color, the scope, the budget or schedule, and a live column with actions.
+- **Frame:** `.mn.oc` is a compact anchored panel: the shared shell at a 520px width, capped at `min(560px, calc(100dvh - 24px))` with a scrolling pane, so opening it never resizes the page around it. At 800px and below it is a bottom sheet over the shared scrim.
+- **Head:** console mark, a 12px mono title, the 10px state line and the shared close button with its `esc` hint. No tick strip: the head is a rail-toned band with one hairline.
+- **Rail:** six lowercase sections (overview, limits, pause, capture, export, system) in one horizontal, thumb-scrollable chip strip; the active chip takes an accent bottom edge and limits, pause and capture carry a tabular count badge. At 560px and below the strip becomes a three-column grid so all six stay reachable.
+- **Pane:** the section workspace scrolls on its own inside the fixed frame. Overview opens with the four traffic facts - requests, in-flight, error rate and total cost - in the page band's readout recipe, then the in-force register. Rule rows are one calibration line: a 56px kind tag in the state color, the scope, the budget or schedule, and a live column with actions.
 - **Foot:** the bounded session ledger, one line of mono receipt text and an Undo button. The ledger is page-session memory, not a durable log.
 - **Confirmation:** consequential actions use the shared operator dialog, not a second click on the trigger. Cancel takes initial focus and the confirm button names the action.
 - **Touch:** 38px controls at 800px and below on a fine pointer; the 44px target on any coarse pointer.
