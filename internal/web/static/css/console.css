@@ -618,7 +618,7 @@ button.oc-chip[aria-pressed="true"]::before {
    a rule can be edited or removed. They sit at muted ink so the state column
    still reads first. */
 .oc-rule-actions {
-  display: flex; align-items: center; justify-content: flex-end; gap: 1px;
+  display: flex; align-items: center; justify-content: flex-end; gap: 2px;
   flex: none; flex-wrap: nowrap;
 }
 .oc-icon-btn {
@@ -982,6 +982,9 @@ button.oc-chip[aria-pressed="true"]::before {
   }
   .mn.oc .oc-link { display: inline-flex; align-items: center; padding: 0 4px; }
   .mn.oc .oc-icon-btn { padding: 0 9px; }
+  /* Two adjacent 20px actions one pixel apart are one blur at a thumb: the
+     rung's targets get room between them. */
+  .mn.oc .oc-rule-actions { gap: 4px; }
   /* The readout is a header control outside .mn.oc and takes the full target
      at any narrow or coarse size, not the dense rung. */
   .op-readout-btn { min-height: var(--tap); }

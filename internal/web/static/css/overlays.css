@@ -266,11 +266,14 @@
      widens .prov-urow's grid; the preview row shares it. Below it live the
      inline validation slot (grid-span), the step trace, the real-traffic
      example table, and the tools row (templates + restore + count). */
-  .mr-row, .mr-preview { grid-template-columns: 78px minmax(120px, 1fr) 14px minmax(120px, 1fr) 52px 24px; }
+  .mr-row, .mr-preview { grid-template-columns: 78px minmax(120px, 1fr) 14px minmax(120px, 1fr) auto auto; }
   .mr-row .mr-mode, .mr-add .mr-mode { font-size: 10px; padding: 4px 5px; }
   .mr-add select { flex: 0 0 78px; }
   .mr-what { font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; }
   .mr-out { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The move buttons and the remove cross size their own tracks (auto): the
+     three reorder actions take the coarse target while a mouse keeps the
+     dense row, so a fixed column could only fit one of them. */
   .mr-move { display: flex; gap: 2px; justify-content: flex-end; }
   .mr-move button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px; font-size: 9px; line-height: 1; }
   .mr-move button:hover { color: var(--accent); }
@@ -508,5 +511,6 @@
     .ro-disclosure,
     .mr-tools select { min-height: var(--tap); }
     .mr-move button, .mr-restore { min-width: var(--tap); padding: 0 6px; }
+    .mr-move { gap: 4px; }
     .prov-x { min-width: var(--tap); min-height: var(--tap); }
   }
