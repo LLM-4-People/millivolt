@@ -43,6 +43,7 @@ type options struct {
 	chunks, upstreams               int
 	maxRSS                          float64
 	token                           string
+	allowDrops                      bool
 }
 
 func main() {
@@ -57,6 +58,7 @@ func main() {
 	flag.DurationVar(&o.timeout, "timeout", 10*time.Second, "per-request, accounting-drain and final fixture-cleanup timeout")
 	flag.DurationVar(&o.sample, "sample", 100*time.Millisecond, "proxy CPU/RSS/FD sampling cadence")
 	flag.Float64Var(&o.maxRSS, "max-rss-mib", 2048, "stop the ramp if sampled proxy RSS exceeds this safety budget")
+	flag.BoolVar(&o.allowDrops, "allow-drops", false, "treat a confirmed durable-queue drop as an overload observation instead of stopping the ramp; response failures and unbalanced accounting still stop it")
 	// The final fixture cleanup purges through the gated operator plane, so
 	// the tool needs the same credential the dev instance was started with.
 	o.token = operatorTokenFromEnv()
@@ -789,13 +791,22 @@ func run(ctx context.Context, o options) (err error) {
 				}
 			}
 		}
+		if o.allowDrops && r.StorageDropped != nil {
+			// An overload observation cannot also verify per-row tokens and
+			// cost for rows the bounded queue dropped. The invariant it can
+			// verify is the one the page publishes: durable plus dropped equals
+			// the successful requests.
+			r.AccountingOK = r.AccountingComparable &&
+				r.DurableRequests+int64(*r.StorageDropped) == int64(r.Successes)
+		}
 		if e := enc.Encode(r); e != nil {
 			return e
 		}
 		if err != nil {
 			return err
 		}
-		if r.Failures > 0 || (durable && !r.AccountingOK) || (r.StorageDropped != nil && *r.StorageDropped > 0) {
+		if r.Failures > 0 || (durable && !r.AccountingOK) ||
+			(r.StorageDropped != nil && *r.StorageDropped > 0 && !o.allowDrops) {
 			return errors.New("ramp stopped: response or durable-accounting failure")
 		}
 	}
