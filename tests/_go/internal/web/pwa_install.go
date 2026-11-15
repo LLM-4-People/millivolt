@@ -90,19 +90,46 @@ func TestPWAInstallability(t *testing.T) {
 	if !ok {
 		t.Fatal("service worker missing livePath function")
 	}
+	if !strings.Contains(liveFn, "LIVE_PATHS.includes(pathname)") {
+		t.Fatal("livePath does not consult the generated LIVE_PATHS list")
+	}
+	// The list is generated from the canonical namespace table, so the served
+	// bytes must carry every live root and its subtree prefix and must not be
+	// left as the source marker.
+	if strings.Contains(sw, "__LIVE_PATHS__") {
+		t.Fatal("service worker still carries the live-path marker")
+	}
+	startList := strings.Index(sw, "const LIVE_PATHS = ")
+	endList := -1
+	if startList >= 0 {
+		endList = strings.Index(sw[startList:], ";")
+	}
+	if startList < 0 || endList < 0 {
+		t.Fatal("service worker missing the generated LIVE_PATHS list")
+	}
+	// The list is JSON, so its strings are double-quoted; normalize so the
+	// assertions read the values, not the encoding.
+	liveList := strings.ReplaceAll(sw[startList:startList+endList], `"`, "'")
 	for _, needle := range []string{
-		"pathname === '/admin'",
-		"pathname.startsWith('/admin/')",
-		"pathname === '/session'",
-		"pathname.startsWith('/session/')",
-		"pathname === '/metrics'",
-		"pathname.startsWith('/metrics/')",
-		"pathname === '/v1'",
-		"pathname.startsWith('/v1/')",
+		`'/admin'`, `'/admin/'`, `'/session'`, `'/session/'`,
+		`'/metrics'`, `'/metrics/'`, `'/v1'`, `'/v1/'`, `'/healthz'`, `'/'`,
 	} {
-		if !strings.Contains(liveFn, needle) {
-			t.Errorf("livePath function missing %s", needle)
+		if !strings.Contains(liveList, needle) {
+			t.Errorf("generated LIVE_PATHS missing %s: %s", needle, liveList)
 		}
+	}
+	// Every live namespace in the canonical table is present, and /dash is not
+	// (its content-hashed URLs are cacheable).
+	for _, ns := range namespaces {
+		if !ns.Live {
+			continue
+		}
+		if !strings.Contains(liveList, "'"+ns.Root+"'") {
+			t.Errorf("generated LIVE_PATHS missing the live namespace %s", ns.Root)
+		}
+	}
+	if strings.Contains(liveList, "'"+DashPrefix+"'") {
+		t.Errorf("generated LIVE_PATHS contains the cacheable dash namespace: %s", liveList)
 	}
 	start := strings.Index(sw, "const SHELL_ASSETS = [")
 	end := strings.Index(sw[start+1:], "];")

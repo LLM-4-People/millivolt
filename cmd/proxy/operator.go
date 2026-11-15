@@ -23,6 +23,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
+	"github.com/LLM-4-People/millivolt/internal/web"
 )
 
 // The operator plane is the whole embedded dashboard, standardized as the
@@ -157,30 +158,17 @@ func (g *operatorGate) valid(presented string) bool {
 // gatedPath reports whether the request belongs to the dashboard/operator
 // plane. The exact namespace roots are gated too: /admin, /session, /metrics,
 // /dash and /mcp are millivolt-owned, so a look-alike path can never reach the
-// inference catch-all. A decoded backslash is read as a separator alongside a
-// slash: no Go mux pattern does, but upstream proxies and caches historically
-// have, so the namespace test cannot depend on the next hop's reading.
-// Everything else (registered /healthz, brand/PWA files and the catch-all)
-// passes untouched.
-func gatedPath(path string) bool {
-	path = strings.ReplaceAll(path, `\`, "/")
-	return path == "/" || path == "/index.html" ||
-		path == "/admin" || path == "/session" || path == "/metrics" || path == "/dash" ||
-		strings.HasPrefix(path, "/dash/") ||
-		strings.HasPrefix(path, "/metrics/") ||
-		strings.HasPrefix(path, "/admin/") ||
-		strings.HasPrefix(path, "/session/") ||
-		mcpNamespace(path)
-}
+// inference catch-all. The canonical table lives in internal/web, which also
+// generates the mux reservations and the service-worker live list, so the three
+// cannot disagree. Everything else (registered /healthz, brand/PWA files and
+// the catch-all) passes untouched.
+func gatedPath(path string) bool { return web.Gated(path) }
 
 // mcpNamespace reports the millivolt-owned /mcp namespace, normalized the same
 // way gatedPath normalizes it. The gate uses it to keep the session cookie off
 // every MCP response: /mcp is Bearer-only, so a cookie minted there would sit
 // unused in an MCP client's cookie jar as a full dashboard credential.
-func mcpNamespace(path string) bool {
-	path = strings.ReplaceAll(path, `\`, "/")
-	return path == "/mcp" || strings.HasPrefix(path, "/mcp/")
-}
+func mcpNamespace(path string) bool { return web.InNamespace(path, "/mcp") }
 
 // encodedSeparator reports whether an escaped path contains a percent-encoded
 // path separator (%2f or %5c, any hex case). ServeMux segments an escaped path

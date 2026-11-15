@@ -63,6 +63,10 @@ const dashboardVersionMarker = "__DASHBOARD_VERSION__"
 // required exactly once before loadStatic replaces every marker occurrence.
 const dashboardVersionMeta = `<meta name="dashboard-version" content="` + dashboardVersionMarker + `">`
 
+// dashboardSWLiveMarker is replaced at load with the generated never-cache
+// list, so the worker's live paths have the namespace table as their only own.
+const dashboardSWLiveMarker = "__LIVE_PATHS__"
+
 // dashboardBootstrapMarker is the sole insertion point for request-time
 // state. It remains in the static source identity; live data never changes
 // the frontend content version.
@@ -206,12 +210,21 @@ func loadStatic(fsys fs.FS) (map[string]*staticAsset, string) {
 	if strings.Count(sw, dashboardVersionMarker) != 1 {
 		panic("load dashboard assets: service worker must contain exactly one dashboard version marker")
 	}
+	if strings.Count(sw, dashboardSWLiveMarker) != 1 {
+		panic("load dashboard assets: service worker must contain exactly one live-path marker")
+	}
 	version := etagHex([]byte(identity.String()))
+	livePaths, err := json.Marshal(LiveWorkerPaths())
+	if err != nil {
+		panic(fmt.Errorf("encode live worker paths: %w", err))
+	}
 	// Every shell marker is intentional: the meta stamp, one per local asset
 	// URL, and the service worker's cache name. Replace all of them so the
 	// served index never advertises the source spelling.
 	cache[dashboardIndexPath] = newStaticAsset([]byte(strings.ReplaceAll(index, dashboardVersionMarker, version)), true)
-	cache[dashboardSWPath] = newStaticAsset([]byte(strings.Replace(sw, dashboardVersionMarker, version, 1)), true)
+	generatedSW := strings.Replace(sw, dashboardVersionMarker, version, 1)
+	generatedSW = strings.Replace(generatedSW, dashboardSWLiveMarker, string(livePaths), 1)
+	cache[dashboardSWPath] = newStaticAsset([]byte(generatedSW), true)
 	return cache, version
 }
 

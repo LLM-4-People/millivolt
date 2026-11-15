@@ -91,41 +91,49 @@ type reservedNamespace struct {
 }
 
 // operatorNamespaces returns the reserved operator-namespace registrations,
-// built from the boot config. The /admin, /metrics and /mcp namespaces own no
-// unregistered handler: reserving both the roots and the subtrees means
-// neither the unauthenticated gate nor an authenticated request can forward a
-// namespace look-alike to the upstream catch-all. The /session root is the
-// registered handshake itself: it is the one open operator route, kept outside
-// /admin so an external authentication layer can front the admin plane without
-// gating millivolt's own login, and its subtree row reserves every unregistered
-// spelling. Registered exact patterns (pause, config, agg/*, ...) keep mux
-// precedence. newOperatorMux installs exactly this set, and the route tests
-// drive that same function, so a dropped /admin, /session or /metrics
+// generated from the canonical table in internal/web. The /admin, /metrics and
+// /mcp namespaces own no unregistered handler: reserving both the roots and the
+// subtrees means neither the unauthenticated gate nor an authenticated request
+// can forward a namespace look-alike to the upstream catch-all. The /session
+// root is the registered handshake itself: it is the one open operator route,
+// kept outside /admin so an external authentication layer can front the admin
+// plane without gating millivolt's own login, and its subtree row reserves every
+// unregistered spelling. Registered exact patterns (pause, config, agg/*, ...)
+// keep mux precedence. newOperatorMux installs exactly this set, and the route
+// tests drive that same function, so a dropped /admin, /session or /metrics
 // registration fails the default suite instead of only the opt-in live one.
 func operatorNamespaces(gate *operatorGate, dispatch http.Handler, boot *config.Config) []reservedNamespace {
-	namespaces := []reservedNamespace{
-		{"/admin", http.NotFoundHandler()},
-		{"/admin/", http.NotFoundHandler()},
-		// The session handshake mints the operator cookie; it is exempt
-		// from the credential gate by definition and owns its own failure
-		// throttling and same-origin wrapper. /session/ reserves every
-		// unregistered subpath for the 404 handler.
-		{"/session", sameOriginGuard(http.HandlerFunc(gate.handleOperatorSession))},
-		{"/session/", http.NotFoundHandler()},
-		{"/metrics", http.NotFoundHandler()},
-		{"/metrics/", http.NotFoundHandler()},
+	namespaces := make([]reservedNamespace, 0, 2*len(web.ReservedNamespaces()))
+	for _, ns := range web.ReservedNamespaces() {
+		if !ns.Reserved {
+			continue
+		}
+		namespaces = append(namespaces,
+			reservedNamespace{ns.Root, namespaceRootHandler(ns.Root, gate, dispatch, boot)},
+			reservedNamespace{ns.Root + "/", http.NotFoundHandler()})
 	}
-	// The MCP streamable HTTP endpoint is registered from the boot config's
-	// mcp_enabled and gated like /metrics. When it is off the root stays
-	// reserved for the 404 handler - the gate passes an authenticated /mcp
-	// to the mux, so an unregistered root would fall through to the inference
-	// catch-all - and /mcp/ reserves every look-alike in either boot.
-	if boot.MCPEnabled {
-		namespaces = append(namespaces, reservedNamespace{"/mcp", newMCPHandler(gate, dispatch, mcp.LimitsFromConfig(boot))})
-	} else {
-		namespaces = append(namespaces, reservedNamespace{"/mcp", http.NotFoundHandler()})
+	return namespaces
+}
+
+// namespaceRootHandler picks the root handler of one reserved namespace: the
+// session handshake, the MCP endpoint (or its reserved 404 when disabled), and
+// the reserved 404 for everything else.
+func namespaceRootHandler(root string, gate *operatorGate, dispatch http.Handler, boot *config.Config) http.Handler {
+	switch root {
+	case "/session":
+		// The handshake mints the operator cookie; it is exempt from the
+		// credential gate by definition and owns its own failure throttling
+		// and same-origin wrapper.
+		return sameOriginGuard(http.HandlerFunc(gate.handleOperatorSession))
+	case "/mcp":
+		// Registered only when enabled; the root stays reserved otherwise -
+		// the gate passes an authenticated /mcp to the mux, so an
+		// unregistered root would fall through to the inference catch-all.
+		if boot.MCPEnabled {
+			return newMCPHandler(gate, dispatch, mcp.LimitsFromConfig(boot))
+		}
 	}
-	return append(namespaces, reservedNamespace{"/mcp/", http.NotFoundHandler()})
+	return http.NotFoundHandler()
 }
 
 // newOperatorMux builds the route table the proxy serves and installs the
