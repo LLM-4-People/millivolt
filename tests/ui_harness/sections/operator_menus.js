@@ -790,6 +790,10 @@ module.exports = async function operatorMenus(H) {
         check('a full limit selector posts the exact server document',
           captured && stable(captured.body) === stable(expected) && !('id' in captured.body));
         await settleUntil(() => text('#oc-change').startsWith('added limit for '));
+        // The ledger line and the row are painted by the same repaint, but a
+        // loaded runner can observe the ledger first; wait for the row and its
+        // scope so the assertions below never read a null node.
+        await settleUntil(() => !!text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-scope'));
         const scopePhrase = w.ocScopePhrase({
           providers: ['prov-a'], models: ['model-a'], clients: ['client-a'],
           keyHashes: ['abcdef123456'], conversations: ['conv-1'],
