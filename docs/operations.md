@@ -96,27 +96,24 @@ Settings; do not write a bare number and assume seconds. A bare integer is still
 accepted as a count of bytes. Integer counts (retries, percents, tokens) stay
 unitless numbers with the unit in the schema label when it is not obvious.
 
-| Settings category | Configuration area |
+| Settings categories | Surface |
 | --- | --- |
-| Server | Listen/database paths, ring depth, shutdown/restart drain and HTTP server timeouts. A dashboard rebuild and restart is confirmed first and only one runs at a time. |
-| Request | Upload bound, tool-call history bound, allowed upstream prefixes, content preview, debug capture retention/size cap and token refresh. Starting a capture stores bodies; the MCP tool therefore requires its `confirm` phrase, and stopping every session is confirmed separately. |
-| Upstream | Response-header deadline, connection pools, model-discovery byte/page/entry budgets, translated-response body cap, upstream response-header cap and SSE event/hold bounds. |
-| Queue & retry | Per-key admission, queue capacity/wait, retry counts/hints, backoff, quality retries and thinking rescues. |
-| Error storm protection | Enable provider/model detection, failure selectors and window/sample thresholds, recovery, queue/scope bounds, additional retries and banner visibility. |
-| Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
-| Conversations | Automatic grouping idle gap, open-conversation cap and per-client tracked body params. |
-| Format translation | Native-adapter defaults, the cross-protocol [translation loss policy](adapters.md#cross-protocol-translation), streamed tool-call bounds, and Cursor parked-run lifetime and heartbeat. |
-| Storage | Writer queue/batches/flush cadence, restricted-query time/output limits and the irreversible database deletes (filtered and whole-database). Each delete is confirmed in the console, and over MCP requires the exact phrase plus the preview token issued for that filter. |
-| Backup | Size cap for one Settings backup download or restore upload. A restore inspects first and the apply is confirmed. |
-| MCP | The operator-gated `/mcp` LLM tool endpoint: the enable switch, the result-size limits its tools clamp with, and the call timeouts. Restart to apply. |
-| Dashboard | Request-log page size, KPI/chart/explorer refresh cadence and background refresh while its tab is hidden. |
-| Models | Ordered model-name grouping rules and their preview. |
-| Providers | Usage/cost field paths, discovery enrichment, upstream headers and provider aliases. |
-| Request overrides | Scoped upstream rewrites: set, replace or remove headers and set output-token ceilings per client, provider and/or model. |
+| Server, Request, Upstream, Queue & retry, Error storm protection | The proxy's traffic surfaces, in that order. |
+| Quota pause, Conversations, Format translation | Provider reaction, grouping, and cross-protocol translation. |
+| Storage, Backup, MCP, Dashboard | Durable state, its archives, the LLM tool endpoint and the live view. |
+| Models, Providers, Request overrides | Grouping rules, upstream mappings and scoped rewrites. |
 
-The table is a navigation aid, not another source of default values.
-[Schema](../internal/config/schema.go), configuration validation and generated
-YAML remain authoritative when a setting is added or changed.
+The category labels, their help and their membership are owned by
+`schema.Categories()` and `Schema()` over `GET /admin/config`; the generated
+example carries the same sections with each field's type, range and default.
+The rows above are names only, not a second copy of either.
+
+The destructive controls sit in their category and each confirms first: a
+rebuild and restart is confirmed and single-flight, starting a capture through
+MCP needs its `confirm` phrase and stopping every session confirms separately,
+a database delete confirms in the console (and over MCP needs the exact phrase
+plus the preview token for that filter), and a restore inspects before its
+confirmed apply.
 
 ### Guardrails that are not settings
 
