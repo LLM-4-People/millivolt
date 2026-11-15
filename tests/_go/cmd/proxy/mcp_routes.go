@@ -17,11 +17,15 @@ import (
 // never by the inference catch-all. Both boots are pinned: the enabled boot
 // (the default) serves the endpoint, and a boot with mcp_enabled: false keeps
 // the root reserved for the 404 handler, so /mcp and every /mcp/ look-alike
-// answer 404 and never reach inference. The test drives newOperatorMux
+// answer 404 and never reach inference. The open probe roots ride the same
+// table, so the pattern list starts with them. The test drives newOperatorMux
 // directly and never observes main, so main calling it (or keeping its
 // installation) is not asserted here.
 func TestMCPRouteIsRegisteredOnTheOperatorMux(t *testing.T) {
-	want := []string{"/admin", "/admin/", "/session", "/session/", "/metrics", "/metrics/", "/mcp", "/mcp/"}
+	want := []string{
+		"/healthz", "/healthz/", "/readyz", "/readyz/",
+		"/admin", "/admin/", "/session", "/session/", "/metrics", "/metrics/", "/mcp", "/mcp/",
+	}
 	namespacePatterns := func(t *testing.T, gate *operatorGate, boot *config.Config) ([]string, *http.ServeMux, http.Handler) {
 		t.Helper()
 		mux, handler := newOperatorMux(gate, boot)

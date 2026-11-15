@@ -97,15 +97,17 @@ type reservedNamespace struct {
 	handler http.Handler
 }
 
-// operatorNamespaces returns the reserved operator-namespace registrations,
-// generated from the canonical table in internal/web. The /admin, /metrics and
-// /mcp namespaces own no unregistered handler: reserving both the roots and the
+// operatorNamespaces returns the reserved namespace registrations, generated
+// from the canonical table in internal/web. The /admin, /metrics and /mcp
+// namespaces own no unregistered handler: reserving both the roots and the
 // subtrees means neither the unauthenticated gate nor an authenticated request
 // can forward a namespace look-alike to the upstream catch-all. The /session
 // root is the registered handshake itself: it is the one open operator route,
 // kept outside /admin so an external authentication layer can front the admin
 // plane without gating millivolt's own login, and its subtree row reserves every
-// unregistered spelling. Registered exact patterns (pause, config, agg/*, ...)
+// unregistered spelling. The open probes are registered roots for the same
+// reason: a load balancer that spells /healthz/ must not get the inference
+// catch-all's answer. Registered exact patterns (pause, config, agg/*, ...)
 // keep mux precedence. newOperatorMux installs exactly this set, and the route
 // tests drive that same function, so a dropped /admin, /session or /metrics
 // registration fails the default suite instead of only the opt-in live one.
@@ -123,8 +125,8 @@ func operatorNamespaces(gate *operatorGate, dispatch http.Handler, boot *config.
 }
 
 // namespaceRootHandler picks the root handler of one reserved namespace: the
-// session handshake, the MCP endpoint (or its reserved 404 when disabled), and
-// the reserved 404 for everything else.
+// session handshake, the MCP endpoint (or its reserved 404 when disabled), the
+// open probes, and the reserved 404 for everything else.
 func namespaceRootHandler(root string, gate *operatorGate, dispatch http.Handler, boot *config.Config) http.Handler {
 	switch root {
 	case "/session":
@@ -132,6 +134,12 @@ func namespaceRootHandler(root string, gate *operatorGate, dispatch http.Handler
 		// credential gate by definition and owns its own failure throttling
 		// and same-origin wrapper.
 		return sameOriginGuard(http.HandlerFunc(gate.handleOperatorSession))
+	case "/healthz":
+		return http.HandlerFunc(handleHealthz)
+	case "/readyz":
+		// liveStore is set before the mux is built; Ready is nil-safe, so a
+		// disabled store answers ready.
+		return handleReadyz(liveStore.Ready)
 	case "/mcp":
 		// Registered only when enabled; the root stays reserved otherwise -
 		// the gate passes an authenticated /mcp to the mux, so an
@@ -360,9 +368,9 @@ func main() {
 	// Docker HEALTHCHECK and load balancers cannot carry the operator
 	// credential. /healthz owns process liveness; /readyz adds the durable
 	// pipeline (a wedged writer or a failed flush). Depth (feeds, dashboard)
-	// stays on the gated surfaces.
-	mux.HandleFunc(string(mcp.RouteHealthz), handleHealthz)
-	mux.Handle(string(mcp.RouteReadyz), handleReadyz(store.Ready))
+	// stays on the gated surfaces. Both are installed by the namespace table
+	// like every other reserved root, so their subtrees answer the reserved
+	// 404 instead of the inference catch-all.
 	// The SSE feed is not gzipped (it flushes event-by-event; every other
 	// dashboard route is buffered text and compresses).
 	mux.Handle("/metrics/live/stream", http.HandlerFunc(buf.HandleStream))

@@ -33,9 +33,11 @@ var namespaces = []ReservedNamespace{
 	// cached, because the same URL answers either.
 	{Root: "/", Gated: true, Live: true},
 	{Root: "/index.html", Gated: true, Live: true},
-	// Open probes and assets: ungated, and still never cached.
-	{Root: "/healthz", Live: true},
-	{Root: "/readyz", Live: true},
+	// Open probes and assets: ungated, and still never cached. The probes are
+	// registered roots with reserved subtrees, so /healthz/ and /readyz/ answer
+	// the reserved 404 instead of falling through to inference.
+	{Root: "/healthz", Reserved: true, Live: true},
+	{Root: "/readyz", Reserved: true, Live: true},
 	{Root: "/models", Live: true},
 	{Root: "/sw.js", Live: true},
 	// Operator plane. Every unregistered spelling is reserved.
