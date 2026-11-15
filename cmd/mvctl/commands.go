@@ -56,6 +56,12 @@ func registry() []Command {
 			Flags: []flagSpec{
 				{name: "query-timeout", kind: kindDuration, usage: fmt.Sprintf("bound the SQL read (default %s)", defaults.QueryTimeout)},
 			}, Run: cmdQuery},
+		{Name: "chart", Group: "view", Summary: "Server-authoritative time series",
+			Flags: []flagSpec{
+				{name: "window", kind: kindString, usage: "all history or a positive whole number of minutes (default all)"},
+				{name: "filter", kind: kindString, usage: "comma-separated scope filters as dim:id (client, provider, model, conversation, status, ...)"},
+				{name: "query-timeout", kind: kindDuration, usage: fmt.Sprintf("bound the fold read (default %s)", defaults.QueryTimeout)},
+			}, Run: cmdChart},
 		{Name: "prometheus", Group: "view", Summary: "Prometheus text exposition", Run: cmdPrometheus},
 		{Name: "watch", Group: "view", Summary: "Sample live counters",
 			Flags: []flagSpec{

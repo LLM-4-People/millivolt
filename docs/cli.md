@@ -95,6 +95,7 @@ still name one. Boolean flags accept `--flag`, `--flag=true`, `--flag=1`,
 | `mvctl overview` | KPI, storage, pause, throttle and debug state |
 | `mvctl requests [N]` | one page of the request log, default the shipped `dash_log_rows`; `N` must be inside that setting's schema band |
 | `mvctl query "SELECT ..."` | bounded SQL through `/metrics/query` |
+| `mvctl chart` | server-authoritative time series; `--window` is all history or whole minutes, `--filter` scopes it |
 | `mvctl prometheus` | the Prometheus text exposition |
 | `mvctl watch` | sample live counters and print a sparkline |
 | `mvctl health` | check `/healthz` |
@@ -109,10 +110,20 @@ retry attempts. Use the dashboard capture drawer when full bodies are needed.
 
 `query` accepts `--query-timeout DURATION`; the default is the shipped MCP
 query bound, and an explicit value must be greater than zero. The shared HTTP
-client carries that shipped bound too, so a full-history fold cannot expire
-before it starts. The statement
-must be a single `SELECT` without a semicolon, using the same pre-check as the
-MCP query tool. The SQL text is sent as one `q` parameter and is never logged.
+client carries that shipped bound on its query path too, which is the one
+`chart` takes. The statement must be a single `SELECT` without a semicolon,
+using the same pre-check as the MCP query tool. The SQL text is sent as one `q`
+parameter and is never logged.
+
+`chart` prints the server-authoritative series: bucket geometry, percentile and
+stat arrays, blended cost per million tokens and the buckets themselves. Its
+fold runs through the client's query path with `--query-timeout` as the one
+bound, so `--timeout` (the generic per-request deadline) never cuts it short.
+`--window` takes `all` or a whole number of minutes; `--filter` takes
+comma-separated `dim:id` pairs using the same dimensions as the log scope
+(`provider`, `model`, `client`, `conversation`, `status`, `key_hash`). A chart
+fold covers finalized requests only, so a live in-flight status class is
+refused.
 
 `watch` accepts `--samples N`, bounded by the command's settings surface, and
 `--interval DURATION` (default the shipped `dash_poll_interval`). Interrupting

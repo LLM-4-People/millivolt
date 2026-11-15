@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -197,6 +198,55 @@ func cmdQuery(ctx *Context) (Result, error) {
 		return Result{Code: exitFailure}, err
 	}
 	return Result{Pretty: prettyJSON(rows), Data: rows}, nil
+}
+
+// cmdChart reads one chart fold. It goes through the query-bound client path:
+// a full-history fold outlives the generic per-request deadline, so the command
+// owns the config-derived query bound and passes the operator's override.
+func cmdChart(ctx *Context) (Result, error) {
+	if err := ctx.requireNoExtraArgs("mvctl chart"); err != nil {
+		return exitUsage(err)
+	}
+	queryTimeout := ctx.G.Settings.QueryTimeout
+	if ctx.Flags.Present("query-timeout") {
+		queryTimeout = ctx.Flags.Duration("query-timeout", queryTimeout)
+		if queryTimeout <= 0 {
+			return exitUsage(errors.New("--query-timeout must be greater than zero"))
+		}
+	}
+	values := url.Values{}
+	window := strings.TrimSpace(ctx.Flags.String("window", "all"))
+	if window == "" {
+		window = "all"
+	}
+	values.Set("window", window)
+	for _, filter := range strings.Split(ctx.Flags.String("filter", ""), ",") {
+		filter = strings.TrimSpace(filter)
+		if filter == "" {
+			continue
+		}
+		if !strings.Contains(filter, ":") {
+			return exitUsage(fmt.Errorf("--filter wants dim:id, got %q", filter))
+		}
+		values.Add("f", filter)
+	}
+	reqCtx, cancel := ctx.boundedFor(queryTimeout)
+	defer cancel()
+	var raw map[string]any
+	if err := ctx.C.GetJSONQuery(reqCtx, mcp.RouteChart, values, &raw); err != nil {
+		return Result{Code: exitFailure}, err
+	}
+	from := "n/a"
+	if fromMs, ok := raw["from_ms"].(float64); ok && fromMs > 0 {
+		from = shortTime(time.UnixMilli(int64(fromMs)))
+	}
+	pretty := heading("chart") + "\n" + kv([][2]string{
+		{"window", window},
+		{"from", from},
+		{"bucket", durPtr(float64Ptr(raw["bucket_ms"]))},
+		{"buckets", num(float64(jsonLen(raw["buckets"])))},
+	})
+	return Result{Pretty: pretty + "\n" + prettyJSON(raw), Data: raw}, nil
 }
 
 func cmdPrometheus(ctx *Context) (Result, error) {
