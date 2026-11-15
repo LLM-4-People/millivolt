@@ -72,6 +72,37 @@ func TestEventCacheEncode(t *testing.T) {
 			t.Fatalf("retained errors = %v / %v, want %v", first, second, boom)
 		}
 	})
+
+	// A panicking first encode must not consume the cache's one shot: before the
+	// fix, sync.Once stayed done and every peer received a nil payload with a
+	// nil error.
+	t.Run("first-encode panic leaves the cache re-encodable", func(t *testing.T) {
+		cache := &eventCache{}
+		want := []byte(`{"record":"retry"}`)
+		calls := 0
+		marshal := func() ([]byte, error) {
+			calls++
+			if calls == 1 {
+				panic("observer panicked")
+			}
+			return want, nil
+		}
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("first encode did not panic")
+				}
+			}()
+			_, _ = cache.encode(marshal)
+		}()
+		data, err := cache.encode(marshal)
+		if err != nil || !bytes.Equal(data, want) {
+			t.Fatalf("encode after a panicked first encode = %q, %v; want %q", data, err, want)
+		}
+		if calls != 2 {
+			t.Fatalf("marshal calls = %d, want one panicking call plus a retry", calls)
+		}
+	})
 }
 
 // sharedEventCache owns the allocation threshold: an event with zero or one
