@@ -961,7 +961,10 @@ go tool pprof /tmp/millivolt-profiling /tmp/cpu.pprof
 ```
 
 The `seconds=N` parameter on `/metrics/pprof/profile` is the capture window:
-that one request stays open for the whole window while samples accumulate. A
+that one request stays open for the whole window while samples accumulate. The
+valid range is 1 to `response_write_timeout` (600 by default); an absent or
+unparseable value uses 30 and a larger one is lowered to the bound, so a
+capture never outlives the delivery contract unnoticed. A
 process runs one CPU profile at a time, so a second concurrent `profile`
 request fails with 500 until the first finishes. On `/metrics/pprof/heap`,
 `gc=1` forces a garbage collection cycle before the sample.

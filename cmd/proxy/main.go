@@ -393,7 +393,11 @@ func main() {
 	// Profiling evidence for CPU/RAM work: the standard handlers under the
 	// same operator gate as every /metrics route (pprof.go owns the mounting
 	// contract).
-	registerPprofRoutes(mux)
+	registerPprofRoutes(mux, func() time.Duration {
+		liveMu.Lock()
+		defer liveMu.Unlock()
+		return liveCfg.ResponseWriteTimeout
+	})
 
 	// Operator pause: in-flight requests finish, new ones queue until resume.
 	// The dashboard Pause/Resume button is the UI for this.
