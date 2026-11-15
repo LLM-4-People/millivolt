@@ -48,6 +48,20 @@
     wide.addEventListener("change", syncRails);
   }
 
+  // Keep the current page visible in a long rail: the list is taller than the
+  // viewport once the docs pass about twenty pages, and a page near the end
+  // would otherwise open scrolled to the top of the rail.
+  if (docsNav && docsNav.open) {
+    const current = docsNav.querySelector('a[aria-current="page"]');
+    if (current) {
+      const navBox = docsNav.getBoundingClientRect();
+      const rowBox = current.getBoundingClientRect();
+      if (rowBox.top < navBox.top || rowBox.bottom > navBox.bottom) {
+        docsNav.scrollTop += rowBox.top - navBox.top - navBox.height / 3;
+      }
+    }
+  }
+
   const progress = document.querySelector(".read-progress");
   if (progress) {
     let queued = false;
