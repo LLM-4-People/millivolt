@@ -18,23 +18,124 @@ from ..support import (PALETTE_OWNER, RETIRED_TOKENS, SITE_STYLESHEET, _template
                        token_drift_errors)
 
 
+MEASURED_UNIT = re.compile(
+    r"\b\d[\d,.]*\s*(?:ns|us|µs|ms|s|B/op|allocs(?:/op)?|MB|MiB|KiB|GB|GiB)\b")
+
+
+def measured_offenders(paths) -> list[str]:
+    """Files that print a number beside a benchmark name.
+
+    The block, not the line, is the unit: a hand copy often wraps ("... went
+    from 11.05-11.40 ms, 2.89 MB and 60,158 allocs to ..."), and a same-line
+    check misses every continuation. A design note may name the benchmark that
+    protects a path; the measured number belongs in the generated page.
+    """
+    offenders = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        cursor = 0
+        for block in re.split(r"\n\s*\n", text):
+            start = text.find(block, cursor)
+            cursor = start + len(block)
+            if "Benchmark" not in block or not MEASURED_UNIT.search(block):
+                continue
+            for offset, line in enumerate(block.splitlines()):
+                if "Benchmark" in line:
+                    number = text[:start].count("\n") + offset + 1
+                    offenders.append(f"{path.relative_to(check.ROOT)}:{number}")
+                    break
+    return offenders
+
+
+def prose_paths() -> list[Path]:
+    """Every hand-written document that could restate a measurement."""
+    root = check.ROOT
+    paths = [root / name for name in
+             ("README.md", "DESIGN.md", "CONTRIBUTING.md", "SECURITY.md", "OPERATIONS.md")]
+    paths += sorted((root / "docs").glob("*.md"))
+    paths += sorted((root / "site-src").glob("templates/*.html"))
+    return [path for path in paths if path.is_file() and path.name != "performance.md"]
+
+
 class RepositoryChecks(unittest.TestCase):
     def test_measured_benchmark_numbers_live_only_in_the_generated_page(self):
-        """A benchmark name beside a measured unit is a hand-copied result.
+        """docs/performance.md is rendered from perf/results.json and checked
+        byte-for-byte. Every other document must link to it instead of copying
+        a result."""
+        self.assertEqual([], measured_offenders(prose_paths()),
+                         "measured benchmark numbers belong in docs/performance.md")
 
-        docs/performance.md is rendered from perf/results.json and checked
-        byte-for-byte. A design note may name the benchmark that protects a
-        path, but the number belongs in the generated page.
+    def test_measured_number_guard_sees_wrapped_prose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "docs").mkdir()
+            same = root / "docs" / "same.md"
+            same.write_text("`BenchmarkFoo` costs 12.9 ms.\n", encoding="utf-8")
+            wrapped = root / "docs" / "wrapped.md"
+            wrapped.write_text(
+                "The fold uses `BenchmarkBar`; the 1,000-frame run\n"
+                "went from 11.05 ms, 2.89 MB and 60,158 allocs to 6.2 ms.\n", encoding="utf-8")
+            prose = root / "docs" / "prose.md"
+            prose.write_text("The fold costs 12.9 ms.\n", encoding="utf-8")
+            linked = root / "docs" / "linked.md"
+            linked.write_text(
+                "`BenchmarkBaz` protects this path; the number is in\n"
+                "[performance](performance.md).\n", encoding="utf-8")
+            template = root / "site-src" / "templates"
+            template.mkdir(parents=True)
+            page = template / "landing.html"
+            page.write_text("<p>`BenchmarkQux` ran at 9,000 req/s over 5 s.</p>\n",
+                            encoding="utf-8")
+            with patch.object(check, "ROOT", root):
+                found = measured_offenders([same, wrapped, prose, linked, page])
+        self.assertEqual(["docs/same.md:1", "docs/wrapped.md:1", "site-src/templates/landing.html:1"],
+                         found)
+
+    def test_vendored_uplot_version_matches_its_notice(self):
+        """The notice is a hand-written copy of the vendored version.
+
+        The banner in the asset is the owner: it ships with the code and is what
+        a reader of the vendored file sees. Every version the notice states,
+        including its links, must be that one.
         """
-        measured = re.compile(r"\b\d[\d,.]*\s*(?:ns|us|µs|ms|s|B/op|allocs(?:/op)?|MB|MiB)\b")
-        offenders = []
-        for path in sorted((check.ROOT / "docs").glob("*.md")):
-            if path.name == "performance.md":
-                continue
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                if "`Benchmark" in line and measured.search(line):
-                    offenders.append(f"{path.relative_to(check.ROOT)}:{number}")
-        self.assertEqual([], offenders, "measured benchmark numbers belong in docs/performance.md")
+        root = check.ROOT
+        banner = (root / "internal/web/static/vendor/uplot.js").read_text(encoding="utf-8")[:400]
+        match = re.search(r"uPlot \(v(\d+\.\d+\.\d+)\)", banner)
+        self.assertIsNotNone(match, "the vendored uPlot banner does not state its version")
+        version = match.group(1)
+        notice = (root / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        self.assertIn(f"uPlot {version}", notice)
+        linked = set(re.findall(r"uPlot/(?:tree|blob)/([^/\s)]+)", notice))
+        self.assertEqual({version}, linked, "the notice links a different uPlot version")
+        for asset in ("uplot.js", "uplot.css", "uplot.LICENSE"):
+            self.assertTrue((root / "internal/web/static/vendor" / asset).is_file(), asset)
+
+    def test_compose_defaults_match_the_documented_defaults(self):
+        """Compose owns each deployment default; the docs restate some of them.
+
+        A restated default that disagrees with `${VAR:-default}` would describe a
+        deployment the repository does not produce.
+        """
+        root = check.ROOT
+        compose = (root / "compose.yaml").read_text(encoding="utf-8")
+        defaults = dict(re.findall(r"\$\{(MILLIVOLT_[A-Z_]+):-([^}]*)\}", compose))
+        self.assertTrue({"MILLIVOLT_MEM_LIMIT", "MILLIVOLT_PIDS_LIMIT",
+                         "MILLIVOLT_PORT"} <= set(defaults), defaults)
+        claims = 0
+        for doc in ("docs/install.md", "docs/containers.md"):
+            text = (root / doc).read_text(encoding="utf-8")
+            for number, line in enumerate(text.splitlines(), 1):
+                for name in re.findall(r"`(MILLIVOLT_[A-Z_]+)`", line):
+                    if name not in defaults or "default" not in line:
+                        continue
+                    claim = re.search(r"defaults? to `([^`]+)`|default `([^`]+)`", line)
+                    if claim is None:
+                        continue
+                    claims += 1
+                    stated = claim.group(1) or claim.group(2)
+                    self.assertEqual(defaults[name], stated,
+                                     f"{doc}:{number} restates {name} with the wrong default")
+        self.assertGreaterEqual(claims, 5, "the documented compose defaults were not checked")
 
     def test_css_control_predicate_covers_every_control_shape(self):
         # The tap-target gate is only as good as its ability to recognize a
