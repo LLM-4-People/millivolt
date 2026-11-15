@@ -380,7 +380,8 @@ is not re-read.
 
 Every failure is a tool result the model can read and correct, carrying the
 proxy's own `.error` text and the status: `401` (credential wrong or missing),
-`403` (the proxy's operator plane is unarmed), `404`, `409` (overlap or stale
+`403` (the proxy's operator plane is unarmed, or the request carried only the
+dashboard session cookie), `404`, `409` (overlap or stale
 revision), `413` (a result limit), and `429` with its `Retry-After`. An
 unreachable proxy, a timeout, and a body that is not the expected document are
 reported the same way. The `.error` field is read regardless of `Content-Type`,
