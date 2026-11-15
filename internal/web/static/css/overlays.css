@@ -115,7 +115,7 @@
      keeps the label readable and the number beside the row edge. */
   .st-rail-item .rail-n { min-width: 2ch; margin-left: auto; padding-left: 6px; text-align: right; }
   .st-rail-item.has-hit .rail-n { color: var(--accent); }
-  .st-rail-item.is-miss { opacity: .4; }
+  .st-rail-item.is-miss { opacity: .7; }
   .st-live {
     flex-shrink: 0; padding: 10px 12px 12px; border-top: 1px solid var(--border);
     font: 10px/1.45 var(--mono); color: var(--muted);
