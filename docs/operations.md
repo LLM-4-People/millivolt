@@ -1457,7 +1457,9 @@ canonicalization. The API also supports conversation/error-type/time filters
 beyond the console's common choices. See the shared
 [filter decoder](../cmd/proxy/log.go) and
 [PurgeFilter](../internal/storage/purge.go). Empty-body full deletion is
-deliberate and destructive; never use malformed JSON as an all-records command.
+deliberate and destructive; never use malformed or empty JSON as an all-records
+command. The count preview applies the same empty-filter rule, so `{}` answers
+400 on both routes rather than counting the full set for an ambiguous body.
 The delete fence preserves newer completions and in-flight work. A completed
 purge, and an expired debug-capture sweep, checkpoint-truncates the WAL after
 the committed delete: `secure_delete` zeroes freed cells in the pages SQLite

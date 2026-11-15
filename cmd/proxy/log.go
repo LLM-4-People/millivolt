@@ -293,7 +293,12 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		if !rejectPurgeQuery(w, r) {
 			return
 		}
-		req, _, err := decodeLogFilter(w, r)
+		req, hasBody, err := decodeLogFilter(w, r)
+		if err == nil && hasBody && req.Filter.IsEmpty() {
+			// Same guard as the delete: "{}" reads as a filter body but the
+			// delete route only accepts a bodyless call as the full set.
+			err = errors.New("empty purge filter; send no body to delete everything")
+		}
 		f := req.Filter
 		if err != nil {
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())

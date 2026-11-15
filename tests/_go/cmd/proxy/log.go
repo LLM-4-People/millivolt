@@ -200,6 +200,44 @@ func TestPurgeRoutesRejectQueryFilters(t *testing.T) {
 	}
 }
 
+// TestPurgeEmptyBodyVersusEmptyFilter pins one empty-filter guard across both
+// body-only routes: "{}" reads as a filter body, while a bodyless post means
+// the full set, so the preview must answer the same 400 as the delete instead
+// of counting everything under an ambiguous body. A bodyless preview stays
+// valid and counts the full set.
+func TestPurgeEmptyBodyVersusEmptyFilter(t *testing.T) {
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprint(durable), func(t *testing.T) {
+			mux, b, s := logRoutesForTest(t, durable)
+			var recorder metrics.Recorder = b
+			if s != nil {
+				recorder = s.Recorder(b)
+			}
+			recorder.Record(&metrics.Record{ID: "only", Provider: "target", StatusCode: 200, Start: time.Now()})
+			if s != nil {
+				if err := s.Flush(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, path := range []string{"/admin/purge", "/admin/purge/count"} {
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`)))
+				if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "send no body") {
+					t.Fatalf("%s with {} = %d %s, want the empty-filter 400", path, w.Code, w.Body.String())
+				}
+			}
+			if b.Len() != 1 {
+				t.Fatalf("rejected calls removed live rows: ring=%d, want 1", b.Len())
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge/count", nil))
+			if w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"count":1}` {
+				t.Fatalf("bodyless count = %d %s, want the full count", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestLogCountExportAndClearSharePredicate(t *testing.T) {
 	for _, durable := range []bool{false, true} {
 		t.Run(fmt.Sprint(durable), func(t *testing.T) {
