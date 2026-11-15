@@ -2,8 +2,8 @@ package proxy
 
 import (
 	"context"
-	"database/sql"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -67,7 +67,7 @@ func dirtyTestThrottle(t *testing.T, p *Server) {
 // shutdown.
 func TestThrottlePersisterStopsOnClosedStore(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
-	store := &failingThrottlePersist{err: sql.ErrConnDone}
+	store := &failingThrottlePersist{err: errors.New("sql: database is closed")}
 	p.attachThrottlePersist(store)
 	fastThrottleRetries(p)
 	t.Cleanup(func() { _ = p.CloseThrottlePersist(context.Background()) })
@@ -105,5 +105,26 @@ func TestThrottlePersisterRetriesBusyStore(t *testing.T) {
 	case <-p.throttle.done:
 		t.Fatal("busy store stopped the persister")
 	default:
+	}
+}
+
+// TestThrottlePersisterStopsOnRealClosedStore is the same stop driven by a real
+// *storage.Store: a closed *sql.DB answers with database/sql's own
+// "database is closed" error, not sql.ErrConnDone, so this case fails if the
+// classifier or the fake drifts from the driver.
+func TestThrottlePersisterStopsOnRealClosedStore(t *testing.T) {
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "closed-sink.db"))
+	p := New(config.Default(), metrics.Noop{})
+	p.attachThrottlePersist(store)
+	fastThrottleRetries(p)
+	t.Cleanup(func() { _ = p.CloseThrottlePersist(context.Background()) })
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dirtyTestThrottle(t, p)
+	select {
+	case <-p.throttle.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("persister kept retrying a really closed store")
 	}
 }

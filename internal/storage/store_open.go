@@ -115,6 +115,31 @@ type Options struct {
 // status code; only the identity and the canonical message are shared.
 var ErrStorageDisabled = errors.New("durable storage is disabled")
 
+// closedDBMessage is database/sql's unexported errDBClosed text, returned by
+// every call on a *sql.DB whose Close already ran. ErrDBClosed is not exported,
+// so the class has two shapes and both must be recognised: this message for a
+// closed *sql.DB, and sql.ErrConnDone for a closed *sql.Conn or driver
+// connection. Either way no later attempt on that handle can succeed.
+const closedDBMessage = "sql: database is closed"
+
+// IsClosed reports whether err says the database handle is closed. It walks the
+// wrap chain, so a caller's wrapped error classifies the same as the raw one.
+// Callers use it to stop retrying a dead handle instead of a merely busy one.
+func IsClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, sql.ErrConnDone) {
+		return true
+	}
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if e.Error() == closedDBMessage {
+			return true
+		}
+	}
+	return false
+}
+
 // withQueryTimeout is the single choke point that bounds a dashboard SELECT
 // by QueryTimeout. Validate requires QueryTimeout > 0; a 0 fail-closes
 // (deadline already expired) rather than running unbounded.

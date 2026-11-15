@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
+	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
 // Persistent provider-wide caps. Set from the dashboard or from
@@ -661,11 +661,12 @@ func (s *Server) runThrottlePersister() {
 	}
 }
 
-// throttleStoreGone reports the closed-store class: database/sql maps every
-// "handle closed" answer to sql.ErrConnDone, while a busy store keeps its
-// transient error.
+// throttleStoreGone reports the closed-handle class through the storage owner:
+// a closed *sql.DB answers with database/sql's own "database is closed" error,
+// which is not sql.ErrConnDone, so only the shared classifier stops the ladder
+// on it. A busy store keeps its transient error and keeps retrying.
 func throttleStoreGone(err error) bool {
-	return errors.Is(err, sql.ErrConnDone)
+	return storage.IsClosed(err)
 }
 
 // waitThrottleQuiet restarts the debounce window on every dirty signal and
