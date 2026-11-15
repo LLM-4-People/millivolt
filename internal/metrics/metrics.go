@@ -163,10 +163,11 @@ type Record struct {
 	Retries     int   `json:"retries"`                // number of transparent upstream retries (429/5xx)
 	RateLimited bool  `json:"rate_limited,omitempty"` // scheduler wait or 429/503 pacing; HasRateLimit owns the exact 429 predicate
 	// Attempts records each transparently-retried upstream response (the ones
-	// the client never saw) so the proxy logs the full history, not just the
-	// final outcome, plus at most one in-band entry for an upstream 429 whose
-	// status line a committed 200 could not relay. Bounded by max_retries plus
-	// that one entry.
+	// the client never saw) so the proxy logs the history, not just the final
+	// outcome, plus at most one in-band entry for an upstream 429 whose status
+	// line a committed 200 could not relay. Bounded by max_retries (at least
+	// one, newest kept) plus that one entry: a durable quota wait re-sends
+	// without burning the retry budget, so the append alone is unbounded.
 	Attempts []RetryAttempt `json:"attempts,omitempty"`
 
 	// Derived fields populated at record time for the dashboard/storage.

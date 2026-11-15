@@ -1532,7 +1532,10 @@ the control gates on.
 The log starts with recent rows and pages older durable records as you scroll.
 Live rows show in-flight/queue/retry progress; final rows retain their outcomes.
 Retry disclosure opens absorbed attempts under the original request, not another
-inference record. Click the detail arrow or a non-link row cell to open its
+inference record. The attempts log keeps the newest `max_retries` entries (one
+when that budget is zero): a durable quota wait re-sends without spending the
+budget, so the tail is what explains a long parked request.
+Click the detail arrow or a non-link row cell to open its
 drawer; previous/next controls navigate requests without changing the scope.
 
 The inspector presents available facts in four classified groups. Request covers

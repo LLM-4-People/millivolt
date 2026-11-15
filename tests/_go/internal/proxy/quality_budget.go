@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"crypto/sha256"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,41 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
+
+// TestAbsorbHTTPRetryBoundsTheAttemptLog pins C5: a durable quota pause
+// re-sends without burning max_retries, so the attempt log needs its own bound
+// or it grows for the whole pause. The newest entries survive, the retry
+// counter keeps counting every absorbed try, and a zero budget still keeps one.
+func TestAbsorbHTTPRetryBoundsTheAttemptLog(t *testing.T) {
+	resp := func() *http.Response {
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: http.NoBody}
+	}
+	cfg := config.Default()
+	cfg.MaxRetries = 3
+	s := New(cfg, metrics.Noop{})
+	rec := &metrics.Record{}
+	for i := range 10 {
+		s.absorbHTTPRetry(rec, resp(), []byte(fmt.Sprintf(`{"error":{"message":"try %d"}}`, i)), "", metrics.ClassQuota)
+	}
+	if len(rec.Attempts) != 3 {
+		t.Fatalf("attempts = %d, want the max_retries bound 3", len(rec.Attempts))
+	}
+	if !strings.Contains(rec.Attempts[2].ErrorMsg, "try 9") || !strings.Contains(rec.Attempts[0].ErrorMsg, "try 7") {
+		t.Fatalf("the newest entries must be kept: %+v", rec.Attempts)
+	}
+	if rec.Retries != 10 {
+		t.Fatalf("retries = %d, want every absorbed try counted", rec.Retries)
+	}
+
+	zero := config.Default()
+	zero.MaxRetries = 0
+	s = New(zero, metrics.Noop{})
+	rec = &metrics.Record{}
+	s.absorbHTTPRetry(rec, resp(), []byte(`{"error":{"message":"only"}}`), "", metrics.ClassQuota)
+	if len(rec.Attempts) != 1 {
+		t.Fatalf("attempts = %d, want the one-entry floor", len(rec.Attempts))
+	}
+}
 
 // TestQualityRetryEmptyBody: a chat request answered with a completely empty
 // 200 body is the degenerate class in its purest form - retried transparently.
