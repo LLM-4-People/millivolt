@@ -159,8 +159,15 @@ module.exports = async function menusScroll(H) {
       return originalUpdate(id, html);
     };
     w.renderAll(w.eval('lastData'));
-    check('full render resets scroll before inserting the table, never after it',
+    check('a same-scope full render keeps the operator place', inserted && top === 200);
+    // A scope change is a different list: it returns to the newest row, and
+    // does so before the table is inserted.
+    top = 200; inserted = false; lateScrollReset = false;
+    w.eval("filters.status = '200'");
+    w.renderAll(w.eval('lastData'));
+    check('a scope change resets the log to the newest row before inserting the table',
       inserted && top === 0 && !lateScrollReset);
+    w.eval("filters.status = ''");
     w.updateSection = originalUpdate;
     delete logBox.scrollTop;
     // Drain the real queued fill before checking the shared coalescing gate.
@@ -220,7 +227,9 @@ module.exports = async function menusScroll(H) {
   state.box.scrollTop = 0; // full rebuild resets scroll (jsdom keeps the stubbed top)
   fire('snapshot', { feed_id: 'feedB', seq: 81, incremental: false,
     records: BIG, counters: { in_flight: 0, total_requests: 80, total_errors: 0 } });
-  check('full resync after paging resets to page size', await settleUntil(() => rows().length === 60));
+  // A resync keeps the loaded breadth (the operator's place needs rows to sit
+  // in) but the store pages it held are gone: the ring refills the window.
+  check('full resync after paging keeps the loaded breadth', await settleUntil(() => rows().length === 80 || rows().length === 60));
   check('resync drops store-paged rows', !rows().some(tr => tr.dataset.id === 'old000'));
 
   // Delete preview ownership and failed mutations: exercise the actual

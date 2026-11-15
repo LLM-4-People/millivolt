@@ -609,6 +609,9 @@ function renderLive() {
 let _navScopeKey = null;
 let _navActiveDim = null;
 let _routedHash = null;
+// _resyncScope is the scope the last full render painted; a resync over the
+// same one preserves the log's scroll instead of jumping to the top.
+let _resyncScope = null;
 
 function renderAll(data) {
   lastData = data;
@@ -616,9 +619,17 @@ function renderAll(data) {
   // them before any row is classified so the browser's pills and error groups
   // agree with the server's aggregates.
   setRateLimitVocabulary(data && data.rate_limit_classes);
+  // A resync always rebuilds the window, but only a scope change re-reads the
+  // list from its newest row: a background resync over the same scope keeps
+  // the operator's place and the window size that place needs.
+  const scope = scopeQS();
+  const sameScope = scope === _resyncScope;
+  const box = $('tbl-requests');
+  const keep = sameScope ? { limit: logLimit, scroll: box ? box.scrollTop : 0 } : null;
   // Reset scroll against the old layout, before any DOM writes. Setting it
   // after inserting the table forces a complete synchronous table layout.
   resetLogWindow();
+  if (keep) logLimit = keep.limit;
   const d = derive(data);
   updateSection('kpis', d.kpiHtml);
 
@@ -628,7 +639,9 @@ function renderAll(data) {
   updateSection('f-status', d.statusHtml);
   if ($('f-status').value !== filters.status) $('f-status').value = filters.status;
   renderRequests(d.scopedRecs);
+  if (keep && keep.scroll) $('tbl-requests').scrollTop = keep.scroll;
   updateLogStats(d);
+  _resyncScope = scope;
   renderExplorer();
 
   // Keep the open drawer in sync as new records stream in.
