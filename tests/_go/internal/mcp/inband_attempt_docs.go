@@ -30,8 +30,8 @@ func TestInBandAttemptContractDocs(t *testing.T) {
 	protocol := repoText(t, "docs/protocol.md")
 	for _, want := range []string{
 		"Every retried or final attempt stores the same upstream-response information",
-		"An in-band 429 is the one exception",
-		"It carries no retry or error detail",
+		"An in-band 429 is the one attempt entry",
+		"carries no retry or error detail",
 		"excluded from retry disclosures and error enumerations",
 		"A final, retried or in-band 429 is a separate affected-request signal",
 	} {
