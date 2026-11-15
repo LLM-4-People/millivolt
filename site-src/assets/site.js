@@ -39,7 +39,7 @@
     // Both rails are disclosures: always open while they are side rails, closed
     // while they are inline panels above the article, so a phone lands on the
     // page title instead of a 30-item list.
-    const wide = window.matchMedia("(max-width: 1080px)");
+    const wide = window.matchMedia("(max-width: 1180px)");
     const syncRails = () => {
       if (docsNav) docsNav.open = !wide.matches;
       if (toc) toc.open = !wide.matches;

@@ -564,12 +564,12 @@ def render_callouts(content: str) -> str:
     def replace(match: re.Match[str]) -> str:
         kind = match.group(1)
         label, icon = CALLOUT_KINDS[kind]
-        body = match.group(2) + match.group(3)
+        first, rest = match.group(2), match.group(3)
         return (
             f'<aside class="callout callout-{kind.lower()}" role="note">'
             f'<p class="callout-label"><svg class="callout-icon" viewBox="0 0 14 14" '
             f'aria-hidden="true">{icon}</svg>{label}</p>'
-            f"<p>{body}</p></aside>"
+            f"<p>{first}</p>{rest}</aside>"
         )
 
     return CALLOUT_BLOCK.sub(replace, content)
@@ -852,7 +852,7 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
         "</summary>"
         f'<nav class="docs-nav-inner" aria-label="Documentation">{nav_links(page.output)}</nav>'
         "</details>"
-        '<details class="toc">'
+        '<details class="toc" open>'
         '<summary class="toc-summary">On this page'
         '<svg class="docs-nav-chevron" viewBox="0 0 16 16" aria-hidden="true">'
         '<path d="m4 6 4 4 4-4"/></svg></summary>'
