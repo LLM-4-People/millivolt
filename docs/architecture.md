@@ -107,8 +107,9 @@ fits the bounded read cap, otherwise that cap, and refuses with a retryable
 and its merge has exactly two application stages: the final header stage of
 `buildUpstreamRequest`, and the cursor identity headers at the native send. Its
 body stamp is fail closed (an undecodable or oversize result relays the
-original bytes with one log line), and a nil resolution - the feature off or
-nothing matched - leaves the request path byte-identical. The sub-conversation
+original bytes with one log line, prefixed by the request id minted at the read
+boundary so the line joins the stored row), and a nil resolution - the feature
+off or nothing matched - leaves the request path byte-identical. The sub-conversation
 strip is the single body-rewrite engine's second consumer: it fires
 independently of override resolution, after the tracked value is extracted
 from the buffered body and before translation, with

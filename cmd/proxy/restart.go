@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -425,7 +426,7 @@ func (rs *restarter) run() {
 	var bin string
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("restart: panic: %v", r)
+			log.Printf("restart: panic: %v\n%s", r, debug.Stack())
 			rs.failAndResume(fmt.Errorf("panic: %v", r), listenFile, bin)
 		}
 		if listenFile != nil {

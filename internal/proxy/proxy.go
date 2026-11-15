@@ -520,6 +520,14 @@ func policyTargetOf(rec *metrics.Record) scheduler.PolicyTarget {
 	}
 }
 
+// requestLog is the one owner of the request-scoped log prefix. The record id
+// is minted at the read boundary, so a line joins the stored row, the captured
+// body and every other line of the same request instead of being an orphan
+// message under concurrent traffic.
+func requestLog(rec *metrics.Record, format string, args ...any) {
+	log.Printf("request %s: "+format, append([]any{rec.ID}, args...)...)
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The retry directive rides the outermost writer so every error sink on
 	// the relay surface (relayed upstream statuses, the retry ladder's
@@ -618,12 +626,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeProtocolHTTPError(w, t.inbound, status, errorType, err.Error())
 		return
 	}
+	// Mint the correlation id here, before the first request-scoped log line
+	// and before anything else can stamp the record: every later line carries
+	// it, so a log entry, a captured body and the stored row can be joined.
+	// The translate branch below replaces rec wholesale and restamps it.
+	rec.ID = requestID()
 	// Hold the inbound body size readRequest captured: the rewrite engine
 	// below can replace the body bytes and the translate branch replaces the
 	// whole record, but request_bytes must keep describing the client's
 	// upload (the stream/model pattern - re-stamped on the final record at
 	// the metadata wiring).
 	reqBytes := rec.RequestBytes
+	// The correlation id minted above is the one request-scoped identity; the
+	// translate branch below builds a fresh record, so carry it across.
+	reqID := rec.ID
 
 	// Cursor clients send FUSED display model ids (thinking level + tier
 	// baked into the name). Record the canonical base id instead so the
@@ -725,7 +741,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			case len(ensureTools) > 0:
 				feature = "ensured tools"
 			}
-			log.Printf("%s: body rewrite skipped for client %q, provider %q, model %q: %s; the original request bytes are relayed unchanged",
+			requestLog(rec, "%s: body rewrite skipped for client %q, provider %q, model %q: %s; the original request bytes are relayed unchanged",
 				feature, client, t.provider, recModel, why)
 		}
 	}
@@ -797,7 +813,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// not model yet; keep the inbound record there and stamp only the
 		// fields the IR owns.
 		if t.outbound == ir.Chat || t.outbound == ir.Anthropic {
-			rec = &metrics.Record{Start: rec.Start}
+			rec = &metrics.Record{Start: rec.Start, ID: reqID}
 			// The retry/class directive writer was attached to the ORIGINAL
 			// record; re-point it at the translated one, or an error response on
 			// this path would carry the class of an abandoned record.
@@ -825,7 +841,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rec.ID = requestID()
+	// The id was minted at the read boundary; re-stamp the invariant so a
+	// branch that replaced the record without carrying it cannot ship an empty
+	// primary key.
+	if rec.ID == "" {
+		rec.ID = reqID
+	}
 	rec.Provider = t.provider
 	rec.Model = recModel
 	rec.KeyHash = hashKey(key)

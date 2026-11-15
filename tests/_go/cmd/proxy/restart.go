@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -755,5 +756,35 @@ func TestRestartBudgetIncludesFlushBound(t *testing.T) {
 	want := (restartBuildTimeout + drain + restartFlushTimeout + restartReadyTimeout).Milliseconds()
 	if got := rs.status()["budget_ms"]; got != want {
 		t.Fatalf("budget_ms = %v, want %d (build + drain + flush + ready)", got, want)
+	}
+}
+
+// TestRestartPanicLogsTheStack pins the recovered-panic diagnosis: the line
+// carried only the panic value, so a choreography panic after the commit point
+// was a one-liner with no call site. The stack must be in the log.
+func TestRestartPanicLogsTheStack(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	rs := newRestarter(&restartDeps{
+		listener:     ln,
+		server:       &http.Server{},
+		cloneServer:  func() *http.Server { return &http.Server{} },
+		closeFeeds:   func() {},
+		drainTimeout: func() time.Duration { return time.Second },
+		flushStore:   func(context.Context) error { panic("fixture flush panic") },
+	})
+	rs.run()
+	logged := buf.String()
+	if !strings.Contains(logged, "restart: panic: fixture flush panic") {
+		t.Fatalf("panic value missing from the log: %s", logged)
+	}
+	if !strings.Contains(logged, "goroutine ") || !strings.Contains(logged, "cmd/proxy") {
+		t.Fatalf("panic logged without a stack: %s", logged)
 	}
 }
