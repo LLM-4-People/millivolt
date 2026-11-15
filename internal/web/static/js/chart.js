@@ -223,7 +223,7 @@ const CHART_PRESETS = [
 ];
 const activePreset = () => CHART_PRESETS.find(pr => pr.id === chartView.preset) || CHART_PRESETS[0];
 // chartImageLabel names the plot for assistive technology: a canvas has no
-// text, so the image role on the chart box carries what it currently shows.
+// text, so the plot root carries an image role with what it currently shows.
 function chartImageLabel(preset) {
   const win = ($('chart-window-label')?.textContent || '').trim();
   return win ? `${preset.label} over ${win}` : preset.label;
