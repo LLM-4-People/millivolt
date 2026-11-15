@@ -133,12 +133,12 @@ func preflightPendingSnapshot(path string) error {
 		db.Close()
 		return err
 	}
-	// The legacy empty attempts spelling is a valid admission input (scans
-	// treat it as no attempts), but HasError/count/export/purge run json_each
-	// over the raw column. Canonicalize it to the writer's own no-value
+	// The legacy empty JSON spelling is a valid admission input (scans treat
+	// it as no value), but raw json_each/json_extract consumers run on the
+	// column. Canonicalize every such column to the writer's own no-value
 	// document in the staged file before any live file is touched; merge does
 	// the equivalent during its INSERT.
-	if err := canonicalizePendingAttempts(context.Background(), db); err != nil {
+	if err := canonicalizePendingJSON(context.Background(), db); err != nil {
 		db.Close()
 		return err
 	}
@@ -242,20 +242,24 @@ func preflightDebugSidecar(ctx context.Context, db mergeConn, schema, label stri
 	return nil
 }
 
-// canonicalizePendingAttempts turns the legacy empty attempts spelling into the
+// canonicalizePendingJSON turns the legacy empty JSON spelling into the
 // writer's canonical no-value document in a staged replacement. The empty
-// spelling is admission-compatible for scans, but HasError's json_each over the
-// raw column would fail on it. A missing legacy attempts column needs no work.
-func canonicalizePendingAttempts(ctx context.Context, db *sql.DB) error {
+// spelling is admission-compatible for scans, but a raw JSON consumer would
+// fail on it. A legacy database missing one of the columns needs no work for
+// that column.
+func canonicalizePendingJSON(ctx context.Context, db *sql.DB) error {
 	columns, err := tableColumnSet(ctx, db, "", "requests")
 	if err != nil {
 		return err
 	}
-	if _, ok := columns["attempts"]; !ok {
-		return nil
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE requests SET attempts = 'null' WHERE attempts = ''`); err != nil {
-		return fmt.Errorf("canonicalize pending attempts: %w", err)
+	for _, column := range jsonNoValueColumns {
+		if _, ok := columns[column]; !ok {
+			continue
+		}
+		q := `UPDATE requests SET ` + column + ` = ` + canonicalJSONExpr(column) + ` WHERE ` + column + ` = ''`
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("canonicalize pending %s: %w", column, err)
+		}
 	}
 	return nil
 }

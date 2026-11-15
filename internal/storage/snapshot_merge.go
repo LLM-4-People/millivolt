@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -387,12 +388,12 @@ func mergeAttachedTableWhere(ctx context.Context, db mergeConn, table, where str
 	selects := make([]string, len(cols))
 	for i, col := range cols {
 		quoted := `incoming."` + col + `"`
-		// Merge owns canonicalization of JSON-bearing columns: the legacy
-		// empty spelling becomes the canonical no-value document, while a
-		// non-empty value already passed preflight's json_valid check and is
-		// copied byte-for-byte.
-		if table == "requests" && col == "attempts" {
-			quoted = `CASE WHEN incoming."attempts" IS NULL OR incoming."attempts" = '' THEN 'null' ELSE incoming."attempts" END`
+		// Merge owns canonicalization of the JSON columns: the legacy empty
+		// spelling becomes the canonical no-value document, while a non-empty
+		// value already passed preflight's json_valid check and is copied
+		// byte-for-byte.
+		if table == "requests" && slices.Contains(jsonNoValueColumns, col) {
+			quoted = canonicalJSONExpr(quoted)
 		}
 		// Merge also closes the reintroduction gap for the pre-0.3.34 TTFT
 		// anchor: a backup merged after the live database completed the boot

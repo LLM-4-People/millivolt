@@ -656,6 +656,54 @@ func TestOpenQuarantinesUnscannableScanColumnSnapshot(t *testing.T) {
 	}
 }
 
+// TestOpenCanonicalizesEmptyJSONNoValueColumns pins the replace-side half of
+// the shared JSON column list: admission rewrites the legacy empty spelling in
+// the staged file before it becomes live, so a raw json_each/json_extract
+// consumer works after the restart.
+func TestOpenCanonicalizesEmptyJSONNoValueColumns(t *testing.T) {
+	for _, column := range jsonNoValueColumns {
+		t.Run(column, func(t *testing.T) {
+			dstPath := filepath.Join(t.TempDir(), "dst.db")
+			live, err := Open(dstPath, testOpts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			live.Record(&metrics.Record{ID: "keep-old", Provider: "neutral.example", Model: "n", StatusCode: 200})
+			if err := live.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			if err := live.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			snapshot := legacySnapshot(t, schema, func(db *sql.DB) error {
+				_, err := db.Exec(`UPDATE requests SET "` + column + `" = ''`)
+				return err
+			})
+			if err := StageSnapshot(dstPath, snapshot); err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidatePendingSnapshot(dstPath); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(dstPath, testOpts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+
+			var stored string
+			var valid int
+			if err := reopened.rdb.QueryRow(`SELECT "`+column+`", json_valid("`+column+`") FROM requests WHERE id = 'legacy-row'`).Scan(&stored, &valid); err != nil {
+				t.Fatal(err)
+			}
+			if stored != "null" || valid != 1 {
+				t.Fatalf("admitted %s = %q (valid=%d), want canonical null", column, stored, valid)
+			}
+		})
+	}
+}
+
 // TestMergeAcceptsValidScanColumnValues pins the accepted side of the same
 // boundary: the writer's own representations - 0/1 booleans, ordinary
 // integers and reals, and empty text/JSON columns - must still merge and read
