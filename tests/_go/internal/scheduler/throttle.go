@@ -652,15 +652,21 @@ func TestRequestWindowPacedModeMatchesSlidingMode(t *testing.T) {
 		admitted = append(admitted, now)
 		now = now.Add(step)
 	}
+	// Every admitted stamp is non-decreasing, so one advancing pointer proves
+	// every trailing window in a single linear pass instead of rescanning the
+	// whole one-minute tail per admit (66k stamps in the tail made that
+	// quadratic and slow enough to dominate the package under -race).
+	firstIn := 0
 	for i := range admitted {
-		// Count the admits strictly after this one's window start. lo stops on
-		// the first stamp that has already left the window, so it is not part
-		// of the count: the span is admitted[lo+1..i], which is i-lo entries.
-		lo := i
-		for lo >= 0 && !admitted[lo].Before(admitted[i].Add(-time.Minute)) {
-			lo--
+		from := admitted[i].Add(-time.Minute)
+		// Skip the stamps that have already left this window. Stamp i+ cannot
+		// be earlier, so the pointer never has to move back.
+		for firstIn < i && admitted[firstIn].Before(from) {
+			firstIn++
 		}
-		if n := i - lo; int64(n) > count {
+		// admitted[firstIn..i] is the window's content; admitted[firstIn] is at
+		// or after from, and everything up to i is no earlier than it.
+		if n := i - firstIn + 1; int64(n) > count {
 			t.Fatalf("paced window holds %d admits in one minute, want <= %d", n, count)
 		}
 	}
