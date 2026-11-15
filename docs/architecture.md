@@ -72,7 +72,25 @@ content strings, and `system`. It extracts the same routing and composition
 fields without the typed decode and delegates every other shape, including all
 parameter collections, escapes, duplicates, content part arrays, and preview
 capture, to the existing decoder and its bounds. Differential tests pin
-byte-for-byte record and rejection equivalence. The Anthropic translator
+byte-for-byte record and rejection equivalence. `SkipJSONString` finds each
+candidate quote with one `IndexByte` and reads its escape parity from the
+backslash run before it, so escaped content is one forward pass instead of a
+restart per escape: an escaped 1 MiB string went from 293-333 us to 12-13 us, a
+single escape before a 1 MiB run from 420-462 us to 12-14 us, and a 100 KiB
+escaped request body from 322-331 us to 219-235 us. The metadata preflight
+counts message elements, content parts and tool calls in one walk instead of
+three, and a 100 KiB body of 200 messages with tool calls went from 266-273 us
+to 187-205 us (`BenchmarkSkipJSONString`, `BenchmarkRequestMetadataShapes`).
+The streaming analyzer scans each frame once for its classifier keys and
+classifies lexically wherever it can. Chat tool-call frames are scanned once
+for the element index, id and `function.name`, with the typed decode kept only
+as the fallback for a shape the lexical grammar rejects: 1,728-1,850 ns and 6
+allocs per frame became 945-991 ns and 1 alloc, and the 1,000-frame dedupe
+benchmark at 10,000 retained names went from 11.05-11.40 ms, 2.89 MB and 60,158
+allocs to 4.45-4.70 ms, 246 KB and 10,109 allocs
+(`BenchmarkAnalyzerFeed/tool_call`, `BenchmarkAnalyzerToolNameDedupe`). A
+differential corpus and a fuzz target compare both paths over every analyzer
+field they touch. The Anthropic translator
 independently requires valid UTF-8 input,
 so it cannot materialize the replacement expansion either. The Start stamp
 follows body upload and precedes metadata/translation CPU. Upstream
@@ -277,7 +295,12 @@ may renumber implicit rowids. The page handler classifies active filters:
 when every predicate is SQL-exact it requests exactly the remaining rows, and
 Go-only predicates grow geometrically from the page size to the 512-row batch
 cap within the 4,096-row scan budget. Both preserve the exclusive
-`(started_at, id)` cursor and `more`.
+`(started_at, id)` cursor and `more`. The candidate statement selects only the
+columns the residual groups read, and the derived error signature and tool
+labels are filled only when the plan declares them; a limit-60 5xx miss over
+200,000 rows costs 21,106 allocs and 3.4-4.2 ms instead of 66,278 allocs and
+8.5-10 ms, and the unfiltered page 2,642 allocs instead of 3,432
+(`BenchmarkHandleLogPage`).
 
 `Store.Clear` serializes administrative purges, captures an accepted-record
 boundary and publishes one command. The writer flushes earlier records, deletes
@@ -366,7 +389,11 @@ validated view/scope, canonical model rules, finalized/database revisions and,
 for explorer, pending revisions. Clock-aligned geometry also gates chart reuse.
 One in-flight fold per memo is shared by concurrent same-key callers: a
 different key never waits, and a waiter that finds no published entry after the
-leader ends recomputes as the next leader instead of inheriting its error.
+leader ends recomputes as the next leader instead of inheriting its error. The
+stability recheck hands over the fold's compiled rules identity instead of
+re-reading the config and re-marshalling up to 64 rules, so at the 64-rule
+maximum it costs 34-48 ns and 0 B/op instead of 7.7-8.0 us and 4,660 B/op
+(`BenchmarkAggregateUnchanged`).
 The bootstrap KPI fold retains one exact totals slot keyed by the ring's
 finalized revision and the store's durable accounting revision; live counters
 are filled at serve time and the ring snapshot itself is never retained.
@@ -418,7 +445,8 @@ selectable card. The card ranking remains exact among tracked values, with
 reserved other slot so their percentile samples still select correctly. Rows
 store the group's 16-bit membership slot, not its dimension-wide dictionary id,
 so the per-row table is two bytes and the selected-card lookup is a bounded
-probe instead of a max-id-sized array. Rail
+probe instead of a max-id-sized array; a 100,000-row provider fold drops from
+406,296 B/op to 209,688 B/op (`BenchmarkAggregateFold/explorer`). Rail
 distinct-value counts, scope totals and conversation summaries remain
 whole-history values and are not derived from the truncated group set.
 Selected groups use the same exact rank reader as chart buckets,
@@ -431,7 +459,10 @@ samples): a catch-up append folds only its new samples, so it stays
 O(delta log delta) regardless of history, and reaching the bound arms one
 background fold that runs off the request and publishes the merged base under a
 one-assignment write. Readers keep the current base and pending until then, so
-an interrupted fold only leaves the published order in place. Chart and explorer
+an interrupted fold only leaves the published order in place. An append that
+crosses the bound at one million rows costs 0.47-1.54 ms and 3.96 MB instead of
+12.0-15.7 ms and 52.2 MB; the fold itself still costs 12.9 ms and 48 MB, now off
+the request (`BenchmarkProjectionMetricAppend`). Chart and explorer
 walk the two runs through one merge iterator, so a fresh view allocates no
 history-sized copy; a materialized merge stays cached per published snapshot
 only for consumers that need a slice. A full rebuild replaces the base, clears
@@ -442,7 +473,11 @@ pending delta design and its own per-snapshot view holder, so a sub-threshold
 catch-up merges only its new batch instead of copying the tail; a rebuild of
 the newest 65,536 rows replaces its base, clears the pending delta and releases
 samples that fell out of the tail. Older or unscoped windows fall back to the
-all-history order, so the fast path never changes rank or stat results.
+all-history order, so the fast path never changes rank or stat results. Chart
+membership is indexed from the first row a bounded window accepts and sized
+only to that window's remaining span, so a 15-minute view over 100,000 rows
+costs 335-347 us and 17,616 B/op instead of 560-588 us and 123,088 B/op; the
+All path keeps its historical allocation (`BenchmarkAggregateFold/chart_window`).
 
 Both consumers share R7 rank/interpolation and the minimum-sample gate. Period
 speed/TTFT percentiles use period samples, never means of bucket percentiles.
@@ -514,7 +549,11 @@ record/end serialization never takes the ring lock. Canonical names are
 memoized across observer calls under the compiled rules revision, and each
 known-name vocabulary caches its sorted view under a set revision. Both caches
 are bounded and invalidate on content change, so bootstrap polls do not re-run
-the rules or re-sort thousands of names.
+the rules or re-sort thousands of names. The single-name memo owns the whole
+payload under one mutex keyed by the rules revision, so a repeat at event rate
+costs one lock and one lookup: 121-264 ns, 392 B/op and 4 allocs became 44-88
+ns, 24 B/op and 1 alloc, and 323-366 ns became 54-86 ns at the 64-rule maximum
+(`BenchmarkObserveModelNameEvent`, `BenchmarkObserveModelNames4096`).
 
 Pinned names are derived from the live holds, debug sessions and limit policies,
 never accumulated, so a removed document releases its scope. The derivation
@@ -593,7 +632,10 @@ when the same read fails. See the [MCP server guide](mcp.md).
 ## Dashboard render owners
 
 HTML embeds the canonical bootstrap builder's JSON, safely escaped in an inert
-data block. Deferred external assets download alongside HTML; the Settings
+data block. Transit gzip is negotiated from `Accept-Encoding` with only the `q`
+parameter read: unknown parameters are ignored, a bare `*` accepts gzip, and an
+explicit gzip entry outranks the wildcard; an unparseable or out-of-range
+qvalue refuses. Deferred external assets download alongside HTML; the Settings
 sheet is the one exception: its ordered `settings*.js` set is injected by the
 Settings trigger on first open, one module at a time under the same versioned
 URL, and single-flighted across concurrent opens. Saved hash/chart choices
