@@ -20,6 +20,13 @@ module.exports = async function operatorMenus(H) {
     el.click();
     return el;
   };
+  // A row control is painted by a repaint the previous step scheduled, so on a
+  // loaded runner it can be absent when the press is issued. Wait for the node
+  // before pressing it.
+  const clickWait = async sel => {
+    await settleUntil(() => !!q(sel));
+    return click(sel);
+  };
   const text = sel => {
     const el = typeof sel === 'string' ? q(sel) : sel;
     return el ? el.textContent : null;
@@ -855,7 +862,7 @@ module.exports = async function operatorMenus(H) {
         anti_burst: false, ramp_duration: '', source: 'ui', in_flight: 0, queued: 0,
       };
       w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'], throttles: [policy]});
-      click('#oc-pane [data-oc-edit="limit"][data-oc-id="pol-edit"]');
+      await clickWait('#oc-pane [data-oc-edit="limit"][data-oc-id="pol-edit"]');
       const draft = evalJSON('({id: ocDrafts.limit.id, scope: ocDrafts.limit.scope, ' +
         'concurrency: ocDrafts.limit.concurrency, requests: ocDrafts.limit.requests, ' +
         'tokens: ocDrafts.limit.tokens, tokenWindow: ocDrafts.limit.tokenWindow, ' +
@@ -905,7 +912,7 @@ module.exports = async function operatorMenus(H) {
       // A rule removed under the edit answers 404; that is the same fact and
       // takes the same way out, not a repeated failure line.
       w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'], throttles: [policy]});
-      click('#oc-pane [data-oc-edit="limit"][data-oc-id="pol-edit"]');
+      await clickWait('#oc-pane [data-oc-edit="limit"][data-oc-id="pol-edit"]');
       const savedLimitFetch = w.fetch;
       w.fetch = async (url, options) => String(url).includes('/admin/throttle')
         ? {ok: false, status: 404, json: async () => ({error: 'that limit is no longer in force'})}
@@ -923,7 +930,7 @@ module.exports = async function operatorMenus(H) {
       // Copy is the follow-up path: the same scope and schedule, no budgets,
       // and no id, so the write creates a second rule instead of editing the
       // first. Retyping four dimensions was the most expensive task here.
-      click('#oc-pane [data-oc-copy="limit"][data-oc-id="pol-edit"]');
+      await clickWait('#oc-pane [data-oc-copy="limit"][data-oc-id="pol-edit"]');
       const copied = evalJSON('({id: ocDrafts.limit.id, scope: ocDrafts.limit.scope,'
         + 'schedule: ocDrafts.limit.schedule, concurrency: ocDrafts.limit.concurrency,'
         + 'requests: ocDrafts.limit.requests, tokens: ocDrafts.limit.tokens,'
