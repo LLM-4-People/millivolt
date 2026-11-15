@@ -135,7 +135,7 @@ func (a *AggAPI) withProjectionBudget(ctx context.Context, budget projectionBudg
 	if a.store == nil {
 		return fn(nil)
 	}
-	if err := a.projection.refresh(ctx, a.store, budget); err != nil {
+	if err := a.projection.refresh(ctx, a.store, budget, a.testHooks); err != nil {
 		return err
 	}
 	a.projection.mu.RLock()
@@ -158,7 +158,7 @@ func (a *AggAPI) withProjectionBudget(ctx context.Context, budget projectionBudg
 // ring is not stored history.
 func (a *AggAPI) dataFromMs(ctx context.Context) int64 {
 	if a.store != nil {
-		_ = a.projection.refresh(ctx, a.store, projectionInteractive)
+		_ = a.projection.refresh(ctx, a.store, projectionInteractive, a.testHooks)
 	}
 	a.projection.mu.RLock()
 	defer a.projection.mu.RUnlock()
@@ -241,7 +241,7 @@ func projectionStream(ctx context.Context, store *storage.Store, budget projecti
 	return store.StreamProjection(ctx, rowColumns, cursor, fn)
 }
 
-func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, budget projectionBudget) error {
+func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, budget projectionBudget, hooks *aggregateTestHooks) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -305,98 +305,113 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 		p.building = done
 		p.mu.Unlock()
 
-		// Materialize off the lock. The version was read before the scan: a
-		// commit landing during it leaves the projection stamped older, so the
-		// next read catches up instead of falsely declaring the rows fresh.
-		// Labels travel beside the rows for the single interning step: the scan
-		// never builds the live sidecar a durable row would drop immediately.
-		var incoming []contrib
-		var incomingLabels []contribLabels
-		scanned := 0
-		next, full, err := projectionStream(ctx, store, budget, startCursor, func(rows *sql.Rows) error {
-			c, labels, err := scanContrib(rows) // raw spelling; query rules apply later
-			if err != nil {
-				return err
-			}
-			incoming = append(incoming, c)
-			incomingLabels = append(incomingLabels, labels)
-			scanned++
-			// Check cancellation periodically so an abandoned dashboard request
-			// cannot keep a full-history decode running to completion.
-			return checkFoldContext(ctx, scanned)
-		})
-		if err == nil {
-			err = ctx.Err()
-		}
+		retry, err := p.buildProjectionOnce(ctx, store, budget, done, base, startCursor, version, classRev, hooks)
 		if err != nil {
-			p.finishBuild(done)
 			return err
 		}
-
-		p.mu.Lock()
-		if p.data.version != base.version || p.data.cursor != base.cursor {
-			// Defensive: the build token makes this unreachable today. Never
-			// apply a delta onto a different base; release and retry instead.
-			p.finishBuildLocked(done)
-			p.mu.Unlock()
-			continue
-		}
-		if full {
-			data, err := buildProjection(incoming, incomingLabels, next, version)
-			if err != nil {
-				p.finishBuildLocked(done)
-				p.mu.Unlock()
-				return err
-			}
-			data.classRevision = classRev
-			p.data = data
-			p.finishBuildLocked(done)
-			p.mu.Unlock()
+		if !retry {
 			return nil
 		}
-		data := p.data
-		// Compact metric-order indices are uint32; reject before narrowing or
-		// mutating a published dictionary (an arithmetic guard, not a history cap).
-		if uint64(len(data.rows))+uint64(len(incoming)) > math.MaxUint32 {
+	}
+}
+
+// buildProjectionOnce materializes one projection delta or replacement under
+// the build token done and publishes it. The deferred release runs on every
+// exit, including a panic in the scan callback, the row decode or the
+// interning loop, so a failed build can never leave readers waiting on a token
+// nobody will close. It reports retry when the snapshot base moved under the
+// build and the caller must scan again.
+func (p *historyProjection) buildProjectionOnce(ctx context.Context, store *storage.Store, budget projectionBudget, done chan struct{}, base projectionData, startCursor storage.ProjectionCursor, version int64, classRev uint64, hooks *aggregateTestHooks) (retry bool, err error) {
+	defer p.finishBuild(done)
+	// Materialize off the lock. The version was read before the scan: a
+	// commit landing during it leaves the projection stamped older, so the
+	// next read catches up instead of falsely declaring the rows fresh.
+	// Labels travel beside the rows for the single interning step: the scan
+	// never builds the live sidecar a durable row would drop immediately.
+	var incoming []contrib
+	var incomingLabels []contribLabels
+	scanned := 0
+	next, full, err := projectionStream(ctx, store, budget, startCursor, func(rows *sql.Rows) error {
+		if hooks != nil && hooks.scan != nil {
+			hooks.scan()
+		}
+		c, labels, err := scanContrib(rows) // raw spelling; query rules apply later
+		if err != nil {
+			return err
+		}
+		incoming = append(incoming, c)
+		incomingLabels = append(incomingLabels, labels)
+		scanned++
+		// Check cancellation periodically so an abandoned dashboard request
+		// cannot keep a full-history decode running to completion.
+		return checkFoldContext(ctx, scanned)
+	})
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		return false, err
+	}
+
+	// The lock's deferred unlock runs before the deferred build release.
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.data.version != base.version || p.data.cursor != base.cursor {
+		// Defensive: the build token makes this unreachable today. Never
+		// apply a delta onto a different base; release and retry instead.
+		p.finishBuildLocked(done)
+		return true, nil
+	}
+	if full {
+		data, err := buildProjection(incoming, incomingLabels, next, version)
+		if err != nil {
 			p.finishBuildLocked(done)
-			p.mu.Unlock()
-			return errors.New("analytical row index capacity exceeded")
+			return false, err
 		}
-		for _, c := range incoming {
-			if c.id != "" {
-				if _, exists := data.ids[c.id]; exists {
-					p.finishBuildLocked(done)
-					p.mu.Unlock()
-					return errors.New("analytical append unexpectedly replaced an existing request")
-				}
-			}
-		}
-		previousRows := len(data.rows)
-		for i := range incoming {
-			c := &incoming[i]
-			c.rowIndex = uint32(previousRows + i + 1)
-			data.dimensions.internLabels(c, incomingLabels[i])
-			if !data.hasStart || c.start < data.minStart {
-				data.minStart, data.hasStart = c.start, true
-			}
-			data.noteChunkStart(c.rowIndex, c.start)
-			if c.id != "" {
-				data.ids[c.id] = struct{}{}
-			}
-		}
-		// growRows covers the delta append with one owner; spare capacity never
-		// exceeds the incoming batch.
-		data.rows = growRows(data.rows, incoming)
-		if data.lineage.appendRows(incoming) {
-			data.lineage.resolve()
-		}
-		data.metrics.append(data.rows, previousRows)
-		data.cursor, data.version, data.classRevision = next, version, classRev
+		data.classRevision = classRev
 		p.data = data
 		p.finishBuildLocked(done)
-		p.mu.Unlock()
-		return nil
+		return false, nil
 	}
+	data := p.data
+	// Compact metric-order indices are uint32; reject before narrowing or
+	// mutating a published dictionary (an arithmetic guard, not a history cap).
+	if uint64(len(data.rows))+uint64(len(incoming)) > math.MaxUint32 {
+		p.finishBuildLocked(done)
+		return false, errors.New("analytical row index capacity exceeded")
+	}
+	for _, c := range incoming {
+		if c.id != "" {
+			if _, exists := data.ids[c.id]; exists {
+				p.finishBuildLocked(done)
+				return false, errors.New("analytical append unexpectedly replaced an existing request")
+			}
+		}
+	}
+	previousRows := len(data.rows)
+	for i := range incoming {
+		c := &incoming[i]
+		c.rowIndex = uint32(previousRows + i + 1)
+		data.dimensions.internLabels(c, incomingLabels[i])
+		if !data.hasStart || c.start < data.minStart {
+			data.minStart, data.hasStart = c.start, true
+		}
+		data.noteChunkStart(c.rowIndex, c.start)
+		if c.id != "" {
+			data.ids[c.id] = struct{}{}
+		}
+	}
+	// growRows covers the delta append with one owner; spare capacity never
+	// exceeds the incoming batch.
+	data.rows = growRows(data.rows, incoming)
+	if data.lineage.appendRows(incoming) {
+		data.lineage.resolve()
+	}
+	data.metrics.append(data.rows, previousRows)
+	data.cursor, data.version, data.classRevision = next, version, classRev
+	p.data = data
+	p.finishBuildLocked(done)
+	return false, nil
 }
 
 // buildProjection constructs a complete replacement off the lock (destructive

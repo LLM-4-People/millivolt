@@ -341,7 +341,9 @@ post-reload request.
 
 Materialization runs off the projection lock with one single-flight builder;
 concurrent readers keep serving the previous complete snapshot and wait for
-that builder instead of repeating its scan. A destructive change builds a
+that builder instead of repeating its scan. The builder's token is released by
+a defer, so a panic in the scan, decode or interning step frees the waiters
+instead of wedging them until restart. A destructive change builds a
 complete replacement off-lock and swaps it under a short write lock. The
 durable since-inception totals are one meta row written in the same
 transaction as every insert, purge and merge on the held writer connection;

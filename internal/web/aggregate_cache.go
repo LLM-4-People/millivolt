@@ -50,11 +50,14 @@ type aggregateFlight struct {
 // a caller joining an in-flight fold so package tests can sequence leader and
 // follower deterministically. lineage marks the payload's first conversation
 // lineage read, which the fixed explorer builds under the projection read
-// lease; tests use it to sequence an append against that boundary.
+// lease; tests use it to sequence an append against that boundary. scan runs
+// per streamed projection row, so a test can fail inside the builder's own
+// callback.
 type aggregateTestHooks struct {
 	cold    func()
 	wait    func()
 	lineage func()
+	scan    func()
 }
 
 func (a *AggAPI) testColdHook() {
