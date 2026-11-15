@@ -219,7 +219,7 @@ func TestOpenQuarantinesNullScanRequiredColumnSnapshot(t *testing.T) {
 			if err := StageSnapshot(dstPath, data); err != nil {
 				t.Fatal(err)
 			}
-			if err := ValidatePendingSnapshot(dstPath); err == nil || !strings.Contains(err.Error(), "NULL "+tc.column) {
+			if err := ValidatePendingSnapshot(t.Context(), dstPath); err == nil || !strings.Contains(err.Error(), "NULL "+tc.column) {
 				t.Fatalf("ValidatePendingSnapshot = %v, want a NULL %s rejection", err, tc.column)
 			}
 			if _, err := os.Stat(PendingSnapshotPath(dstPath)); err != nil {
@@ -491,7 +491,7 @@ func TestOpenQuarantinesNullRequestIDSnapshot(t *testing.T) {
 	if err := StageSnapshot(dstPath, data); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidatePendingSnapshot(dstPath); err == nil || !strings.Contains(err.Error(), "NULL id") {
+	if err := ValidatePendingSnapshot(t.Context(), dstPath); err == nil || !strings.Contains(err.Error(), "NULL id") {
 		t.Fatalf("ValidatePendingSnapshot = %v, want a NULL id rejection", err)
 	}
 	if _, err := os.Stat(PendingSnapshotPath(dstPath)); err != nil {
@@ -626,7 +626,7 @@ func TestOpenQuarantinesUnscannableScanColumnSnapshot(t *testing.T) {
 			if err := StageSnapshot(dstPath, scanColumnValueSnapshot(t, tc.column, tc.value)); err != nil {
 				t.Fatal(err)
 			}
-			if err := ValidatePendingSnapshot(dstPath); err == nil || !strings.Contains(err.Error(), tc.column) {
+			if err := ValidatePendingSnapshot(t.Context(), dstPath); err == nil || !strings.Contains(err.Error(), tc.column) {
 				t.Fatalf("ValidatePendingSnapshot = %v, want a %s rejection", err, tc.column)
 			}
 			if _, err := os.Stat(PendingSnapshotPath(dstPath)); err != nil {
@@ -677,7 +677,7 @@ func TestOpenCanonicalizesEmptyJSONNoValueColumns(t *testing.T) {
 			if err := StageSnapshot(dstPath, snapshot); err != nil {
 				t.Fatal(err)
 			}
-			if err := ValidatePendingSnapshot(dstPath); err != nil {
+			if err := ValidatePendingSnapshot(t.Context(), dstPath); err != nil {
 				t.Fatal(err)
 			}
 			reopened, err := Open(dstPath, testOpts)

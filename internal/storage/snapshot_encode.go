@@ -156,15 +156,18 @@ func StageSnapshotFile(path, source string) error {
 // immediately after StageSnapshotFile so a replacement the next boot would
 // reject (an extra required column, a missing id key, a trigger that aborts
 // the writer INSERT) fails while the config member is still unwritten and the
-// pending guard can roll back. The live database is untouched. The staged file
+// pending guard can roll back, bounded by the maintenance budget. The live
+// database is untouched. The staged file
 // may be migrated in place and its stale sidecars removed, exactly as a boot
 // admission would do; the caller owns removing or quarantining it on failure.
-func ValidatePendingSnapshot(path string) error {
+func ValidatePendingSnapshot(ctx context.Context, path string) error {
 	resolved, err := ResolveDatabasePath(path)
 	if err != nil {
 		return err
 	}
-	return preflightPendingSnapshot(PendingSnapshotPath(resolved))
+	ctx, cancel := context.WithTimeout(ctx, maintenanceTimeout)
+	defer cancel()
+	return preflightPendingSnapshot(ctx, PendingSnapshotPath(resolved))
 }
 
 // publishSnapshot is the one atomic publish owner for both snapshot wrappers:

@@ -144,7 +144,7 @@ func TestRestoreRejectsDatabaseFailingWriterPreflight(t *testing.T) {
 	if _, err := os.Stat(pending); err != nil {
 		t.Fatalf("valid restore did not publish the pending snapshot: %v", err)
 	}
-	if err := storage.ValidatePendingSnapshot(livePath); err != nil {
+	if err := storage.ValidatePendingSnapshot(t.Context(), livePath); err != nil {
 		t.Fatalf("staged valid snapshot no longer passes preflight: %v", err)
 	}
 	assertNoPreservedPending(t, dir)

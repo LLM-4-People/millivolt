@@ -209,8 +209,8 @@ func projectionSchema() string {
 // alone would retain an older binary's definitions forever after an upgrade.
 // Replacing a definition invalidates all existing decoded projections at the
 // same commit; running readers still fail closed on unexpected schema edits.
-func ensureProjectionTriggers(db *sql.DB) error {
-	tx, err := db.Begin()
+func ensureProjectionTriggers(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -248,7 +248,7 @@ func ensureProjectionTriggers(db *sql.DB) error {
 // the HasError purge predicate runs json_each over that column, and SQLite
 // raises "malformed JSON" on any non-JSON value, denying the errors-only
 // purge/count/export outright.
-func migrate(db *sql.DB) error {
+func migrate(ctx context.Context, db *sql.DB) error {
 	// idx_requests_log(started_at, id) is the only request-log index. Remove
 	// every superseded spelling once: the timestamp-only and single-column
 	// provider/model predecessors, plus the six per-dimension composites this
@@ -262,16 +262,16 @@ func migrate(db *sql.DB) error {
 	reclaim := false
 	for _, index := range supersededRequestLogIndexes {
 		var exists int
-		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_schema
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_schema
 			WHERE type = 'index' AND tbl_name = 'requests' AND name = ?)`, index).Scan(&exists); err != nil {
 			return fmt.Errorf("inspect superseded index %s: %w", index, err)
 		}
 		reclaim = reclaim || exists == 1
-		if _, err := db.Exec("DROP INDEX IF EXISTS " + index); err != nil {
+		if _, err := db.ExecContext(ctx, "DROP INDEX IF EXISTS "+index); err != nil {
 			return err
 		}
 	}
-	if _, err := db.Exec(requestDebugDDL); err != nil {
+	if _, err := db.ExecContext(ctx, requestDebugDDL); err != nil {
 		return fmt.Errorf("request_debug: %w", err)
 	}
 	cols, err := tableColumnSet(context.Background(), db, "", "requests")
@@ -356,7 +356,7 @@ func migrate(db *sql.DB) error {
 	}
 	for _, c := range needed {
 		if _, ok := cols[c.name]; !ok {
-			if _, err := db.Exec(c.ddl); err != nil {
+			if _, err := db.ExecContext(ctx, c.ddl); err != nil {
 				return fmt.Errorf("add column %s: %w", c.name, err)
 			}
 		}
@@ -373,20 +373,20 @@ func migrate(db *sql.DB) error {
 	// and is written after a clean probe or after the repair itself. Every
 	// later boot reads one meta row instead of rescanning the table.
 	var repaired string
-	if err := db.QueryRow(`SELECT value FROM meta WHERE key = ?`, attemptsRepairMetaKey).Scan(&repaired); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, attemptsRepairMetaKey).Scan(&repaired); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("repair attempts marker: %w", err)
 	}
 	if repaired == "" {
 		var brokenAttempts int
-		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests WHERE attempts = '')`).Scan(&brokenAttempts); err != nil {
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM requests WHERE attempts = '')`).Scan(&brokenAttempts); err != nil {
 			return fmt.Errorf("repair attempts: %w", err)
 		}
 		if brokenAttempts != 0 {
-			if _, err := db.Exec(`UPDATE requests SET attempts = 'null' WHERE attempts = ''`); err != nil {
+			if _, err := db.ExecContext(ctx, `UPDATE requests SET attempts = 'null' WHERE attempts = ''`); err != nil {
 				return fmt.Errorf("repair attempts: %w", err)
 			}
 		}
-		if _, err := db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, attemptsRepairMetaKey); err != nil {
+		if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, attemptsRepairMetaKey); err != nil {
 			return fmt.Errorf("repair attempts marker: %w", err)
 		}
 	}
@@ -396,20 +396,20 @@ func migrate(db *sql.DB) error {
 	// Decode treats both as no names, but raw json_each consumers such as the
 	// MCP values(dim:"tool") probe require valid JSON, so canonicalize once.
 	var repairedToolNames string
-	if err := db.QueryRow(`SELECT value FROM meta WHERE key = ?`, toolNamesRepairMetaKey).Scan(&repairedToolNames); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, toolNamesRepairMetaKey).Scan(&repairedToolNames); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("repair tool_names marker: %w", err)
 	}
 	if repairedToolNames == "" {
 		var brokenToolNames int
-		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests WHERE tool_names = '')`).Scan(&brokenToolNames); err != nil {
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM requests WHERE tool_names = '')`).Scan(&brokenToolNames); err != nil {
 			return fmt.Errorf("repair tool_names: %w", err)
 		}
 		if brokenToolNames != 0 {
-			if _, err := db.Exec(`UPDATE requests SET tool_names = 'null' WHERE tool_names = ''`); err != nil {
+			if _, err := db.ExecContext(ctx, `UPDATE requests SET tool_names = 'null' WHERE tool_names = ''`); err != nil {
 				return fmt.Errorf("repair tool_names: %w", err)
 			}
 		}
-		if _, err := db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, toolNamesRepairMetaKey); err != nil {
+		if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, toolNamesRepairMetaKey); err != nil {
 			return fmt.Errorf("repair tool_names marker: %w", err)
 		}
 	}
@@ -429,16 +429,16 @@ func migrate(db *sql.DB) error {
 	// document's epoch no longer match and rebuilds it from rows. That is the
 	// invalidation path here - totalsMetaVersion is deliberately not bumped.
 	var repairedTTFT string
-	if err := db.QueryRow(`SELECT value FROM meta WHERE key = ?`, ttftAnchorRepairMetaKey).Scan(&repairedTTFT); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, ttftAnchorRepairMetaKey).Scan(&repairedTTFT); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("repair ttft anchor marker: %w", err)
 	}
 	if repairedTTFT == "" {
 		var legacyAnchors int
-		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests WHERE ttft_ms > 0 AND final_attempt_at = 0)`).Scan(&legacyAnchors); err != nil {
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM requests WHERE ttft_ms > 0 AND final_attempt_at = 0)`).Scan(&legacyAnchors); err != nil {
 			return fmt.Errorf("repair ttft anchor: %w", err)
 		}
 		if legacyAnchors != 0 {
-			res, err := db.Exec(`UPDATE requests SET ttft_ms = 0 WHERE ttft_ms > 0 AND final_attempt_at = 0`)
+			res, err := db.ExecContext(ctx, `UPDATE requests SET ttft_ms = 0 WHERE ttft_ms > 0 AND final_attempt_at = 0`)
 			if err != nil {
 				return fmt.Errorf("repair ttft anchor: %w", err)
 			}
@@ -448,18 +448,18 @@ func migrate(db *sql.DB) error {
 			}
 			log.Printf("storage: repaired %d pre-0.3.34 TTFT anchors (ttft_ms reset to 0)", n)
 		}
-		if _, err := db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, ttftAnchorRepairMetaKey); err != nil {
+		if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, ttftAnchorRepairMetaKey); err != nil {
 			return fmt.Errorf("repair ttft anchor marker: %w", err)
 		}
 	}
 	// Every leading equality column now exists, whether this database was just
 	// created with the full schema or upgraded by the ALTER pass above. Build
 	// the ordered log indexes once; IF NOT EXISTS keeps later boots cheap.
-	if _, err := db.Exec(requestLogIndexDDL); err != nil {
+	if _, err := db.ExecContext(ctx, requestLogIndexDDL); err != nil {
 		return fmt.Errorf("log indexes: %w", err)
 	}
 	if reclaim {
-		reclaimIndexPages(db)
+		reclaimIndexPages(ctx, db)
 	}
 	return nil
 }
@@ -477,8 +477,7 @@ func migrate(db *sql.DB) error {
 // can reclaim the freelist manually (see docs/operations.md). The connection
 // comes from the same DSN pool, so WAL mode, busy_timeout, synchronous and the
 // other connection pragmas remain in force.
-func reclaimIndexPages(db *sql.DB) {
-	ctx := context.Background()
+func reclaimIndexPages(ctx context.Context, db *sql.DB) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		log.Printf("storage: reclaim freed index pages: acquire connection: %v (request rows are intact; run VACUUM manually to reclaim disk)", err)

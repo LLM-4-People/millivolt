@@ -127,7 +127,7 @@ func TestValidatePendingSnapshotRejectsEmptyAndHeaderless(t *testing.T) {
 			if err := os.WriteFile(incoming, tc.data, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			err := ValidatePendingSnapshot(dstPath)
+			err := ValidatePendingSnapshot(t.Context(), dstPath)
 			if err == nil {
 				t.Fatal("ValidatePendingSnapshot accepted an unusable pending file")
 			}

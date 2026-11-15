@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -26,6 +27,8 @@ type snapshotAdmission struct {
 // database stays untouched. Its errors are returned bare: Open owns the
 // single "pending snapshot:" label.
 func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), maintenanceTimeout)
+	defer cancel()
 	if err := recoverInterruptedSnapshot(path); err != nil {
 		return nil, err
 	}
@@ -62,7 +65,7 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 		rejectPendingSnapshot(incoming, err)
 		return nil, nil
 	}
-	if err := preflightPendingSnapshot(incoming); err != nil {
+	if err := preflightPendingSnapshot(ctx, incoming); err != nil {
 		// An incoming file that cannot be initialized in place is no more
 		// usable than an integrity-invalid one: preserve its bytes as
 		// quarantine and keep serving the live database.

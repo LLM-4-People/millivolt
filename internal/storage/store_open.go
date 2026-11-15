@@ -299,14 +299,14 @@ func databaseDirectoryDiagnosis(path string) string {
 // preflight runs the identical sequence on the staged file before admission,
 // so a snapshot that would fail here is quarantined before any live file is
 // touched. Labels are part of Open's observable error contract.
-func initializeDatabase(db *sql.DB, path string) error {
-	if _, err := db.Exec(schema); err != nil {
+func initializeDatabase(ctx context.Context, db *sql.DB, path string) error {
+	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("schema: %w", cantOpenContext(err, path))
 	}
-	if err := ensureProjectionTriggers(db); err != nil {
+	if err := ensureProjectionTriggers(ctx, db); err != nil {
 		return fmt.Errorf("analytical projection triggers: %w", err)
 	}
-	if err := migrate(db); err != nil {
+	if err := migrate(ctx, db); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	// Schema/migrate alone does not prove the writer can write this database.
@@ -316,7 +316,7 @@ func initializeDatabase(db *sql.DB, path string) error {
 	// writer goroutine (or a pending snapshot is admitted) and every batch
 	// fails. Shared by Open and the pending-snapshot preflight so live boot
 	// and restore admission cannot disagree about a writable schema.
-	if err := probeWriterInsert(db); err != nil {
+	if err := probeWriterInsert(ctx, db); err != nil {
 		return fmt.Errorf("writer insert probe: %w", err)
 	}
 	return nil
@@ -464,7 +464,7 @@ func Open(path string, opts Options) (*Store, error) {
 	if err != nil {
 		return fail(fmt.Errorf("open sqlite: %w", err))
 	}
-	if err := initializeDatabase(db, path); err != nil {
+	if err := initializeDatabase(context.Background(), db, path); err != nil {
 		db.Close()
 		return fail(err)
 	}

@@ -447,7 +447,7 @@ func TestMigrateRepairProbeIsOneShot(t *testing.T) {
 	}
 
 	// First migrate: probe finds the '' row, repairs it, writes the marker.
-	if err := migrate(db); err != nil {
+	if err := migrate(t.Context(), db); err != nil {
 		t.Fatal(err)
 	}
 	if got := attempts(); got != "null" {
@@ -462,7 +462,7 @@ func TestMigrateRepairProbeIsOneShot(t *testing.T) {
 	if _, err := db.Exec(`UPDATE requests SET attempts = ''`); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrate(db); err != nil {
+	if err := migrate(t.Context(), db); err != nil {
 		t.Fatal(err)
 	}
 	if got := attempts(); got != "" {
@@ -474,7 +474,7 @@ func TestMigrateRepairProbeIsOneShot(t *testing.T) {
 	if _, err := db.Exec(`DELETE FROM meta WHERE key = ?`, attemptsRepairMetaKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrate(db); err != nil {
+	if err := migrate(t.Context(), db); err != nil {
 		t.Fatal(err)
 	}
 	if got := attempts(); got != "null" {
@@ -657,7 +657,7 @@ func TestMigrateTTFTAnchorRepairProbeIsOneShot(t *testing.T) {
 
 	// First migrate: the row already matches the signature (positive ttft_ms,
 	// final_attempt_at added as 0), so it is zeroed and the marker written.
-	if err := migrate(db); err != nil {
+	if err := migrate(t.Context(), db); err != nil {
 		t.Fatal(err)
 	}
 	if got := ttft(); got != 0 {
@@ -672,7 +672,7 @@ func TestMigrateTTFTAnchorRepairProbeIsOneShot(t *testing.T) {
 	if _, err := db.Exec(`UPDATE requests SET ttft_ms = 555, final_attempt_at = 0 WHERE id = 'legacy-ttft'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrate(db); err != nil {
+	if err := migrate(t.Context(), db); err != nil {
 		t.Fatal(err)
 	}
 	if got := ttft(); got != 555 {
@@ -684,7 +684,7 @@ func TestMigrateTTFTAnchorRepairProbeIsOneShot(t *testing.T) {
 	if _, err := db.Exec(`DELETE FROM meta WHERE key = ?`, ttftAnchorRepairMetaKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrate(db); err != nil {
+	if err := migrate(t.Context(), db); err != nil {
 		t.Fatal(err)
 	}
 	if got := ttft(); got != 0 {

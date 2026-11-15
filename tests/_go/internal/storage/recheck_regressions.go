@@ -83,7 +83,7 @@ func replaceSnapshot(t *testing.T, data []byte) (*Store, error) {
 	if err := StageSnapshot(path, data); err != nil {
 		t.Fatalf("stage snapshot: %v", err)
 	}
-	if err := ValidatePendingSnapshot(path); err != nil {
+	if err := ValidatePendingSnapshot(t.Context(), path); err != nil {
 		return nil, err
 	}
 	reopened, err := Open(path, testOpts)
@@ -631,7 +631,7 @@ func TestRestoreRejectsUnownedRequestTriggers(t *testing.T) {
 	if err := StageSnapshotFile(path, src); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidatePendingSnapshot(path); err == nil {
+	if err := ValidatePendingSnapshot(t.Context(), path); err == nil {
 		t.Fatal("poison trigger replacement was admitted")
 	} else if !strings.Contains(err.Error(), "unowned trigger") {
 		t.Fatalf("trigger rejection = %v", err)
@@ -699,7 +699,7 @@ func TestRestoreRejectsCrossTableTriggers(t *testing.T) {
 			if err := StageSnapshotFile(path, src); err != nil {
 				t.Fatal(err)
 			}
-			if err := ValidatePendingSnapshot(path); err == nil {
+			if err := ValidatePendingSnapshot(t.Context(), path); err == nil {
 				t.Fatalf("%s trigger replacement was admitted", tc.name)
 			} else if !strings.Contains(err.Error(), "unowned trigger") {
 				t.Fatalf("trigger rejection = %v", err)
@@ -768,7 +768,7 @@ func TestWriterProbeReadsItsSentinelBack(t *testing.T) {
 		BEGIN DELETE FROM requests WHERE id = NEW.id; END`); err != nil {
 		t.Fatal(err)
 	}
-	if err := probeWriterInsert(db); err == nil {
+	if err := probeWriterInsert(t.Context(), db); err == nil {
 		t.Fatal("writer probe accepted a row its trigger deleted")
 	} else if !strings.Contains(err.Error(), "probe row") {
 		t.Fatalf("probe error = %v", err)

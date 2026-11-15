@@ -944,7 +944,7 @@ func applyRestoreDatabase(ctx context.Context, dbPath, source, mode string, stor
 	// Boot preflights the pending file before admitting it; a restore that
 	// stops at integrity staging would return 200 for a database the next
 	// boot rejects. Run the same preflight now, before the config is written.
-	if err := storage.ValidatePendingSnapshot(dbPath); err != nil {
+	if err := storage.ValidatePendingSnapshot(ctx, dbPath); err != nil {
 		return false, nil, rollbackRestorePending(guard, err)
 	}
 	return true, guard, nil
