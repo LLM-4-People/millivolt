@@ -14,6 +14,7 @@ package main
 // answers the reserved-namespace 404.
 
 import (
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
@@ -179,4 +180,30 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 			t.Errorf("POST %s: status = %d, want the reserved-namespace 404", retired, response.StatusCode)
 		}
 	})
+}
+
+// TestSessionCookieNonceUsesTheDeclaredLength pins the nonce to its single
+// owner: the mint wrote a literal 16 while validSession rejected anything but
+// sessionNonceLen, so a changed constant would mint cookies the verifier
+// refuses. The table proves the minted nonce length and the acceptance agree.
+func TestSessionCookieNonceUsesTheDeclaredLength(t *testing.T) {
+	gate := newOperatorGate(strings.Repeat("k", 32))
+	cookie, err := gate.mintSessionCookie(httptest.NewRequest(http.MethodGet, "/", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(cookie.Value, ".")
+	if len(parts) != 4 {
+		t.Fatalf("cookie shape = %q", cookie.Value)
+	}
+	nonce, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nonce) != sessionNonceLen {
+		t.Fatalf("minted nonce is %d bytes, want the declared %d", len(nonce), sessionNonceLen)
+	}
+	if !gate.validSession(cookie) {
+		t.Fatal("a freshly minted cookie does not verify")
+	}
 }

@@ -249,7 +249,7 @@ func sessionCookie(r *http.Request, value string) *http.Cookie {
 
 func (g *operatorGate) mintSessionCookie(r *http.Request) (*http.Cookie, error) {
 	expires := time.Now().Add(sessionCookieTTL).Unix()
-	nonce := make([]byte, 16)
+	nonce := make([]byte, sessionNonceLen)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
