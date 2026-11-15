@@ -389,6 +389,11 @@ module.exports = async function operatorMenus(H) {
         JSON.stringify(heads) === JSON.stringify(['Requests', 'In-flight', 'Error rate', 'Total cost']) &&
         qa('#oc-pane .oc-kpis .kpi .val')[0].textContent === '2K' &&
         !d.querySelector('#oc-pane .oc-kpis .kpi.k-err'));
+      // The console is narrower than the page band, so each fact's sub line
+      // must stay short enough for the narrowest cell: the scope lives in the
+      // section line, and a full sentence stays in the tooltip.
+      check('the overview sub facts stay inside one narrow cell',
+        qa('#oc-pane .oc-kpis .kpi .sub2').every(el => el.textContent.length <= 12));
       w.eval('kpiAgg = { requests: 2000, errors: 4, in_flight: 0, cost: 1.25, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null }');
       w.openOperatorConsole('overview');
       check('the overview error tile flags only a real failure (' + (qa('#oc-pane .oc-kpis .kpi.k-err .val')[0]||{textContent:'none'}).textContent + ')',
@@ -1236,6 +1241,10 @@ module.exports = async function operatorMenus(H) {
         check('undo after creating a hold resumes that hold, not an older one',
           await settleUntil(() => holdPosts.length === 2) &&
           JSON.stringify(holdPosts[1]) === JSON.stringify({paused: false, id: 'hold-new'}));
+        // The undo's own continuation still needs the stub: restoring the
+        // fetch at the POST alone left the pause gate busy into the next
+        // block, which then read a one-click hold as a double click.
+        await settleUntil(() => !w.eval('operatorState.pause.busy'));
         w.fetch = savedHoldFetch;
       }
 
@@ -1772,7 +1781,7 @@ module.exports = async function operatorMenus(H) {
       let countCalls = 0;
       w.fetch = async (url, options) => {
         if (String(url).includes('/admin/purge/count')) {
-          countBody = JSON.parse(options.body);
+          countBody = options.body ? JSON.parse(options.body) : null;
           countCalls += 1;
           return {ok: true, json: async () => ({count: 7})};
         }
@@ -1782,7 +1791,7 @@ module.exports = async function operatorMenus(H) {
       try {
         check('all history previews the same record count as a filter (' + text('#oc-export-receipt') + '|' + countCalls + ')',
           await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&
-          countBody && countBody.filter.provider === '' && !d.getElementById('oc-export-download').disabled &&
+          countBody === null && !d.getElementById('oc-export-download').disabled &&
           countCalls >= 1);
         click('#oc-pane [data-oc-download]');
         // The artifact streams, so the client cannot observe the transfer's
@@ -1824,7 +1833,7 @@ module.exports = async function operatorMenus(H) {
           check('the mode, the receipt and the URL agree after a mode switch',
             JSON.stringify(downloads[downloads.length - 1]) ===
               JSON.stringify(['/metrics/export', '']) &&
-            countBody && countBody.filter.provider === '');
+            countBody === null);
           choose('export-mode', 'filter');
           check('returning to filter mode restores the filter work',
             await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&

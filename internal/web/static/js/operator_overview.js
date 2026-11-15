@@ -95,9 +95,9 @@ function ocRenderOverview() {
     `<div class="kpi k-flight"><h2>In-flight</h2><div class="val">${fmt(flight)}</div>` +
     `<div class="sub2">${queued ? fmt(queued) + ' parked' : 'none parked'}</div></div>` +
     `<div class="kpi${errors ? ' k-err' : ''}"><h2>Error rate</h2><div class="val">${pct(errors, requests)}</div>` +
-    `<div class="sub2">${fmt(errors)} of ${fmt(requests)}</div></div>` +
+    `<div class="sub2" title="${errors ? fmt(errors) + ' of ' + fmt(requests) + ' requests' : 'no errors'}">${errors ? fmt(errors) : 'none'}</div></div>` +
     `<div class="kpi k-cost"><h2>Total cost</h2><div class="val">${fmtMoney(k.cost || 0)}</div>` +
-    `<div class="sub2">est USD · all tracked</div></div>` +
+    `<div class="sub2">est USD</div></div>` +
     `</div>`;
   // The counts live in the head line and on the section chips, so the body
   // opens with the rules themselves. The queue appears only when something is
