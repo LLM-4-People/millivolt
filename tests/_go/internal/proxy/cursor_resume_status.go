@@ -46,13 +46,19 @@ func parkMcpArgsRun(t *testing.T, run *format.CursorRun, testIn *io.PipeWriter) 
 }
 
 // finishResumedRun waits for the resume request to consume the pending tool
-// call, then ends the upstream stream (cend + Close) so the parked turn
-// finishes. The resume/steer tests share the exact consume-and-finish
-// choreography.
-func finishResumedRun(t *testing.T, run *format.CursorRun, testIn *io.PipeWriter) {
+// call, answers with the given text deltas, then ends the upstream stream
+// (cend + Close) so the parked turn finishes. The resume/steer tests share the
+// exact consume-and-finish choreography.
+func finishResumedRun(t *testing.T, run *format.CursorRun, testIn *io.PipeWriter, chunks ...string) {
 	t.Helper()
 	if !waitFor(t, func() bool { return len(run.PendingToolCallIDs()) == 0 }) {
 		t.Fatal("resume did not consume the pending tool call")
+	}
+	for _, chunk := range chunks {
+		// AgentServerMessage.interaction_update.text_delta.text
+		if _, err := testIn.Write(cframe(cmsg(1, cmsg(1, cstr(1, chunk))))); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := testIn.Write(cend("{}")); err != nil {
 		t.Fatal(err)
@@ -98,7 +104,7 @@ func TestCursorResumeRecordGetsStatus(t *testing.T) {
 		resp, err := http.DefaultClient.Do(req)
 		resCh <- res{resp, err}
 	}()
-	finishResumedRun(t, run, testIn)
+	finishResumedRun(t, run, testIn, "resumed answer")
 
 	out := <-resCh
 	if out.err != nil {
@@ -188,7 +194,7 @@ func TestCursorResumeJSONWritesChatCompletion(t *testing.T) {
 		resp, err := http.DefaultClient.Do(req)
 		resCh <- res{resp, err}
 	}()
-	finishResumedRun(t, run, testIn)
+	finishResumedRun(t, run, testIn, "resumed answer")
 
 	out := <-resCh
 	if out.err != nil {
@@ -220,6 +226,11 @@ func TestCursorResumeJSONWritesChatCompletion(t *testing.T) {
 	message, _ := choice["message"].(map[string]any)
 	if message == nil || message["role"] != "assistant" {
 		t.Errorf("message = %v, want an assistant message", choice["message"])
+	}
+	// The resumed upstream text must reach message.content, not just the
+	// envelope: emptying the accumulator argument leaves every other field green.
+	if message != nil && message["content"] != "resumed answer" {
+		t.Errorf("message.content = %v, want the resumed answer text", message["content"])
 	}
 
 	recs := waitForRecord(t, buf, 1)
