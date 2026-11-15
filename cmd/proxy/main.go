@@ -506,7 +506,7 @@ func main() {
 		grace := cfg.ShutdownTimeout + sigtermCloseDrainMargin
 		ln, err = claimPort(cfg.Listen, grace)
 		if err != nil {
-			log.Fatalf("serve: %v", err)
+			fatalDrain("serve: %v", err)
 		}
 	}
 	// srvCtx is the base context for every request. Cancelling it on shutdown
@@ -628,12 +628,10 @@ loop:
 				continue
 			}
 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-				// A mid-life serve failure. Drain the store before exiting (the
-				// same guarantee the signal path gives) - logging.Printf, not
-				// Fatalf, so the drain actually runs before we exit nonzero.
-				logging.Printf("", "serve: %v", err)
-				drainStore()
-				os.Exit(1)
+				// A mid-life serve failure. fatalDrain is the one fatal exit
+				// after the store exists, so the drain gets the same ordering
+				// guarantee the signal path gives.
+				fatalDrain("serve: %v", err)
 			}
 			// Serve returned cleanly without a signal (e.g. listener closed).
 			// Drain the store before exiting so no buffered metrics are lost.
