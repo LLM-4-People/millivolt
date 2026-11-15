@@ -82,6 +82,55 @@ func TestPurgePreviewCountsTheQueuedBatch(t *testing.T) {
 	}
 }
 
+// TestPurgePreviewCountsThroughAWedgedWriter pins CR-2: the barrier has no
+// progress signal of its own once the writer is stuck on the sole connection,
+// so the settings sheet used to spin forever where the pre-barrier read-only
+// preview answered. The barrier runs on the interactive budget and gives up
+// into the count when it expires; the delete re-checks the population inside
+// its transaction, so a missed queued batch only costs a stale preview.
+func TestPurgePreviewCountsThroughAWedgedWriter(t *testing.T) {
+	opts := testOpts
+	opts.QueryTimeout = 100 * time.Millisecond
+	s := openPurgeTestStore(t, opts)
+	s.Record(&metrics.Record{ID: "committed", Start: time.Now(), StatusCode: 200})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// Holding the sole writer connection wedges the writer goroutine.
+	conn, err := s.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	s.Record(&metrics.Record{ID: "queued", Start: time.Now(), StatusCode: 200})
+
+	done := make(chan struct {
+		n   int64
+		err error
+	}, 1)
+	go func() {
+		n, err := s.CountWhere(t.Context(), PurgeFilter{})
+		done <- struct {
+			n   int64
+			err error
+		}{n, err}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("preview behind a wedged writer: %v", got.err)
+		}
+		// The queued record never reached the database, so only the committed
+		// row is visible. A short count is exactly the stale preview the
+		// delete's transactional re-check covers.
+		if got.n != 1 {
+			t.Fatalf("preview count = %d, want the one committed row", got.n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("preview blocked on the wedged writer")
+	}
+}
+
 func TestPendingPurgeFenceAcrossWriterDrains(t *testing.T) {
 	for _, mode := range []string{"normal", "flush", "close"} {
 		t.Run(mode, func(t *testing.T) {

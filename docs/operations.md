@@ -1571,7 +1571,10 @@ as the export, and its scope is the chosen filter; Delete everything wipes
 the whole database. Deletion requires confirmation in the dashboard; it does
 not happen when the sheet opens. A selected filter makes a read-only
 `POST /admin/purge/count` preview; the count first commits the writer's queued
-batch into the read view, so a just-finalized request cannot read as empty. A
+batch into the read view, so a just-finalized request cannot read as empty.
+That barrier is bounded by the query timeout: a wedged writer lets the preview
+answer from the committed snapshot instead of spinning the sheet forever, and
+the delete's transactional re-check stays the guard. A
 ring-only deployment removes through the boundary the count saw, so a record
 that finalizes during the delete stays behind instead of disappearing
 uncounted. Current traffic can still change the count

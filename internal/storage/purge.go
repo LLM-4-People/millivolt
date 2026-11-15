@@ -306,19 +306,26 @@ func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, reviewed *int64,
 // batch into the committed snapshot: the confirmation the operator sends back
 // travels with this count, so a batch the writer accepted but has not flushed
 // yet would otherwise make the delete transaction refuse exactly the
-// population the preview showed.
+// population the preview showed. The barrier runs detached from a caller
+// deadline, on one query budget, and an expired barrier falls through to the
+// count: a wedged writer (holding the sole connection) never resolves it, and
+// the delete's own transactional re-check covers the stale preview.
 func (s *Store) CountWhere(ctx context.Context, f PurgeFilter) (int64, error) {
 	if err := f.Validate(); err != nil {
 		return 0, err
 	}
-	if err := s.Flush(); err != nil {
+	barrierCtx, barrierCancel := s.withQueryTimeout(context.WithoutCancel(ctx))
+	err := s.flushWithin(barrierCtx)
+	expired := barrierCtx.Err() != nil
+	barrierCancel()
+	if err != nil && !expired {
 		return 0, err
 	}
 	q, args := buildCountQuery(f)
 	ctx, cancel := s.withQueryTimeout(ctx)
 	defer cancel()
 	var n int64
-	err := s.rdb.QueryRowContext(ctx, q, args...).Scan(&n)
+	err = s.rdb.QueryRowContext(ctx, q, args...).Scan(&n)
 	return n, err
 }
 

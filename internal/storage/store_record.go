@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -271,12 +272,23 @@ func (s *Store) writer() {
 // a failed-handoff resume. Concurrent Close waits for the actual final drain,
 // including its error; a sealed input channel alone does not prove durability.
 func (s *Store) Flush() error {
+	return s.flushWithin(context.Background())
+}
+
+// flushWithin is Flush bounded by ctx. It is the interactive variant: a wedged
+// writer (holding the sole connection) never answers the barrier, so a read
+// preview uses this to give up and answer from the committed snapshot. Giving
+// up abandons only the wait - the writer still owns the buffered reply
+// channel, so a late completion has somewhere to go.
+func (s *Store) flushWithin(ctx context.Context) error {
 	ret := make(chan error, 1)
 	select {
 	case s.flushCh <- ret:
 	case <-s.done:
 		<-s.writerDone
 		return s.writerErr
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	select {
 	case err := <-ret:
@@ -284,6 +296,8 @@ func (s *Store) Flush() error {
 	case <-s.done:
 		<-s.writerDone
 		return s.writerErr
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
