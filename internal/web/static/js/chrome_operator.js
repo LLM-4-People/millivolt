@@ -159,19 +159,23 @@ function askOperatorToken() {
   operatorPrompt = new Promise(resolve => {
     let dialog = $('operator-dialog');
     if (!dialog) {
-      dialog = buildModalDialog('operator-dialog', 'operator-dialog', 'operator-dialog-title', `<div class="operator-dialog-panel"><div class="operator-dialog-brand"><div class="brand-logo" aria-hidden="true">${brandLogoSVG('mv-login')}</div><h3 id="operator-dialog-title">millivolt</h3></div><p class="operator-dialog-note">${OPERATOR_DIALOG_NOTE}</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="current-password" spellcheck="false" aria-label="Operator token" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="button" data-operator-auth="cancel">Cancel</button><button class="btn btn-accent" type="submit">Sign in</button></div></form></div>`);
+      dialog = buildModalDialog('operator-dialog', 'operator-dialog', 'operator-dialog-title', `<div class="operator-dialog-panel"><div class="operator-dialog-brand"><div class="brand-logo" aria-hidden="true">${brandLogoSVG('mv-login')}</div><h3 id="operator-dialog-title">millivolt</h3></div><p class="operator-dialog-note" id="operator-dialog-note">${OPERATOR_DIALOG_NOTE}</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="current-password" spellcheck="false" aria-label="Operator token" aria-describedby="operator-dialog-note" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="button" data-operator-auth="cancel">Cancel</button><button class="btn btn-accent" type="submit">Sign in</button></div></form></div>`);
       wireDialogDismiss(dialog, () => operatorDismiss(''));
     }
     const input = $('operator-dialog-input');
     const note = dialog.querySelector('.operator-dialog-note');
     if (operatorRejected) {
       operatorRejected = false;
-      // Same lead sentence as the server login page's rejection notice.
+      // Same lead sentence as the server login page's rejection notice. The
+      // note is the field's description, so the reason is read with the field
+      // instead of only repainting above it.
       note.textContent = 'That token was rejected. Enter the current MILLIVOLT_OPERATOR_TOKEN value and try again.';
       note.setAttribute('data-err', '');
+      input.setAttribute('aria-invalid', 'true');
     } else {
       note.textContent = OPERATOR_DIALOG_NOTE;
       note.removeAttribute('data-err');
+      input.removeAttribute('aria-invalid');
     }
     // The dialog owns its promise. If anything else closes it (another modal
     // opening calls closeModal directly and resolves nothing), resolve '' -
