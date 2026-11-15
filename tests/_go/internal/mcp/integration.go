@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +78,42 @@ func devScratchPaths(port string) []string {
 // TestDevScratchPathsMatchDevShOwner pins the integration cleanup to the names
 // the lifecycle owner actually uses. The binary suffix was once written as
 // ".bin" while dev.sh builds "-bin", so each live run leaked its binary.
+func TestReserveLoopbackOriginClaimsItsNamespace(t *testing.T) {
+	first, err := reserveLoopbackOrigin(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDB := integrationDBPrefix + portOf(t, first) + ".db"
+	t.Cleanup(func() { _ = os.Remove(firstDB) })
+	second, err := reserveLoopbackOrigin(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDB := integrationDBPrefix + portOf(t, second) + ".db"
+	t.Cleanup(func() { _ = os.Remove(secondDB) })
+
+	if first == second {
+		t.Fatalf("two reservations shared %s", first)
+	}
+	// The claim is left behind for dev.sh to take over, so the second
+	// reservation saw the first one as occupied.
+	if _, err := os.Stat(firstDB); err != nil {
+		t.Fatalf("reservation did not claim its database: %v", err)
+	}
+	port, err := strconv.Atoi(portOf(t, second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := strings.TrimSuffix(devScratchPaths(strconv.Itoa(port))[0], ".yaml") + ".pid"
+	if err := os.WriteFile(pid, []byte("1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(pid) })
+	if portNamespaceFree(port) {
+		t.Fatal("an existing pid file did not mark the namespace occupied")
+	}
+}
+
 func TestDevScratchPathsMatchDevShOwner(t *testing.T) {
 	script, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "dev.sh"))
 	if err != nil {
@@ -165,25 +202,68 @@ func devInstance(t *testing.T) *liveTools {
 	return &liveTools{session: connect(t, service), service: service, origin: origin}
 }
 
-// reserveLoopbackOrigin takes a loopback port from the operating system and
-// closes it again, which is the only race-free-enough way to get a port no other
-// run is using. It is deliberately not a fixed number: the browser-fixtures CI
-// step already binds one, and a collision there is two jobs silently sharing a
-// proxy and a database.
+// reserveLoopbackOrigin takes a loopback port from the operating system,
+// closes it again, and atomically claims that port's scratch namespace so two
+// runs cannot converge on it. It is deliberately not a fixed number: the
+// browser-fixtures CI step already binds one, and a collision there is two
+// jobs silently sharing a proxy and a database.
+//
+// The claim is the run's own database file, created with O_EXCL: dev.sh's start
+// deletes and recreates the file it now owns. A timed-out run leaks the file
+// and the port, so the kernel reusing that number must skip the leaked name
+// rather than fail against it, exactly like the stress fixture's reservation.
 func reserveLoopbackOrigin(t *testing.T) (string, error) {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	for attempt := 0; attempt < 1000; attempt++ {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return "", err
+		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		if !portNamespaceFree(port) {
+			listener.Close()
+			continue
+		}
+		if port < 1024 {
+			listener.Close()
+			return "", fmt.Errorf("reserved port %d is below the range scripts/dev.sh accepts", port)
+		}
+		db := integrationDBPrefix + strconv.Itoa(port) + ".db"
+		claimErr := claimNamespace(db)
+		listener.Close()
+		if errors.Is(claimErr, fs.ErrExist) {
+			continue
+		}
+		if claimErr != nil {
+			return "", claimErr
+		}
+		return fmt.Sprintf("http://127.0.0.1:%d", port), nil
+	}
+	return "", errors.New("no loopback port with a free dev namespace")
+}
+
+// portNamespaceFree reports whether a dev instance already owns the port's
+// scratch names. The database is this fixture's own, so only the shared
+// instance files are checked here; the O_EXCL claim covers the database.
+func portNamespaceFree(port int) bool {
+	base := devScratchPaths(strconv.Itoa(port))[0] // "$base.yaml"
+	if _, err := os.Stat(base); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if _, err := os.Stat(strings.TrimSuffix(base, ".yaml") + ".pid"); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	return true
+}
+
+// claimNamespace creates path exclusively, so two allocators that chose the
+// same port have exactly one winner.
+func claimNamespace(path string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
-		return "", err
+		return err
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		return "", err
-	}
-	if port < 1024 {
-		return "", fmt.Errorf("reserved port %d is below the range scripts/dev.sh accepts", port)
-	}
-	return fmt.Sprintf("http://127.0.0.1:%d", port), nil
+	return file.Close()
 }
 
 func portOf(t *testing.T, origin string) string {
