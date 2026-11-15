@@ -545,6 +545,12 @@ func responsesFunctionCallItemID(item responsesWireItem) string {
 // object.
 func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool, ids *requestToolIDs) (*ir.ToolCall, ir.Warnings, error) {
 	var warns ir.Warnings
+	if item.Namespace != "" {
+		// A namespaced call addresses the same flat spelling the declared
+		// namespace member received, so a history turn or an upstream call
+		// stays consistent with the tool list a target without namespaces saw.
+		item.Name = flatToolName(item.Namespace, item.Name)
+	}
 	if item.Name == "" {
 		return nil, nil, errors.New("function_call has no name")
 	}
@@ -574,44 +580,99 @@ func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool, i
 	return &ir.ToolCall{ID: id, Name: item.Name, Arguments: args}, warns, nil
 }
 
+// decodeResponsesTools decodes declared tools. A namespace group is flattened
+// into its member functions, each carrying the group name so the inbound
+// encoder can name the namespace again, and the namer owns one unique flat
+// spelling per pair for the outbound wire.
 func decodeResponsesTools(in []responsesWireTool) ([]ir.Tool, ir.Warnings, error) {
 	var (
 		out   []ir.Tool
 		warns ir.Warnings
 	)
+	namer := newToolNamer()
+	total := 0
 	for i, t := range in {
-		if t.Type != "" && t.Type != "function" {
-			return nil, nil, fmt.Errorf("responses tool %d: provider-defined type %q has no cross-protocol equivalent", i, t.Type)
+		field := fmt.Sprintf("responses tool %d", i)
+		switch t.Type {
+		case "", "function":
+			tool, w, err := decodeResponsesFunctionTool(t, field, "")
+			if err != nil {
+				return nil, nil, err
+			}
+			warns = append(warns, w...)
+			tool.WireName = namer.claim(tool.Name)
+			out = append(out, tool)
+		case "namespace":
+			if strings.TrimSpace(t.Name) == "" {
+				return nil, nil, fmt.Errorf("%s: namespace name is required", field)
+			}
+			total += len(t.Tools)
+			if total > WireCollectionMax {
+				return nil, nil, fmt.Errorf("responses namespace members exceed %d items", WireCollectionMax)
+			}
+			for j, member := range t.Tools {
+				memberField := fmt.Sprintf("%s %q member %d", field, t.Name, j)
+				if member.Type != "" && member.Type != "function" {
+					if !droppableProviderTools[member.Type] {
+						return nil, nil, fmt.Errorf("%s: provider-defined type %q has no cross-protocol equivalent", memberField, member.Type)
+					}
+					warns.Add(ir.WarningDropped, "tool."+member.Type, "provider-defined tool has no cross-protocol equivalent")
+					continue
+				}
+				tool, w, err := decodeResponsesFunctionTool(member, memberField, t.Name)
+				if err != nil {
+					return nil, nil, err
+				}
+				warns = append(warns, w...)
+				tool.WireName = namer.assign(t.Name, tool.Name)
+				out = append(out, tool)
+			}
+		default:
+			// A provider-executed tool has no cross-protocol equivalent. It is
+			// optional to the client's remaining tools, so a known type is
+			// dropped with a warning: the default loss policy relays the turn
+			// and translation_loss: reject fails closed before any upstream
+			// send. An unclassified type is not silently discarded.
+			if !droppableProviderTools[t.Type] {
+				return nil, nil, fmt.Errorf("%s: provider-defined type %q has no cross-protocol equivalent", field, t.Type)
+			}
+			warns.Add(ir.WarningDropped, "tool."+t.Type, "provider-defined tool has no cross-protocol equivalent")
 		}
-		present, err := toolAllowedCallers(t.AllowedCallers)
-		if err != nil {
-			return nil, nil, fmt.Errorf("responses tool %d: %w", i, err)
-		}
-		if present {
-			warns.Add(ir.WarningDropped, "tool.allowed_callers", "only direct invocation is representable")
-		}
-		if t.Async != nil && *t.Async {
-			warns.Add(ir.WarningDropped, "tool.async", "asynchronous execution has no cross-protocol equivalent")
-		}
-		if t.DeferLoading != nil && *t.DeferLoading {
-			warns.Add(ir.WarningDropped, "tool.defer_loading", "deferred tool loading has no cross-protocol equivalent")
-		}
-		if wireValuePresent(t.OutputSchema) {
-			warns.Add(ir.WarningDropped, "tool.output_schema", "tool output schemas have no cross-protocol equivalent")
-		}
-		if strings.TrimSpace(t.Name) == "" {
-			return nil, nil, fmt.Errorf("responses tool %d: name is required", i)
-		}
-		params := t.Parameters
-		if len(params) == 0 || bytes.Equal(bytes.TrimSpace(params), []byte("null")) {
-			params = json.RawMessage(`{}`)
-		}
-		out = append(out, ir.Tool{
-			Type: "function", Name: t.Name, Description: t.Description,
-			Parameters: params, Strict: t.Strict,
-		})
 	}
 	return out, warns, nil
+}
+
+// decodeResponsesFunctionTool decodes one function tool, classified by the
+// namespace it belongs to (empty for a top-level tool).
+func decodeResponsesFunctionTool(t responsesWireTool, field, namespace string) (ir.Tool, ir.Warnings, error) {
+	var warns ir.Warnings
+	present, err := toolAllowedCallers(t.AllowedCallers)
+	if err != nil {
+		return ir.Tool{}, nil, fmt.Errorf("%s: %w", field, err)
+	}
+	if present {
+		warns.Add(ir.WarningDropped, "tool.allowed_callers", "only direct invocation is representable")
+	}
+	if t.Async != nil && *t.Async {
+		warns.Add(ir.WarningDropped, "tool.async", "asynchronous execution has no cross-protocol equivalent")
+	}
+	if t.DeferLoading != nil && *t.DeferLoading {
+		warns.Add(ir.WarningDropped, "tool.defer_loading", "deferred tool loading has no cross-protocol equivalent")
+	}
+	if wireValuePresent(t.OutputSchema) {
+		warns.Add(ir.WarningDropped, "tool.output_schema", "tool output schemas have no cross-protocol equivalent")
+	}
+	if strings.TrimSpace(t.Name) == "" {
+		return ir.Tool{}, nil, fmt.Errorf("%s: name is required", field)
+	}
+	params := t.Parameters
+	if len(params) == 0 || bytes.Equal(bytes.TrimSpace(params), []byte("null")) {
+		params = json.RawMessage(`{}`)
+	}
+	return ir.Tool{
+		Type: "function", Name: t.Name, Namespace: namespace, Description: t.Description,
+		Parameters: params, Strict: t.Strict,
+	}, warns, nil
 }
 
 func decodeResponsesToolChoice(raw json.RawMessage) (*ir.ToolChoice, error) {
@@ -631,14 +692,15 @@ func decodeResponsesToolChoice(raw json.RawMessage) (*ir.ToolChoice, error) {
 		return nil, fmt.Errorf("unsupported responses tool_choice %q", shorthand)
 	}
 	var obj struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
+		Type      string `json:"type"`
+		Name      string `json:"name"`
+		Namespace string `json:"namespace"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, fmt.Errorf("responses tool_choice: %w", err)
 	}
 	if obj.Type == "function" && obj.Name != "" {
-		return &ir.ToolChoice{Mode: ir.ToolChoiceTool, Name: obj.Name}, nil
+		return &ir.ToolChoice{Mode: ir.ToolChoiceTool, Name: flatToolName(obj.Namespace, obj.Name)}, nil
 	}
 	return nil, fmt.Errorf("unsupported responses tool_choice type %q", obj.Type)
 }

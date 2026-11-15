@@ -463,7 +463,7 @@ func encodeResponsesTools(in []ir.Tool, warns *ir.Warnings) []map[string]any {
 		if t.CacheControl != nil && warns != nil {
 			warns.Add(ir.WarningDropped, "tools.cache_control", "Responses function tools have no cache breakpoint")
 		}
-		tool := map[string]any{"type": "function", "name": t.Name}
+		tool := map[string]any{"type": "function", "name": t.ModelName()}
 		if t.Description != "" {
 			tool["description"] = t.Description
 		}

@@ -210,7 +210,7 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 	out, err := NewResponsesEnvelope(ResponsesEnvelope{
 		ID: resp.ID, Model: resp.Model, Created: created, Status: status,
 		IncompleteReason: incompleteReason,
-		Output:           responsesAnyItems(encodeResponsesOutput(resp.Blocks, status, &resp.Warnings)),
+		Output:           responsesAnyItems(encodeResponsesOutput(resp.Blocks, status, &resp.Warnings, resp.ToolNames)),
 		Error:            resp.Error, Usage: resp.Usage,
 		Metadata: resp.Metadata, ServiceTier: tier,
 	})
@@ -256,7 +256,7 @@ func responsesTerminalStatus(finish ir.FinishReason, incompleteReason string) (s
 	}
 }
 
-func encodeResponsesOutput(blocks []ir.Block, status string, warns *ir.Warnings) []map[string]any {
+func encodeResponsesOutput(blocks []ir.Block, status string, warns *ir.Warnings, toolNames map[string]ir.Tool) []map[string]any {
 	var out []map[string]any
 	var textBlocks []ir.Block
 	messageStatus := "completed"
@@ -282,7 +282,7 @@ func encodeResponsesOutput(blocks []ir.Block, status string, warns *ir.Warnings)
 			textBlocks = append(textBlocks, b)
 		case ir.BlockToolCall:
 			flushText()
-			out = append(out, encodeResponsesFunctionCall(b.ToolCall, "completed"))
+			out = append(out, encodeResponsesOutputCall(b.ToolCall, "completed", toolNames))
 		case ir.BlockReasoning:
 			flushText()
 			out = append(out, encodeResponsesReasoning(b.Reasoning, warns))
@@ -338,6 +338,19 @@ func responsesAnnotations(citations []ir.Citation, offset int, warns *ir.Warning
 		})
 	}
 	return out
+}
+
+// encodeResponsesOutputCall renders one output function call. A call whose flat
+// name the request declared inside a namespace group names that group again, so
+// the client sees the tool it offered rather than the flattened spelling the
+// target required.
+func encodeResponsesOutputCall(c *ir.ToolCall, status string, toolNames map[string]ir.Tool) map[string]any {
+	item := encodeResponsesFunctionCall(c, status)
+	if tool, ok := toolNames[c.Name]; ok && tool.Namespace != "" {
+		item["name"] = tool.Name
+		item["namespace"] = tool.Namespace
+	}
+	return item
 }
 
 func encodeResponsesOutputContent(blocks []ir.Block, warns *ir.Warnings) []map[string]any {
