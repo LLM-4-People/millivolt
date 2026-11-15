@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -642,6 +643,14 @@ func (s *Server) runThrottlePersister() {
 			if err == nil {
 				break
 			}
+			// A closed database cannot answer again in this process, so the
+			// ladder is pointless: leave the generation dirty and stop instead
+			// of hammering the dead handle until shutdown. A busy store stays
+			// on the ladder.
+			if throttleStoreGone(err) {
+				log.Printf("throttle: persist stopped, store is closed: %v", err)
+				return
+			}
 			// persistOperatorDocCtx already logged the store failure. Wait the
 			// full backoff even when new changes wake us, so a failing store
 			// cannot be hit once per request.
@@ -650,6 +659,13 @@ func (s *Server) runThrottlePersister() {
 			}
 		}
 	}
+}
+
+// throttleStoreGone reports the closed-store class: database/sql maps every
+// "handle closed" answer to sql.ErrConnDone, while a busy store keeps its
+// transient error.
+func throttleStoreGone(err error) bool {
+	return errors.Is(err, sql.ErrConnDone)
 }
 
 // waitThrottleQuiet restarts the debounce window on every dirty signal and

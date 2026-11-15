@@ -1151,7 +1151,9 @@ Operator limit edits persist synchronously and report a warning when the store
 rejects the write. Header-driven limit changes apply in memory immediately and
 are persisted by one coalescing background writer: a burst of changes becomes
 the latest whole-policy document, with bounded retry and backoff after a store
-failure. That document also carries the anti-burst pair, and one written before
+failure. A closed store is not retried - the generation stays dirty and the
+writer stops - while a busy one keeps the ladder. That document also carries
+the anti-burst pair, and one written before
 those fields restores them off. A crash can therefore lose the most recent
 header-driven changes, and a failed save never rejects inference. Graceful
 shutdown and restart flush the latest policy before storage closes or the
