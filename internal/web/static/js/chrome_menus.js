@@ -343,9 +343,11 @@ function clearFilterActive(f) {
 // because this module loads first and owns the purge filter vocabulary; the
 // export module reads it rather than keeping a second copy.
 async function purgeCount(filter) {
-  const doc = await operatorJsonBody('/admin/purge/count', {
-    method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({filter}),
-  }, PURGE_COUNT_UNAVAILABLE);
+  // No filter is the bodyless full-set preview, exactly like the bodyless
+  // delete: all history is a predicate, and the same route must count it.
+  const options = { method: 'POST', headers: JSON_HEADERS };
+  if (filter) options.body = JSON.stringify({ filter });
+  const doc = await operatorJsonBody('/admin/purge/count', options, PURGE_COUNT_UNAVAILABLE);
   if (!isCount(doc.count)) throw new Error(doc.error || PURGE_COUNT_UNAVAILABLE);
   return doc.count;
 }

@@ -284,7 +284,7 @@ module.exports = async function logsMenu(H) {
     w.fetch = (url, options) => {
       if (String(url).includes('/admin/purge/count')) {
         countCalls++;
-        countBody = JSON.parse(options.body);
+        countBody = options.body ? JSON.parse(options.body) : null;
         return Promise.resolve({ ok: true, json: async () => ({ count: 3 }) });
       }
       return savedFetch(url, options);

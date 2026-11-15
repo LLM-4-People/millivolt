@@ -281,7 +281,9 @@ async function ocRunExportCount() {
   draft.counting = true;
   ocUpdateExportReceipt();
   try {
-    const count = await purgeCount(ocExportFilter(draft, epoch));
+    // All history is the bodyless full-set preview; filter mode sends the
+    // exact predicate the download will carry.
+    const count = await purgeCount(draft.mode === 'all' ? null : ocExportFilter(draft, epoch));
     if (ocDrafts.export !== draft || JSON.stringify(ocExportFields(draft)) !== token) return;
     draft.count = count;
     draft.epoch = epoch;
