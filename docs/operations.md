@@ -1007,7 +1007,11 @@ always admission: presenting the correct Bearer during a lockout clears the
 budget, because the lockout exists to rate-limit guessing, not to lock the
 operator out of their own dashboard. The map is hard-capped at 4096 source
 IPs with idle expiry, so spoofed-address floods cannot grow it. A lockout
-response is `429` with a coarse rounded `Retry-After` and a generic body.
+response is `429` with a coarse rounded `Retry-After` and a generic JSON body,
+except `GET /` (and `/index.html`): the sign-in page is still served, read-only,
+with the same `Retry-After`, the form intact and the lockout named in its
+notice slot, because the form is the only route back to a credential and `POST
+/session` keeps working through the lockout.
 
 With the variable unset or empty the deny-all state holds: the whole dashboard
 returns 403, the open `POST /session` handshake cannot mint a cookie, and only

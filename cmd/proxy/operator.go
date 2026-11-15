@@ -507,26 +507,48 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 			sameOrigin.ServeHTTP(w, r)
 			return
 		}
-		if gate.denyLockedOut(w, ip) {
+		// The sign-in form survives its own lockout. GET / is the one route
+		// that leads back to a credential, and POST /session keeps working
+		// through the lockout, so a JSON 429 here hid the only way forward.
+		// The page carries the same Retry-After as the JSON denial and says
+		// the source is locked, while every other operator route keeps the
+		// JSON shape.
+		retry, locked := gate.lockoutRetry(ip)
+		if locked && !wantsLoginPage(r) {
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+			denyOperator(w, http.StatusTooManyRequests, lockoutMessage)
 			return
 		}
-		if hasBearer {
+		if hasBearer && !locked {
 			// Only presented-but-wrong credentials count as brute force.
 			// Credential-less requests (an expired session cookie polling in
 			// a background tab) are denied without burning the budget: they
-			// carry no candidate to guess.
+			// carry no candidate to guess. A locked-out page read counts
+			// nothing either, exactly like the JSON denial it replaces.
 			gate.limiter.failure(ip, time.Now())
 		}
-		if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/index.html") {
-			w.Header().Set("Cache-Control", "no-store")
-			w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(loginPageHTML))
+		if locked {
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+			serveLoginPage(w, http.StatusTooManyRequests, loginPageLockedNotice(retry))
+			return
+		}
+		if wantsLoginPage(r) {
+			serveLoginPage(w, http.StatusUnauthorized, loginPageProtectedNotice)
 			return
 		}
 		gate.denyBearer(w)
 	})
 }
+
+// wantsLoginPage is the one owner of "this response carries the sign-in form"
+// rather than a JSON denial: a GET of the dashboard entry, in its canonical
+// spellings.
+func wantsLoginPage(r *http.Request) bool {
+	return r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/index.html")
+}
+
+// lockoutMessage is the shared JSON lockout denial body.
+const lockoutMessage = "too many rejected credentials; try again later"
 
 // operatorPlaneDisabledMsg is the unarmed-plane denial message shared by the
 // request gate and the session handshake: both answer 403 with it when no
@@ -552,13 +574,24 @@ func denyOperator(w http.ResponseWriter, status int, msg string) {
 // out, so the caller keeps its flow control; both the request gate and the
 // session handshake must run this check before counting a failure.
 func (g *operatorGate) denyLockedOut(w http.ResponseWriter, ip string) bool {
-	locked, retryIn := g.limiter.locked(ip, time.Now())
+	retry, locked := g.lockoutRetry(ip)
 	if !locked {
 		return false
 	}
-	w.Header().Set("Retry-After", strconv.Itoa(int(max(retryIn/time.Second, 1))))
-	denyOperator(w, http.StatusTooManyRequests, "too many rejected credentials; try again later")
+	w.Header().Set("Retry-After", strconv.Itoa(retry))
+	denyOperator(w, http.StatusTooManyRequests, lockoutMessage)
 	return true
+}
+
+// lockoutRetry is the one owner of the lockout's Retry-After value: whole
+// seconds rounded up (never understating the remaining window). It serves both
+// denial shapes, the JSON one and the sign-in page notice.
+func (g *operatorGate) lockoutRetry(ip string) (int, bool) {
+	locked, retryIn := g.limiter.locked(ip, time.Now())
+	if !locked {
+		return 0, false
+	}
+	return int(max(retryIn/time.Second, 1)), true
 }
 
 // denyBearer answers a non-form request without a valid credential with the
@@ -769,13 +802,38 @@ var loginPageProtectedNotice = "<p>This dashboard is protected. Enter the " + mc
 var loginPageRejectedNotice = `<p class="notice" role="alert">That token was rejected. Enter the current ` + mcp.ProxyTokenEnv + ` value and try again.</p>
 ` + loginPageProtectedNotice
 
+// loginPageLockedNotice is the lockout variant of the ask: the form is still
+// served and still works, and the notice says how long the lockout lasts so the
+// operator does not read the page as a failure of the page itself.
+func loginPageLockedNotice(retry int) string {
+	return `<p class="notice" role="alert">Too many rejected tokens from this address. The form still works, or try again in ` +
+		strconv.Itoa(retry) + ` s.</p>
+` + loginPageProtectedNotice
+}
+
+// loginPage renders one page variant into the template's notice slot.
+func loginPage(notice string) string {
+	return strings.Replace(loginPageTemplate, loginPageMarker, notice, 1)
+}
+
+// serveLoginPage is the one writer of the sign-in form, so every response that
+// carries the form is no-store, unframeable and typed alike. The status stays a
+// property of the caller: 401 for the ask, 429 while the source is locked out.
+func serveLoginPage(w http.ResponseWriter, status int, notice string) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(loginPage(notice)))
+}
+
 // loginPageHTML is the clean sign-in page, loginPageRejectedHTML the same page
 // with the rejection notice, served when a form POST carried a wrong
 // credential. The rejected variant is never carried on a first paint: the
 // unauthenticated page cannot reveal that any attempt happened.
 var (
-	loginPageHTML         = strings.Replace(loginPageTemplate, loginPageMarker, loginPageProtectedNotice, 1)
-	loginPageRejectedHTML = strings.Replace(loginPageTemplate, loginPageMarker, loginPageRejectedNotice, 1)
+	loginPageHTML         = loginPage(loginPageProtectedNotice)
+	loginPageRejectedHTML = loginPage(loginPageRejectedNotice)
 )
 
 // handleHealthz is GET /healthz: the unauthenticated liveness probe for

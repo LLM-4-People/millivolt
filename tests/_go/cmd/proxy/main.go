@@ -387,6 +387,41 @@ func TestOperatorLockout(t *testing.T) {
 	if w.Code != http.StatusTooManyRequests || err != nil || retryAfter < 1 || retryAfter > int(authLockoutMax.Seconds()) {
 		t.Fatalf("locked wrong guess: status=%d retry-after=%q", w.Code, w.Header().Get("Retry-After"))
 	}
+	// The sign-in form survives its own lockout: the JSON 429 hid the only
+	// route back to a credential. GET / is served as the read-only page, with
+	// the form intact, the same Retry-After, and the lockout named in its
+	// notice slot. Every other operator route keeps the JSON body.
+	page := httptest.NewRecorder()
+	pr := httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil)
+	pr.RemoteAddr = "192.0.2.10:4444"
+	h.ServeHTTP(page, pr)
+	if page.Code != http.StatusTooManyRequests ||
+		!strings.Contains(page.Body.String(), `action="/session"`) ||
+		!strings.Contains(page.Body.String(), "Too many rejected tokens") {
+		t.Fatalf("locked sign-in page: status=%d body=%s", page.Code, page.Body.String())
+	}
+	if got := page.Header().Get("Retry-After"); got != strconv.Itoa(retryAfter) {
+		t.Fatalf("locked sign-in page Retry-After = %q, want the same %d as the denial", got, retryAfter)
+	}
+	jsonDenial := asSource("192.0.2.10:4444", "")
+	if jsonDenial.Code != http.StatusTooManyRequests ||
+		!strings.Contains(jsonDenial.Body.String(), `"error"`) ||
+		strings.Contains(jsonDenial.Body.String(), `action="/session"`) {
+		t.Fatalf("locked non-page route: status=%d body=%s, want the flat JSON 429, not the page",
+			jsonDenial.Code, jsonDenial.Body.String())
+	}
+	// The handshake itself is still reachable through the gate: POST /session
+	// is exempt by path whatever the lockout says, and only its own handler
+	// (which runs the same lockout check after checking the credential) may
+	// refuse it.
+	form := httptest.NewRequest(http.MethodPost, "http://proxy.example/session", strings.NewReader("token="+token))
+	form.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	form.RemoteAddr = "192.0.2.10:4444"
+	signedIn := httptest.NewRecorder()
+	h.ServeHTTP(signedIn, form)
+	if signedIn.Code != http.StatusNoContent {
+		t.Fatalf("locked session handshake: status=%d, want the gate to hand it to the session handler", signedIn.Code)
+	}
 	// A verified credential during the lockout is admission, not a guess.
 	w = asSource("192.0.2.10:4444", token)
 	if w.Code != http.StatusNoContent {
