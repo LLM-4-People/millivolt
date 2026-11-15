@@ -264,6 +264,13 @@ func portNamespaceFree(port int) bool {
 // claimNamespace creates path exclusively, so two allocators that chose the
 // same port have exactly one winner.
 func claimNamespace(path string) error {
+	// The scratch directory belongs to no single instance: scripts/dev.sh creates
+	// it before its own run, so a bare test on a runner that has not started an
+	// instance yet finds it missing. Create it the way dev.sh does (0777 before
+	// umask) so both owners agree on the mode.
+	if err := os.MkdirAll(filepath.Dir(path), 0o777); err != nil {
+		return err
+	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
