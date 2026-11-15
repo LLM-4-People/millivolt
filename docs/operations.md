@@ -1756,9 +1756,11 @@ The two signals can overlap: a bare 429 is not an error, but a non-429 status
 that carries a rate-limit class failed the request and counts in both.
 Client-local
 cancellation is likewise distinct from an upstream failure - except a 499 whose
-record carries a structured error type: that observed the provider's in-band
-stream failure before the client left (typically an error event the client
-received and aborted around), and counts as the provider error it is. Zero
+record carries a structured error type: that observed a failure before the
+client left, either the provider's in-band stream failure (typically an error
+event the client received and aborted around) or a truncated stream whose
+completion marker never arrived, independent of which relay write failed. It
+counts as the upstream error it is. Zero
 explorer health badges are hidden independently. Error-dimension card
 headlines count failure events (final plus absorbed), while card N counts
 distinct affected requests. The gallery share denominator `error_total` is the

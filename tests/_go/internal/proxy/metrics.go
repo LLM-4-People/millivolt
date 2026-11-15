@@ -15,6 +15,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
 // waitForRecord polls the buffer until it holds at least n records or the
@@ -327,11 +328,15 @@ func TestMidStreamClientDisconnectRecords499(t *testing.T) {
 	if !rec.ClientDisconnected {
 		t.Error("ClientDisconnected = false, want true")
 	}
-	if rec.IsError() {
-		t.Errorf("a client cancellation must not be an error: %+v", rec)
+	// The client aborted a stream that never reached its completion marker:
+	// the 499 stays the status, but the truncation is the failure the client
+	// left behind, exactly as if the socket had died on a write instead.
+	if !rec.IsError() || rec.ErrorType != sse.TypeUpstreamError || rec.ErrorCode != metrics.CodeTruncated {
+		t.Errorf("a truncated disconnect must keep the truncation class: type=%q code=%q isError=%v",
+			rec.ErrorType, rec.ErrorCode, rec.IsError())
 	}
-	if rec.ErrorType != "" || rec.ErrorMsg != "" {
-		t.Errorf("disconnect must carry no error fields: type=%q msg=%q", rec.ErrorType, rec.ErrorMsg)
+	if rec.ErrorMsg == "" {
+		t.Errorf("disconnect lost the truncation message: %+v", rec)
 	}
 }
 

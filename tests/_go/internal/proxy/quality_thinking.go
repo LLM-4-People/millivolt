@@ -12,6 +12,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
 // TestStreamThinkingTruncatedRescued: a stream that dies mid-thinking (clean
@@ -539,8 +540,11 @@ func TestStreamThinkingClientGoneNotRescued(t *testing.T) {
 	if !rec.ClientDisconnected || rec.Retries != 0 || len(rec.Attempts) != 0 {
 		t.Fatalf("client abort must book as client_disconnected with no rescue: %+v", rec)
 	}
-	if rec.IsError() {
-		t.Fatalf("the local client's own cancellation is never an error: %+v", rec)
+	if rec.IsError() == false {
+		t.Fatalf("the aborted truncated turn must keep its failure class: %+v", rec)
+	}
+	if rec.ErrorType != sse.TypeUpstreamError || rec.ErrorCode != metrics.CodeTruncated {
+		t.Fatalf("abort class = type %q code %q, want the shared truncation class", rec.ErrorType, rec.ErrorCode)
 	}
 }
 

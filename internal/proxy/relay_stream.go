@@ -190,16 +190,30 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		hold = append(hold, line...)
 		hold = append(hold, '\n')
 	}
+	// abortOutcome stamps the aborted attempt's own outcome. A disconnect is
+	// not health: the delivery shape (a clean EOF that beat the transport's
+	// cancellation, a failed client write, an upstream read error) must not
+	// decide the class, so a truncated turn keeps the failure the analyzer
+	// already observed. Only a provider's own in-band error keeps its class.
+	abortOutcome := func() {
+		if code := a.OutcomeCode(); code != "" && !a.HasInBandError() {
+			rec.ErrorType = sse.TypeUpstreamError
+			rec.ErrorCode = code
+			rec.ErrorMsg = metrics.DegenerateMessage(code)
+		}
+	}
 	// clientGone records a write-detected abort: the disconnect stamps the 499
 	// and the analyzer fills the record unconditionally, so an aborted stream
 	// keeps the finish reason, usage, cost and any in-band outcome it had
 	// already observed - the same accounting its 200 twin gets - instead of
 	// landing as an all-zero 499. Every caller returns immediately, so the
 	// fill runs at most once, and markClientGone leaves a decided 4xx/5xx
-	// status alone.
+	// status alone. abortOutcome is the one owner of the abort's failure
+	// class, shared with the read-error path.
 	clientGone := func() {
 		markClientGone(rec)
 		fillRecord(&a, rec)
+		abortOutcome()
 	}
 	writeOut := func() bool {
 		if out.Len() == 0 {
@@ -272,16 +286,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// left here is flusher.Flush, whose error net/http discards - so
 			// the disconnect is stamped here (the write-detected abort's
 			// exact accounting, in-band error kept) instead of finalizing the
-			// abort away as a clean 200. The wire is gone, so the degenerate
-			// frames cannot be written, but the class the analyzer decided is
-			// still stamped on the record: the same 499 must not read as
-			// healthy just because a truncation arrived with the abort.
+			// abort away as a clean 200. clientGone also stamps the class the
+			// analyzer decided: the same 499 must not read as healthy just
+			// because a truncation arrived with the abort.
 			clientGone()
-			if code := a.OutcomeCode(); code != "" && !a.HasInBandError() {
-				rec.ErrorType = sse.TypeUpstreamError
-				rec.ErrorCode = code
-				rec.ErrorMsg = metrics.DegenerateMessage(code)
-			}
 			return false
 		}
 		code := a.OutcomeCode()
@@ -805,6 +813,12 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// would write it without a trailing blank and the client would
 				// discard it at EOF.
 				markStreamErr(ctx, rec, err)
+				if rec.ClientDisconnected {
+					// A canceled local context took markStreamErr's disconnect
+					// path: classify the aborted attempt by the outcome it
+					// reached, exactly like the other abort shapes.
+					abortOutcome()
+				}
 				if tailTerminates {
 					holding = true
 				}

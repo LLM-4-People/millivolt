@@ -531,8 +531,10 @@ count as errors even when the final status succeeds. A final, retried or
 in-band 429 is a separate affected-request signal.
 A client that disconnects before a final outcome is recorded as status 499
 with `client_disconnected`; a plain 499 is a flow event, but one carrying a
-structured error (the provider's in-band stream failure the client aborted
-around) counts as the upstream error it observed.
+structured error counts as the upstream error it observed. That is the
+provider's in-band stream failure the client aborted around, or a truncated
+stream whose completion marker never arrived - an abort must be classified by
+its outcome, never by which relay write happened to fail.
 See [metric interpretation](operations.md#dashboard-data-and-request-inspection)
 for duration, first-token latency and throughput.
 
