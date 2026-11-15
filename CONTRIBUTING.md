@@ -203,7 +203,7 @@ are development and documentation tools.
 npm ci --ignore-scripts
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -r requirements-dev.txt
+python -m pip install --require-hashes -r requirements-dev.txt
 python -m playwright install chromium
 ```
 
@@ -240,10 +240,17 @@ and emits the search index, sitemap, and 404 page. The generated `site/`
 directory is ignored and never committed.
 
 ```sh
-python3 -m pip install -r requirements-docs.txt
+python3 -m pip install --require-hashes -r requirements-docs.txt
 python3 -B -O -m tests.python.site
 python3 scripts/build_site.py --output site
 ```
+
+Both requirements files are hash-pinned and every install command passes
+`--require-hashes`, so resolution is reproducible and a substituted file fails
+the install. After changing a pin, regenerate the hash block for that version
+from the PyPI JSON document (`https://pypi.org/pypi/<project>/<version>/json`,
+`digests.sha256` of every non-yanked file, one `--hash=sha256:` line each), keep
+the pins sorted as they are, and run the install above once to prove the file.
 
 For a local preview, serve `site/` from a separate terminal with
 `python3 -m http.server --directory site 8082`; do not point it at the proxy or
@@ -637,4 +644,6 @@ The Docker `golang` base is deliberately left manual because its tag must move
 with go.mod; distroless updates remain automated. Security updates target
 `main` as described in the branch workflow. Dependency review runs on pull
 requests, and a scheduled `govulncheck` workflow covers the Go module graph.
-These scans complement tests; a clean scan is not a security guarantee.
+The scanner is pinned as a tool dependency in `tools.go`, so it resolves from
+this module and `go.sum` covers it instead of a version being fetched fresh on
+each run. These scans complement tests; a clean scan is not a security guarantee.

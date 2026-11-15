@@ -161,7 +161,7 @@ jobs:
         # so the Chromium download stays out of this job.
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
-          python3 -m pip install -r requirements-dev.txt
+          python3 -m pip install --require-hashes -r requirements-dev.txt
       - name: Check source and unit tests
         run: bash scripts/check.sh
 
@@ -212,7 +212,7 @@ jobs:
         # harnesses, and `scripts/dev.sh up` (a Go build) never invoke Node or
         # npm, so there is no `npm ci` and no setup-node in this job.
         run: |
-          python3 -m pip install -r requirements-dev.txt
+          python3 -m pip install --require-hashes -r requirements-dev.txt
           python3 -m playwright install --with-deps chromium
       - name: Check isolated browser fixtures
         env:
@@ -1023,7 +1023,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
-          python3 -m pip install -r requirements-docs.txt
+          python3 -m pip install --require-hashes -r requirements-docs.txt
           python3 -B -O -m tests.python.site
           python3 -B -O -m tests.python.repository
           python3 -B -O -m tests.python.workflows

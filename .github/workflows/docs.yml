@@ -64,7 +64,7 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-docs.txt
       - name: Install docs dependencies
-        run: python3 -m pip install -r requirements-docs.txt
+        run: python3 -m pip install --require-hashes -r requirements-docs.txt
       - name: Check Markdown links, anchors and typography
         run: python3 -B -m tests.repository_check
       - name: Build and validate the static site

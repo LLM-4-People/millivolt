@@ -23,4 +23,7 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Scan the Go module graph
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+        # No @version: tools.go pins the scanner in this module, so go.sum
+        # covers the binary that judges the tree instead of resolving one at
+        # run time.
+        run: go run golang.org/x/vuln/cmd/govulncheck ./...
