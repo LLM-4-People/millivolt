@@ -488,6 +488,25 @@ func TestDebugCaptureWaitStopsWithRequestContext(t *testing.T) {
 	}
 }
 
+// A fetch whose wait is cut short by its own request context must still answer:
+// once the wait ends, storage is the authority, so a missing capture is the
+// ordinary 404 JSON instead of an empty 200 with nothing written.
+func TestDebugCaptureCanceledWaitStillAnswers(t *testing.T) {
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-cancel.db"))
+	p := New(config.Default(), metrics.Noop{})
+	p.AttachPausePersist(store)
+	release := p.registerPendingCapture("ctx-capture")
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := httptest.NewRecorder()
+	p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=ctx-capture", nil).WithContext(ctx))
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "debug capture not found") {
+		t.Fatalf("canceled wait answered %d %q, want the 404 JSON", w.Code, w.Body.String())
+	}
+}
+
 // TestDebugPendingCaptureOnlyExistsForRealCaptures pins the cheap paths: an
 // ordinary (non-debug) request never registers a marker or reaches
 // SaveDebugCapture, and a debug record without a store cannot register either.

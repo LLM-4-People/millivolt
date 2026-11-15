@@ -86,7 +86,8 @@ func (s *Server) registerPendingCapture(id string) func() {
 
 // waitPendingCapture blocks while id has an in-flight sidecar save. It reports
 // false when ctx ends first, so a disconnected drawer client stops waiting; a
-// caller with no pending marker reads storage immediately.
+// caller with no pending marker reads storage immediately. The outcome only
+// bounds the wait - storage stays authoritative either way.
 func (s *Server) waitPendingCapture(ctx context.Context, id string) bool {
 	s.debug.mu.Lock()
 	done := s.debug.pendingCaptures[id]
@@ -734,13 +735,12 @@ func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	// A fetch that follows the live end can arrive while the sidecar save is
 	// still running. Wait for that request's marker instead of exposing a
 	// transient 404; the request context stops the wait when the drawer client
-	// disconnects. No pending marker means the save already resolved (or never
-	// existed), so the ordinary storage read below is authoritative.
-	if !s.waitPendingCapture(r.Context(), id) {
-		return
-	}
+	// disconnects. The wait ending early only shortens that grace, so the
+	// storage read below answers either way: an expired wait against a missing
+	// capture is the ordinary 404, never an empty 200.
 	ctx, cancel := s.storeQueryCtx()
 	defer cancel()
+	s.waitPendingCapture(r.Context(), id)
 	raw, err := s.pause.persist.LoadDebugCapture(ctx, id)
 	if err != nil {
 		log.Printf("debug: load capture %s: %v", id, err)
