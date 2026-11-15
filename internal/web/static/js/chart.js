@@ -222,6 +222,12 @@ const CHART_PRESETS = [
   },
 ];
 const activePreset = () => CHART_PRESETS.find(pr => pr.id === chartView.preset) || CHART_PRESETS[0];
+// chartImageLabel names the plot for assistive technology: a canvas has no
+// text, so the image role on the chart box carries what it currently shows.
+function chartImageLabel(preset) {
+  const win = ($('chart-window-label')?.textContent || '').trim();
+  return win ? `${preset.label} over ${win}` : preset.label;
+}
 function chartSpec(id) {
   return CHART_SERIES.find(s => s.id === id);
 }
@@ -1018,7 +1024,7 @@ function renderChart() {
   if (!canRender) {
     if (_up) { _up.destroy(); _up = null; _upKey = ''; }
     if (canMeasure && w >= CHART_MIN_W && h >= CHART_MIN_H) {
-      const { ctx } = setupCanvas(box);
+      const { ctx, cv } = setupCanvas(box);
       ctx.clearRect(0, 0, w, h);
       // Three honest blanks, in priority order: nothing stored at all,
       // a window inside history with zero requests, traffic the preset
@@ -1027,6 +1033,9 @@ function renderChart() {
       if (chartIsEmpty()) msg = !chartAgg.data_from_ms ? 'no traffic yet' : 'no requests in this window';
       else if (!data) msg = `no ${activePreset().label.toLowerCase()} samples yet`;
       else msg = 'not enough data points yet';
+      // The blank is drawn text, not content: name it like a plot.
+      cv.setAttribute('role', 'img');
+      cv.setAttribute('aria-label', chartImageLabel(preset) + ' - ' + msg);
       drawBlank(ctx, msg);
     }
     return;
@@ -1042,6 +1051,14 @@ function renderChart() {
   } else {
     if (_up.width !== w || _up.height !== h) _up.setSize({ width: w, height: h });
     _up.setData(data);
+  }
+  // A canvas has no text, so the plot root is one named image for assistive
+  // technology, named by what it currently shows. The hover readout stays
+  // outside that root: an image role makes its own descendants presentational,
+  // and the readout is a live status region.
+  if (_up.root) {
+    _up.root.setAttribute('role', 'img');
+    _up.root.setAttribute('aria-label', chartImageLabel(preset));
   }
 }
 
