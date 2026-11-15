@@ -601,6 +601,9 @@ html.nav-collapsed .doc-main { justify-self: center; }
   }
   .docs-nav-inner { border-right: 0; padding: 4px 14px 14px; }
   .docs-nav-collapse, .docs-nav-reveal { display: none; }
+  /* A remembered desktop collapse must not leak the reveal control into the
+     disclosure layout, where the rail is always available in the flow. */
+  html.nav-collapsed .docs-nav-reveal { display: none; }
   html.nav-collapsed .docs-nav { display: block; }
   html.nav-collapsed .docs-shell {
     grid-template-columns: minmax(0, 1fr);
