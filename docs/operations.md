@@ -965,8 +965,8 @@ both.
 
 | Route | Action / important contract |
 | --- | --- |
-| `GET /healthz` | Unauthenticated liveness probe for Docker HEALTHCHECK and load balancers. Reports process/HTTP liveness only, no storage depth. |
-| `GET /readyz` | Unauthenticated readiness probe. `200` when the durable pipeline can persist; `503` with a reason when the writer is wedged or a flush failed since boot. Compose uses it through `-readycheck`. |
+| `GET /healthz` | Unauthenticated liveness probe for Docker HEALTHCHECK and load balancers. Reports process/HTTP liveness only, no storage depth. Trailing-slash look-alikes (`/healthz/...`) are reserved and answer 404, never inference. |
+| `GET /readyz` | Unauthenticated readiness probe. `200` when the durable pipeline can persist; `503` with a reason when the writer is wedged or a flush failed since boot. Compose uses it through `-readycheck`. Trailing-slash look-alikes are reserved and answer 404, never inference. |
 | `GET /favicon.ico` | Unauthenticated ICO brand mark. Browsers fetch this without Authorization; it is registered on the mux so it never reaches the inference catch-all. |
 | `GET /favicon.svg`, `/apple-touch-icon.png`, `/icon-*.png` | Ungated SVG/PNG icons for tabs, home screens and the web app manifest. |
 | `GET /manifest.webmanifest` | Ungated web app manifest (name, standalone display, 192/512 icons). |
