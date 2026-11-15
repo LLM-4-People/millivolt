@@ -331,7 +331,7 @@ function reqRow(r, sepLabel) {
     const asc = attemptPillClass(a);
     const when = a.at ? new Date(a.at).toLocaleTimeString() : '-';
     const label = a.error_type || (a.status_code ? 'http ' + a.status_code : 'transport');
-    return `<tr class="retry-sub exp-row" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" data-attempt="${i}" title="open request ${escapeHtml(r.id)} (attempt ${pos + 1})" hidden>
+    return `<tr class="retry-sub exp-row" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" data-attempt="${i}" title="open request ${escapeHtml(r.id)} (attempt ${pos + 1})" tabindex="0" hidden>
       <td>${when}</td>
       <td colspan="${RETRY_LABEL_COLS}" class="retry-sub-label"><span class="retry-tick">↳</span> attempt ${pos + 1} <span class="pill ${asc}">${a.status_code || '-'}</span> <span>${escapeHtml(label)}</span></td>
       <td colspan="${REQ_COLS - 1 - RETRY_LABEL_COLS}" class="retry-sub-msg" title="${escapeHtml(a.error_msg || '')}"><span class="retry-sub-text">${escapeHtml(a.error_msg || '-')}</span></td>

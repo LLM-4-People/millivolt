@@ -148,6 +148,11 @@
   tr.retry-sub td { background: color-mix(in srgb, var(--warn) 4%, transparent); color: var(--muted); border-bottom: 1px solid var(--border); padding-top: 4px; padding-bottom: 4px; }
   tr.retry-sub { cursor: pointer; }
   tr.retry-sub:hover td { background: color-mix(in srgb, var(--warn) 10%, transparent); color: var(--text); }
+  /* The sub-row is a tab stop: it shows the same repaint and the shared edge
+     while it holds the keyboard, because the row is not a control that would
+     paint its own. */
+  tr.retry-sub:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
+  tr.retry-sub:focus-visible td { background: color-mix(in srgb, var(--warn) 10%, transparent); color: var(--text); }
   /* The nested err pill keeps its 13% err tint over the hovered warn row;
      --err is too dim there, so the proven error-text ink carries the label. */
   tr.retry-sub:hover td .pill.err { color: var(--err-text); }

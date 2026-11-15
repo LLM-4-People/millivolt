@@ -309,3 +309,16 @@ $('tbl-requests').addEventListener('click', e => {
   if (tr && tr.dataset.attempt !== undefined) openDrawerAttempt(tr.dataset.id, tr.dataset.attempt);
   else if (tr) openDrawer(tr.dataset.id);
 });
+
+// An attempt sub-row is a row, not a control, so it needs the keyboard press
+// that a row cannot get from the browser. The main rows already carry the
+// focusable opener button; the sub-rows are only reachable if the row itself
+// is a tab stop, which log_rows marks. A press on a nested control stays with
+// that control.
+$('tbl-requests').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const tr = e.target.closest('tr.retry-sub[data-id]');
+  if (!tr || e.target !== tr) return;
+  e.preventDefault();
+  openDrawerAttempt(tr.dataset.id, tr.dataset.attempt);
+});
