@@ -421,22 +421,23 @@ func (rs *restarter) drain(ctx context.Context) error {
 // expired drain still flushes and hands off - the in-flight requests are cut,
 // not the durability of everything before them - while the flush gets its own
 // context because the drain deadline is usually spent by the time it returns.
-func (rs *restarter) prepareHandoff(ctx context.Context) error {
+// drained reports which shape the drain had, so the commit log can word it.
+func (rs *restarter) prepareHandoff(ctx context.Context) (drained bool, err error) {
 	drainErr := rs.drain(ctx)
 	rs.setPhase(restartFlushing, "")
 	flushCtx, cancel := context.WithTimeout(context.Background(), restartFlushTimeout)
 	defer cancel()
 	if err := rs.deps.flushStore(flushCtx); err != nil {
-		return fmt.Errorf("metrics flush failed; restart aborted: %w", err)
+		return false, fmt.Errorf("metrics flush failed; restart aborted: %w", err)
 	}
 	if drainErr != nil {
 		if errors.Is(drainErr, context.DeadlineExceeded) {
 			logging.Printf("", "restart: drain window expired with requests still in flight; handed off after a clean flush")
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("drain failed; restart aborted: %w", drainErr)
+		return false, fmt.Errorf("drain failed; restart aborted: %w", drainErr)
 	}
-	return nil
+	return true, nil
 }
 
 func (rs *restarter) run() {
@@ -491,12 +492,16 @@ func (rs *restarter) run() {
 	//    accepting, but the already-hijacked watch connection can.
 	drainStart := time.Now()
 	drainTo := rs.deps.drainTimeout()
-	err = rs.prepareWithProgress(drainTo)
+	drained, err := rs.prepareWithProgress(drainTo)
 	if err != nil {
 		rs.failAndResume(err, listenFile, bin)
 		return
 	}
-	logging.Printf("", "restart: drained in %s (in-flight streams finished; restart_drain_timeout=%s)", time.Since(drainStart).Round(time.Millisecond), drainTo)
+	if drained {
+		logging.Printf("", "restart: drained in %s (in-flight streams finished; restart_drain_timeout=%s)", time.Since(drainStart).Round(time.Millisecond), drainTo)
+	} else {
+		logging.Printf("", "restart: drained in %s (drain window expired; in-flight streams were cut after a clean flush; restart_drain_timeout=%s)", time.Since(drainStart).Round(time.Millisecond), drainTo)
+	}
 
 	// prepareHandoff already drained every server and flushed metrics. The
 	// child may now open the database without overlapping predecessor writes.
@@ -527,7 +532,7 @@ func (rs *restarter) run() {
 
 // A scoped lifetime guarantees ticker/context cleanup even when a dependency
 // panics and the outer restart recovery resumes serving.
-func (rs *restarter) prepareWithProgress(drainTo time.Duration) error {
+func (rs *restarter) prepareWithProgress(drainTo time.Duration) (drained bool, err error) {
 	stopTick := make(chan struct{})
 	tickDone := make(chan struct{})
 	go func() {

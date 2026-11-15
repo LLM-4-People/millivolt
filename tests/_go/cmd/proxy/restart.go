@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"testing/synctest"
@@ -525,7 +526,7 @@ func TestPrepareHandoffRequiresDrainAndFlushSuccess(t *testing.T) {
 	cancel()
 	// The flush is the durability barrier, so a drain that never completed
 	// still flushes; the canceled drain itself stays a handoff failure.
-	if err := rs.prepareHandoff(ctx); !errors.Is(err, context.Canceled) || !flushed {
+	if _, err := rs.prepareHandoff(ctx); !errors.Is(err, context.Canceled) || !flushed {
 		t.Errorf("failed drain skipped the flush or passed the handoff fence: err=%v flushed=%v", err, flushed)
 	}
 	close(release)
@@ -533,7 +534,7 @@ func TestPrepareHandoffRequiresDrainAndFlushSuccess(t *testing.T) {
 	srv.Close()
 	flushed = false
 	flushErr = errors.New("disk failure")
-	if err := rs.prepareHandoff(t.Context()); err == nil || !flushed {
+	if _, err := rs.prepareHandoff(t.Context()); err == nil || !flushed {
 		t.Errorf("failed flush passed handoff fence: err=%v flushed=%v", err, flushed)
 	}
 	if rs.status()["phase"] == "handing_off" {
@@ -747,7 +748,7 @@ func TestHandoffSurvivesExpiredDrain(t *testing.T) {
 		flushCtxErr = ctx.Err()
 		return nil
 	}})
-	if err := rs.prepareWithProgress(20 * time.Millisecond); err != nil {
+	if _, err := rs.prepareWithProgress(20 * time.Millisecond); err != nil {
 		t.Fatalf("expired drain aborted the handoff: %v", err)
 	}
 	if flushCtxErr != nil {
@@ -759,6 +760,57 @@ func TestHandoffSurvivesExpiredDrain(t *testing.T) {
 	close(release)
 	<-done
 	srv.Close()
+}
+
+// TestRestartExpiredDrainIsWordedAsACut pins the operator log: an expired drain
+// hands off after a clean flush, so the commit line must not claim the
+// in-flight streams finished next to prepareHandoff's own expired-drain line.
+func TestRestartExpiredDrainIsWordedAsACut(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(entered) })
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	})
+	// An empty body is not a program, so the run resumes instead of exiting.
+	rs, addr := restartRunFixtureHandler(t, "not a program", func(context.Context) error { return nil }, handler)
+	rs.deps.drainTimeout = func() time.Duration { return 20 * time.Millisecond }
+
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	requested := make(chan struct{})
+	go func() {
+		defer close(requested)
+		resp, err := http.Get("http://" + addr + "/")
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-entered
+	rs.run()
+	close(release)
+	<-requested
+
+	out := buf.String()
+	if !strings.Contains(out, "drain window expired with requests still in flight") {
+		t.Fatalf("expired drain not logged: %q", out)
+	}
+	line := ""
+	for _, candidate := range strings.Split(out, "\n") {
+		if strings.Contains(candidate, "restart: drained in ") {
+			line = candidate
+		}
+	}
+	if line == "" {
+		t.Fatalf("no commit drain line: %q", out)
+	}
+	if !strings.Contains(line, "were cut") || strings.Contains(line, "in-flight streams finished") {
+		t.Fatalf("commit line = %q, want the cut wording, not a finished claim", line)
+	}
 }
 
 // TestRestartBudgetIncludesFlushBound pins budget_ms as the whole choreography
@@ -920,6 +972,13 @@ func TestRestartBuildNamesAnUnwritableTempDir(t *testing.T) {
 // run() can be driven through every failure branch without compiling.
 func restartRunFixture(t *testing.T, body string, flush func(context.Context) error) (*restarter, string) {
 	t.Helper()
+	return restartRunFixtureHandler(t, body, flush, nil)
+}
+
+// restartRunFixtureHandler is restartRunFixture with a caller-supplied request
+// handler; nil keeps the instant 204 used by the choreography cases.
+func restartRunFixtureHandler(t *testing.T, body string, flush func(context.Context) error, handle http.Handler) (*restarter, string) {
+	t.Helper()
 	goBin := filepath.Join(t.TempDir(), "fake-go")
 	script := `#!/bin/sh
 out=
@@ -937,7 +996,10 @@ chmod +x "$out"
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := handle
+	if handler == nil {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	}
 	server := &http.Server{Handler: handler}
 	go server.Serve(ln)
 	t.Cleanup(func() { server.Close() })
