@@ -220,7 +220,13 @@ scripts/check.sh
 
 The shared script owns the core verification commands, including offline
 documentation-link, publication-ignore and typography regressions (Git is required),
-the generated-site contract, and the workflow/automation policy. `npm test` runs
+the generated-site contract, and the workflow/automation policy. That policy
+suite runs the workflow files of the ref under test, and a `pull_request` run
+evaluates its own head revision rather than the base branch's: a workflow change
+is judged as this pull request ships it, which is what lets a workflow edit pass
+before merge. Review the workflow diff itself, since the run that validates it
+was configured by the same commit; only the post-merge `main` state proves what
+landed. `npm test` runs
 the jsdom suites and the request-log merge regression probe separately. All tests and disposable harnesses
 live in [tests/](tests/README.md), with suffix-free physical filenames. Go's
 temporary overlay adds its required virtual `_test.go` names; Python unit
