@@ -8,14 +8,17 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
-// toolCallFragment is one lexically extracted tool_calls array element. index
-// and name hold the raw JSON token of the LAST occurrence of that key in the
-// element (the struct decode's last-wins duplicate rule, where a null value is
-// a no-op); id records whether the last id occurrence was a non-empty string.
+// toolCallFragment is one lexically extracted tool_calls array element. The
+// start/end pairs bound the raw JSON token of the LAST occurrence of that key
+// in the element (the struct decode's last-wins duplicate rule, where a null
+// value is a no-op); a zero-length pair is an absent key. Offsets are relative
+// to the scanned block, which keeps a hostile many-element frame's reusable
+// buffer to five bytes per key instead of two slice headers. id records whether
+// the last id occurrence was a non-empty string.
 type toolCallFragment struct {
-	index []byte
-	name  []byte
-	id    bool
+	indexStart, indexEnd uint32
+	nameStart, nameEnd   uint32
+	id                   bool
 }
 
 // feedToolCalls accounts one Chat tool_calls block. A well-formed
@@ -40,25 +43,26 @@ func (a *Analyzer) feedToolCalls(toolBlock []byte) {
 	for _, fragment := range fragments {
 		index := 0
 		hasIndex := false
-		if len(fragment.index) > 0 {
-			if n, err := jsonnum.Parse(fragment.index); err == nil && n >= 0 {
+		if fragment.indexEnd > fragment.indexStart {
+			if n, err := jsonnum.Parse(toolBlock[fragment.indexStart:fragment.indexEnd]); err == nil && n >= 0 {
 				index, hasIndex = n, true
 			}
 		}
+		name := toolBlock[fragment.nameStart:fragment.nameEnd]
 		if !hasIndex {
-			a.retainToolNameToken(fragment.name)
+			a.retainToolNameToken(name)
 			if fragment.id {
 				a.toolCalls++
 			}
 			continue
 		}
 		if _, counted := a.toolCallIndexes[index]; counted {
-			a.retainToolNameToken(fragment.name)
+			a.retainToolNameToken(name)
 			continue
 		}
 		// A fragment with neither a non-empty id nor a non-empty name is
 		// not a call announcement.
-		if !fragment.id && len(fragment.name) <= 2 {
+		if !fragment.id && len(name) <= 2 {
 			continue
 		}
 		if a.toolCallIndexes == nil {
@@ -68,7 +72,7 @@ func (a *Analyzer) feedToolCalls(toolBlock []byte) {
 			a.toolCallIndexes[index] = struct{}{}
 		}
 		a.toolCalls++
-		a.retainToolNameToken(fragment.name)
+		a.retainToolNameToken(name)
 	}
 }
 
@@ -184,7 +188,7 @@ func scanToolCallFragment(block []byte, i int) (toolCallFragment, int, bool) {
 			if !ok {
 				return fragment, 0, false
 			}
-			fragment.index = block[start:next]
+			fragment.indexStart, fragment.indexEnd = uint32(start), uint32(next)
 			i = next
 		case toolKeyIs(key, "id"):
 			switch {
@@ -205,7 +209,8 @@ func scanToolCallFragment(block []byte, i int) (toolCallFragment, int, bool) {
 		case toolKeyIs(key, "function"):
 			switch {
 			case i < len(block) && block[i] == '{':
-				fragment.name, next, ok = scanToolFunction(block, i, fragment.name)
+				fragment.nameStart, fragment.nameEnd, next, ok =
+					scanToolFunction(block, i, fragment.nameStart, fragment.nameEnd)
 				if !ok {
 					return fragment, 0, false
 				}
@@ -282,18 +287,19 @@ func toolKeyIs(key []byte, want string) bool {
 }
 
 // scanToolFunction extracts the name member of one function object starting at
-// its '{', carrying the name of an earlier duplicate function key: decoding a
-// later object into the same struct merges into it, so an absent or null name
-// keeps the previous one. The returned index is one past the closing '}'.
-func scanToolFunction(block []byte, i int, name []byte) ([]byte, int, bool) {
+// its '{', carrying the name offsets of an earlier duplicate function key:
+// decoding a later object into the same struct merges into it, so an absent or
+// null name keeps the previous one. The returned index is one past the closing
+// '}'.
+func scanToolFunction(block []byte, i int, nameStart, nameEnd uint32) (uint32, uint32, int, bool) {
 	i = metrics.SkipSpace(block, i+1)
 	if i < len(block) && block[i] == '}' {
-		return name, i + 1, true
+		return nameStart, nameEnd, i + 1, true
 	}
 	for {
 		key, next, ok := scanToolKey(block, i)
 		if !ok {
-			return nil, 0, false
+			return 0, 0, 0, false
 		}
 		i = next
 		if toolKeyIs(key, "name") {
@@ -302,30 +308,30 @@ func scanToolFunction(block []byte, i int, name []byte) ([]byte, int, bool) {
 				start := i
 				next, ok = skipToolString(block, i)
 				if !ok {
-					return nil, 0, false
+					return 0, 0, 0, false
 				}
-				name = block[start:next]
+				nameStart, nameEnd = uint32(start), uint32(next)
 				i = next
 			case hasToolLiteral(block, i, "null"):
 				// null is a no-op for a string field.
 				i += len("null")
 			default:
-				return nil, 0, false
+				return 0, 0, 0, false
 			}
 		} else if i, ok = skipToolValue(block, i); !ok {
-			return nil, 0, false
+			return 0, 0, 0, false
 		}
 		i = metrics.SkipSpace(block, i)
 		if i >= len(block) {
-			return nil, 0, false
+			return 0, 0, 0, false
 		}
 		switch block[i] {
 		case '}':
-			return name, i + 1, true
+			return nameStart, nameEnd, i + 1, true
 		case ',':
 			i = metrics.SkipSpace(block, i+1)
 		default:
-			return nil, 0, false
+			return 0, 0, 0, false
 		}
 	}
 }
