@@ -246,6 +246,16 @@ func sessionCookie(r *http.Request, value string) *http.Cookie {
 	}
 }
 
+// expireSessionCookie writes the empty, already-expired twin of the session
+// cookie. It goes through sessionCookie so Path, HttpOnly, Secure and SameSite
+// cannot drift from the cookie it clears; only the lifetime differs.
+func expireSessionCookie(w http.ResponseWriter, r *http.Request) {
+	cookie := sessionCookie(r, "")
+	cookie.MaxAge = -1
+	cookie.Expires = time.Unix(1, 0).UTC()
+	http.SetCookie(w, cookie)
+}
+
 func (g *operatorGate) mintSessionCookie(r *http.Request) (*http.Cookie, error) {
 	expires := time.Now().Add(sessionCookieTTL).Unix()
 	nonce := make([]byte, sessionNonceLen)
@@ -755,14 +765,23 @@ func (c cappedBody) Close() error { return c.body.Close() }
 // "token" form field (the login page works without JavaScript), throttles
 // wrong candidates like every other gated request, and never reveals which
 // of the two was wrong.
+//
+// DELETE /session is the other half: it expires that cookie. A credential-less
+// sign-out would otherwise leave the 12-hour cookie in place and a reload would
+// silently ride it back in, so the route owns both directions of the session.
 func (g *operatorGate) handleOperatorSession(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		denyOperator(w, http.StatusMethodNotAllowed, "POST only")
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		w.Header().Set("Allow", "POST, DELETE")
+		denyOperator(w, http.StatusMethodNotAllowed, "POST or DELETE only")
 		return
 	}
 	if !g.armed {
 		denyOperator(w, http.StatusForbidden, operatorPlaneDisabledMsg)
+		return
+	}
+	if r.Method == http.MethodDelete {
+		expireSessionCookie(w, r)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	ip := clientIP(r)

@@ -36,6 +36,20 @@ function storeOperatorCredential(value) {
   } catch (e) { /* storage denied: tab-only credential */ }
 }
 
+// signOutOperator is the operator's explicit exit. It drops BOTH halves of the
+// session: the tab credential and the signed cookie. Clearing only the
+// credential leaves a reload riding the 12-hour cookie straight back in, and
+// deleting only the cookie lets the still-present bearer re-mint on the next
+// gated call. The DELETE is unauthenticated by design (the route is the
+// session owner); a failed one still leaves the credential gone, so the prompt
+// stays the honest next step and the cookie expires on its own.
+async function signOutOperator() {
+  storeOperatorCredential('');
+  operatorRejected = false;
+  try { await fetch('/session', { method: 'DELETE', credentials: 'same-origin' }); } catch (e) { /* cookie stays until TTL */ }
+  askOperatorToken();
+}
+
 // One owner for gated-plane calls: attach the stored credential, and on 401
 // prompt once, remember the entered value and retry the identical request
 // exactly once. A 403 means the server has no credential configured

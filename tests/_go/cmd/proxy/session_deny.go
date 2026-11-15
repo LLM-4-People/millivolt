@@ -72,6 +72,43 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		w := httptest.NewRecorder()
 		gate.handleOperatorSession(w, httptest.NewRequest(http.MethodGet, "http://proxy.example/session", nil))
 		assertDenial(t, "405", w, http.StatusMethodNotAllowed, "")
+		if got, want := w.Header().Get("Allow"), "POST, DELETE"; got != want {
+			t.Errorf("405 Allow = %q, want %q", got, want)
+		}
+	})
+
+	// DELETE is the other half of the handshake: sign-out must expire the
+	// cookie the POST minted, with the same Path, HttpOnly, Secure and SameSite
+	// attributes, so the browser cannot keep a stale copy while a differently
+	// drawn cookie lingers beside it.
+	t.Run("sign-out expires the session cookie", func(t *testing.T) {
+		gate := newOperatorGate(token)
+		r := httptest.NewRequest(http.MethodDelete, "https://proxy.example/session", nil)
+		w := httptest.NewRecorder()
+		gate.handleOperatorSession(w, r)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("DELETE status = %d, want 204", w.Code)
+		}
+		cookies := w.Result().Cookies()
+		if len(cookies) != 1 {
+			t.Fatalf("DELETE set %d cookies, want exactly the expired one", len(cookies))
+		}
+		got := cookies[0]
+		if got.Name != sessionCookieName || got.Value != "" || got.MaxAge != -1 || !got.Expires.Before(time.Now()) {
+			t.Errorf("expired cookie = %+v, want %q cleared with MaxAge -1 and a past Expires", got, sessionCookieName)
+		}
+		// TLS request: Secure must be derived the same way the mint derives it.
+		if got.Path != "/" || !got.HttpOnly || !got.Secure || got.SameSite != http.SameSiteStrictMode {
+			t.Errorf("expired cookie attributes = path %q httpOnly %v secure %v sameSite %v", got.Path, got.HttpOnly, got.Secure, got.SameSite)
+		}
+	})
+
+	t.Run("sign-out on an unarmed plane", func(t *testing.T) {
+		gate := newOperatorGate("")
+		w := httptest.NewRecorder()
+		gate.handleOperatorSession(w, httptest.NewRequest(http.MethodDelete, "http://proxy.example/session", nil))
+		assertDenial(t, "403 sign-out", w, http.StatusForbidden,
+			"{\"error\":\"operator plane is disabled: set MILLIVOLT_OPERATOR_TOKEN to enable it\"}\n")
 	})
 
 	t.Run("unarmed plane", func(t *testing.T) {
@@ -174,6 +211,26 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		response := post("/session", "")
 		if response.StatusCode != http.StatusNoContent || len(response.Cookies()) != 1 {
 			t.Errorf("POST /session: status = %d cookies = %d, want 204 + the minted cookie", response.StatusCode, len(response.Cookies()))
+		}
+		// Sign-out travels the same installed route and needs no credential:
+		// the wrapper gates it, and the handler expires the cookie.
+		signOut, err := http.NewRequest(http.MethodDelete, endpoint.URL+"/session", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signOut.Header.Set("Origin", endpoint.URL)
+		signOutResponse, err := http.DefaultClient.Do(signOut)
+		if err != nil {
+			t.Fatalf("DELETE /session: %v", err)
+		}
+		t.Cleanup(func() {
+			signOutResponse.Body.Close()
+			_, _ = io.Copy(io.Discard, signOutResponse.Body)
+		})
+		if signOutResponse.StatusCode != http.StatusNoContent || len(signOutResponse.Cookies()) != 1 ||
+			!signOutResponse.Cookies()[0].Expires.Before(time.Now()) {
+			t.Errorf("DELETE /session: status = %d cookies = %d, want 204 + the expired cookie",
+				signOutResponse.StatusCode, len(signOutResponse.Cookies()))
 		}
 		// The cross-origin protection wrapper stayed on the moved route, and
 		// its denial carries the shared denial shape (no-store, unframeable,

@@ -204,6 +204,35 @@ module.exports = async function operatorUnlock(H) {
       submitDialog('op-token-correct');
       check('one entry resolves every joined caller with the credential',
         (await a).status === 200 && (await b).status === 200 && modalOpens === opensBefore + 1);
+
+      // Sign-out clears both halves: the tab credential and the signed cookie
+      // (the DELETE), then asks again. Clearing only the credential would let
+      // a reload ride the cookie straight back in.
+      {
+        const savedSignOutFetch = w.fetch;
+        const deletes = [];
+        w.fetch = (url, options) => {
+          if (String(url) === '/session' && options && options.method === 'DELETE') {
+            deletes.push({credentials: options.credentials});
+            return Promise.resolve({ok: true, status: 204, json: async () => ({})});
+          }
+          return savedSignOutFetch(url, options);
+        };
+        try {
+          d.getElementById('btn-signout').click();
+          check('the sign-out control is bound in the one id table',
+            !!w.eval("STATIC_BINDINGS['btn-signout']"));
+          check('sign-out deletes the session with the cookie attached',
+            await settleUntil(() => deletes.length === 1) &&
+            deletes[0].credentials === 'same-origin');
+          check('sign-out clears the stored credential and asks again',
+            await settleUntil(() => dialogOpen()) && w.eval('operatorCredential') === '' &&
+            w.sessionStorage.getItem(w.eval('OPERATOR_KEY')) === null);
+          d.querySelector('#operator-dialog [data-operator-auth="cancel"]').click();
+        } finally {
+          w.fetch = savedSignOutFetch;
+        }
+      }
     } finally {w.close();}
   }
 

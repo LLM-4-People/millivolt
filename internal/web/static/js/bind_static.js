@@ -20,6 +20,7 @@ const STATIC_BINDINGS = {
   'theme-reset': { click: () => resetTheme() },
   'theme-close': { click: () => closeThemeMenu() },
   'btn-settings': { click: e => toggleSettings(e) },
+  'btn-signout': { click: () => signOutOperator() },
   'settings-veil': { click: () => closeSettings() },
   'settings-q': { input: () => filterSettings() },
   'btn-settings-close': { click: () => closeSettings() },
