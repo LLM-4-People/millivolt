@@ -378,7 +378,7 @@ if is_running; then stop; fi
 # 3. Scratch DB. Explicit copies use the online-backup owner. Redaction derives
 # a new metrics-only file before a server can read it; raw pages are never served.
 if [ "$DEV_DB" != "none" ]; then
-  rm -f "$DEV_DB" "$DEV_DB-shm" "$DEV_DB-wal"
+  rm -f "$DEV_DB" "$DEV_DB-shm" "$DEV_DB-wal" "$DEV_DB.redaction"
   if [ "$DEV_COPY_DB" != 0 ]; then
     backup_args=()
     if [ "$DEV_COPY_DB" = redacted ]; then backup_args+=(--docs-safe); fi
