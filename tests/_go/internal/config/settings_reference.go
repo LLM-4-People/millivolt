@@ -56,15 +56,17 @@ func TestSettingsReferenceCoversEveryOwner(t *testing.T) {
 		if row.seen != 1 {
 			t.Errorf("setting %q has %d rows, want exactly one", field.Key, row.seen)
 		}
-		if len(row.cells) != 7 {
-			t.Errorf("%s:%d: setting %q has %d cells, want 7", settingsdoc.PagePath, row.line, field.Key, len(row.cells))
+		if len(row.cells) != 5 {
+			t.Errorf("%s:%d: setting %q has %d cells, want 5", settingsdoc.PagePath, row.line, field.Key, len(row.cells))
 			continue
 		}
-		if got := unescape(row.cells[1]); got != field.Label {
+		// The first cell carries the key, the dashboard label and the type; the
+		// key is what the row map is built from, so re-read the label beside it.
+		if got := labelOf(row.cells[0]); got != field.Label {
 			t.Errorf("%s:%d: %q label = %q, want the schema label %q",
 				settingsdoc.PagePath, row.line, field.Key, got, field.Label)
 		}
-		if got := unescape(row.cells[6]); got != field.Help {
+		if got := unescape(row.cells[4]); got != field.Help {
 			t.Errorf("%s:%d: %q description does not match the schema help",
 				settingsdoc.PagePath, row.line, field.Key)
 		}
@@ -72,19 +74,19 @@ func TestSettingsReferenceCoversEveryOwner(t *testing.T) {
 		if field.HotReload {
 			wantReload = "Hot-reloads"
 		}
-		if got := unescape(row.cells[5]); got != wantReload {
+		if got := unescape(row.cells[3]); got != wantReload {
 			t.Errorf("%s:%d: %q reload = %q, want %q (schema hot_reload=%v)",
 				settingsdoc.PagePath, row.line, field.Key, got, wantReload, field.HotReload)
 		}
 		if len(field.Choices) == 0 {
 			if want := field.RangeText(); want != "" {
-				if got := unescape(row.cells[4]); got != want {
+				if got := unescape(row.cells[2]); got != want {
 					t.Errorf("%s:%d: %q accepted values = %q, want the schema bound %q",
 						settingsdoc.PagePath, row.line, field.Key, got, want)
 				}
 			}
 		}
-		if got := row.cells[3]; !strings.HasPrefix(got, "`") || !strings.HasSuffix(got, "`") {
+		if got := row.cells[1]; !strings.HasPrefix(got, "`") || !strings.HasSuffix(got, "`") {
 			t.Errorf("%s:%d: %q default %q is not a rendered code value",
 				settingsdoc.PagePath, row.line, field.Key, got)
 		}
@@ -134,7 +136,7 @@ func parseRows(t *testing.T, text string) map[string]*settingsRow {
 		}
 		body := strings.TrimSuffix(strings.TrimPrefix(line, "| "), " |")
 		cells := strings.Split(body, " | ")
-		key := strings.Trim(cells[0], "`")
+		key := keyOf(cells[0])
 		row, ok := rows[key]
 		if !ok {
 			row = &settingsRow{line: index + 1, cells: cells}
@@ -146,6 +148,33 @@ func parseRows(t *testing.T, text string) map[string]*settingsRow {
 		t.Fatalf("%s has no table rows", settingsdoc.PagePath)
 	}
 	return rows
+}
+
+// keyOf reads the code span that opens a first cell: a setting key or a flag
+// name, with everything the cell adds after it (the label and the type)
+// discarded.
+func keyOf(cell string) string {
+	rest := strings.TrimPrefix(cell, "`")
+	key, _, _ := strings.Cut(rest, "`")
+	return key
+}
+
+// labelOf reads the dashboard label the first cell carries beside the key, in
+// the form "`key` (label . type)". It is empty when the cell does not carry one.
+func labelOf(cell string) string {
+	close := strings.Index(cell[1:], "`")
+	if close < 0 {
+		return ""
+	}
+	open := strings.Index(cell[close+1:], " (")
+	if open < 0 {
+		return ""
+	}
+	// The type may itself carry parentheses ("int (percent)"), so the label ends
+	// at the first separator, not at the last parenthesis.
+	inner := strings.TrimSuffix(cell[close+1+open+2:], ")")
+	label, _, _ := strings.Cut(inner, " \u00b7 ")
+	return label
 }
 
 // countSettingRows counts rows whose first cell is a setting key rather than a
