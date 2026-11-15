@@ -1076,7 +1076,7 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		{"strip is not inbound-limited", operations, "not limited to Chat Completions or Anthropic inbound"},
 		{"strip operations wording", operations, "tracked client-body fields"},
 		{"strip protocol scope", protocol, "client request body before relay or translation. It applies to any JSON body, including a Responses client body"},
-		{"transport header exception", operations, "`accept-encoding` and `range` are the exception"},
+		{"transport header exception", operations, "`accept-encoding` and `range` are stripped from the final upstream request before send"},
 		{"transport header client map", operations, "`X-Proxy-Headers` and an `X-Proxy-Auth-Header` naming one"},
 		{"transport header protocol row", protocol, "`accept-encoding` and `range` are proxy-owned and rejected with 400"},
 		{"transport header provider comment", configSource, "accept-encoding and range are proxy-owned: the X-Proxy-Headers map rejects them with 400"},
