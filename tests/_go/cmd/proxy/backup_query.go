@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -219,33 +218,60 @@ func TestRestorePercentDecodedConsumedKeyIsConsumed(t *testing.T) {
 	}
 }
 
+// TestBackupRoutesRejectUnknownKeyBeforeValueGrammar pins the mutating gate
+// order: an unknown key must answer as unknown even when a known key's value
+// would also fail the grammar. Without the order the operator hears about the
+// value while the ignored key silently selects the broader default action.
+func TestBackupRoutesRejectUnknownKeyBeforeValueGrammar(t *testing.T) {
+	liveReloadFixture(t)
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	errorOf := func(rec *httptest.ResponseRecorder) string {
+		t.Helper()
+		var body struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("error body %s: %v", rec.Body.String(), err)
+		}
+		return body.Error
+	}
+	for _, tc := range []struct {
+		name, method, unknown, known, prefix string
+	}{
+		{"backup", http.MethodGet, "/admin/backup?bogus=1&config=maybe",
+			"/admin/backup?config=maybe", "config:"},
+		{"restore", http.MethodPost, "/admin/restore?bogus=1&inspect=maybe",
+			"/admin/restore?inspect=maybe", "inspect:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.unknown, nil))
+			if rec.Code != http.StatusBadRequest || errorOf(rec) != "unknown key bogus" {
+				t.Fatalf("unknown key beside a malformed value = %d %s, want 400 unknown key bogus",
+					rec.Code, rec.Body.String())
+			}
+			// The same request without the unknown key reaches the value grammar,
+			// so the first half is not passing on an unreachable parser.
+			rec = httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.known, nil))
+			if rec.Code != http.StatusBadRequest || !strings.HasPrefix(errorOf(rec), tc.prefix) {
+				t.Fatalf("malformed known value = %d %s, want 400 %s grammar error",
+					rec.Code, rec.Body.String(), tc.prefix)
+			}
+		})
+	}
+}
+
 // TestBackupRestoreConsumedQueryKeysPinned pins the consumed-set contract:
 // nothing bounded the two lists' contents, so widening the restore set by one
-// key would silently re-admit the ignore class wave 24 removed. The sets now
-// live in internal/backup, the owner the HTTP handlers and the command-line
-// client share. The test pins each named key constant, confirms the sets the
-// owner returns, checks that a caller cannot mutate them for every later
-// caller, and requires each route's two gates (DuplicateQueryKey and
-// UnknownQueryKey) to be called exactly once with the same shared set.
+// key would silently re-admit the ignore class wave 24 removed. The sets live
+// in internal/backup, the owner the HTTP handlers and the command-line client
+// share. The test pins each named key constant and confirms the sets the owner
+// returns, and checks that a caller cannot mutate them for every later caller.
+// The gate order itself, including both route gates reading these sets, is
+// proved behaviourally by TestBackupRoutesRejectUnknownKeyBeforeValueGrammar.
 func TestBackupRestoreConsumedQueryKeysPinned(t *testing.T) {
-	raw, err := os.ReadFile("backup.go")
-	if err != nil {
-		t.Fatalf("read cmd/proxy/backup.go: %v", err)
-	}
-	handlerSrc := string(raw)
-	region := func(decl string) string {
-		t.Helper()
-		start := strings.Index(handlerSrc, decl)
-		if start < 0 {
-			t.Fatalf("cmd/proxy/backup.go is missing %q", decl)
-		}
-		rest := handlerSrc[start:]
-		end := strings.Index(rest, "\n}")
-		if end < 0 {
-			t.Fatalf("%q is not terminated by a line-anchored closing brace", decl)
-		}
-		return rest[:end]
-	}
 	for name, want := range map[string]string{
 		"ParamInspect": backupparams.ParamInspect, "ParamConfig": backupparams.ParamConfig,
 		"ParamDatabase": backupparams.ParamDatabase, "ParamConfigMode": backupparams.ParamConfigMode,
@@ -286,31 +312,6 @@ func TestBackupRestoreConsumedQueryKeysPinned(t *testing.T) {
 			if fresh := backupparams.RestoreQueryKeys(); set.name == "RestoreQueryKeys" && fresh[0] == "mutated" {
 				t.Errorf("%s returns shared state; a caller can widen the accepted grammar", set.name)
 			}
-		}
-	}
-	for _, route := range []struct{ decl, list string }{
-		{"func handleBackup(", "backupparams.BackupQueryKeys"},
-		{"func handleRestore(", "backupparams.RestoreQueryKeys"},
-	} {
-		body := region(route.decl)
-		calls := map[string]string{}
-		for _, gate := range []string{"adminjson.DuplicateQueryKey", "adminjson.UnknownQueryKey"} {
-			matches := regexp.MustCompile(regexp.QuoteMeta(gate)+`\(([^\n]*)\)`).FindAllStringSubmatch(body, -1)
-			if len(matches) != 1 {
-				t.Errorf("%s calls %s %d times, want exactly one consumed-set gate call", route.decl, gate, len(matches))
-				continue
-			}
-			args := strings.Split(matches[0][1], ",")
-			if len(args) != 2 {
-				t.Errorf("%s's %s call takes %d arguments, want the parsed query and one list", route.decl, gate, len(args))
-				continue
-			}
-			calls[gate] = strings.TrimSpace(args[1])
-		}
-		want := route.list + "()..."
-		if calls["adminjson.DuplicateQueryKey"] != want || calls["adminjson.UnknownQueryKey"] != want {
-			t.Errorf("%s gates read %q and %q, want both to pass %s", route.decl,
-				calls["adminjson.DuplicateQueryKey"], calls["adminjson.UnknownQueryKey"], want)
 		}
 	}
 }
