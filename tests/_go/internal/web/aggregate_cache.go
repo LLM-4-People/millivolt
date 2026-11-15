@@ -365,13 +365,18 @@ func awaitFlightJoin(t *testing.T, probe *flightProbe, release func()) {
 	}
 }
 
-func assertFlightComplete[T any](t *testing.T, m *aggregateMemo[T]) {
+// assertFlightComplete proves the flight retired by asking the real entry
+// point again: a published entry serves without a fold, while a leftover
+// same-key flight would make this call wait for it. No private field is read.
+func assertFlightComplete(t *testing.T, refetch func() error, cold *atomic.Int64) {
 	t.Helper()
-	m.mu.Lock()
-	published, inFlight := m.entry != nil, m.flight != nil
-	m.mu.Unlock()
-	if !published || inFlight {
-		t.Fatalf("memo published/flight = %v/%v, want true/false", published, inFlight)
+	before := cold.Load()
+	if err := refetch(); err != nil {
+		t.Fatalf("post-flight refetch: %v", err)
+	}
+	if got := cold.Load(); got != before {
+		t.Fatalf("post-flight refetch recomputed (cold folds %d -> %d); the published entry must serve",
+			before, got)
 	}
 }
 
@@ -409,7 +414,10 @@ func TestAggregateFlightCoalescesChart(t *testing.T) {
 			if got := cacheChartRequests(payloads[1]); got != 1 {
 				t.Fatalf("chart requests = %d, want 1", got)
 			}
-			assertFlightComplete(t, &api.chartMemo)
+			assertFlightComplete(t, func() error {
+				_, err := api.chart(t.Context(), winMin, nil, "", now.UnixMilli())
+				return err
+			}, &probe.cold)
 		})
 	}
 }
@@ -443,7 +451,10 @@ func TestAggregateFlightCoalescesExplorer(t *testing.T) {
 	if payloads[0].Total != 1 || !reflect.DeepEqual(payloads[0], payloads[1]) {
 		t.Fatalf("coalesced explorers differ:\n%+v\n%+v", payloads[0], payloads[1])
 	}
-	assertFlightComplete(t, &api.explorerMemo)
+	assertFlightComplete(t, func() error {
+		_, err := api.explorer(t.Context(), "provider", nil, "")
+		return err
+	}, &probe.cold)
 }
 
 func TestAggregateFlightDifferentKeyDoesNotWait(t *testing.T) {
@@ -538,7 +549,10 @@ func TestAggregateFlightCanceledFollowerKeepsLeader(t *testing.T) {
 	if err := <-leaderErr; err != nil {
 		t.Fatalf("leader: %v", err)
 	}
-	assertFlightComplete(t, &api.chartMemo)
+	assertFlightComplete(t, func() error {
+		_, err := api.chart(t.Context(), 60, nil, "", now.UnixMilli())
+		return err
+	}, &probe.cold)
 }
 
 func TestAggregateFlightLeaderCanceledThenFollowerLeads(t *testing.T) {
@@ -584,7 +598,10 @@ func TestAggregateFlightLeaderCanceledThenFollowerLeads(t *testing.T) {
 	if got := probe.cold.Load(); got != 2 {
 		t.Fatalf("cold folds = %d, want 2 (canceled leader then follower)", got)
 	}
-	assertFlightComplete(t, &api.chartMemo)
+	assertFlightComplete(t, func() error {
+		_, err := api.chart(t.Context(), 60, nil, "", now.UnixMilli())
+		return err
+	}, &probe.cold)
 }
 
 func TestAggregateFlightChartGeometryRecomputes(t *testing.T) {
@@ -694,5 +711,8 @@ func TestAggregateFlightConcurrentCold(t *testing.T) {
 		t.Fatalf("waits = %d, want %d", got, callers-1)
 	}
 	t.Logf("callers=%d folds=%d waits=%d", callers, cold.Load(), waits.Load())
-	assertFlightComplete(t, &api.chartMemo)
+	assertFlightComplete(t, func() error {
+		_, err := api.chart(t.Context(), 60, nil, "", now.UnixMilli())
+		return err
+	}, &cold)
 }

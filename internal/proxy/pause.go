@@ -657,9 +657,6 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 			scopeSupplied = true
 			merged[name] = sanitizeNameList(names)
 		}
-		anyNamed := len(merged["clients"]) > 0 || len(merged["providers"]) > 0 ||
-			len(merged["models"]) > 0 || len(merged["key_hashes"]) > 0 ||
-			len(merged["conversations"]) > 0
 		newc := body.New.value
 		scopeOmitted := !body.All.set && !body.New.set && !scopeSupplied
 		var all bool
@@ -669,11 +666,6 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 			all, newc = prev.All, prev.New
 		} else {
 			all = scopeOmitted || body.All.value
-			// An explicit empty / whitespace-only scope is not a
-			// global hold - deny by default.
-			if !all && !newc && !anyNamed {
-				return prev, fmt.Errorf("all, new, or at least one scope dimension is required")
-			}
 			// "all" already covers every narrower scope; accepting both
 			// would let a caller believe the hold was narrowed while the
 			// proxy installs the global one. Names within a dimension and
@@ -703,6 +695,12 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 			// An edit re-states scope, deadline and cap; the system origin
 			// of an auto-created hold is never restated or cleared.
 			Reason: prev.Reason,
+		}
+		// An explicit empty / whitespace-only scope is not a global hold -
+		// deny by default. The one predicate reads the built snapshot, so a
+		// new dimension cannot be accepted here and missed by the guard.
+		if !snap.hasScope() {
+			return prev, fmt.Errorf("all, new, or at least one scope dimension is required")
 		}
 		if hasPrev {
 			snap.ID = id

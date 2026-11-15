@@ -326,23 +326,20 @@ func TestWaitSendCancelDoesNotReleaseOwner(t *testing.T) {
 	}
 }
 
+// TestFailSendDoublesRequestBackoff observes the stored pacing the way a
+// caller does: the next WaitSend must wait the current request backoff.
 func TestFailSendDoublesRequestBackoff(t *testing.T) {
-	s := New(Options{BaseBackoff: 80 * time.Millisecond, MaxBackoff: 400 * time.Millisecond})
-	s.FailSend("k", false)
-	if _, got := groupBackoffState(s, "k"); got != 80*time.Millisecond {
-		t.Fatalf("first fail backoff = %v, want 80ms", got)
-	}
-	s.FailSend("k", false)
-	if _, got := groupBackoffState(s, "k"); got != 160*time.Millisecond {
-		t.Fatalf("second fail backoff = %v, want 160ms", got)
-	}
-	s.FailSend("k", false)
-	if _, got := groupBackoffState(s, "k"); got != 320*time.Millisecond {
-		t.Fatalf("third fail backoff = %v, want 320ms", got)
-	}
-	s.FailSend("k", false)
-	if _, got := groupBackoffState(s, "k"); got != 400*time.Millisecond {
-		t.Fatalf("capped fail backoff = %v, want 400ms", got)
+	s := New(Options{BaseBackoff: 20 * time.Millisecond, MaxBackoff: 80 * time.Millisecond})
+	for i, want := range []time.Duration{20 * time.Millisecond, 40 * time.Millisecond,
+		80 * time.Millisecond, 80 * time.Millisecond} {
+		s.FailSend("k", false)
+		start := time.Now()
+		if _, err := s.WaitSend(context.Background(), "k", WaiterHooks{}, false, true); err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(start); elapsed < want*3/4 || elapsed > want*3 {
+			t.Fatalf("probe %d waited %v, want ~%v", i+1, elapsed, want)
+		}
 	}
 }
 
@@ -352,16 +349,12 @@ func TestFailSendDoublesRequestBackoff(t *testing.T) {
 // sibling half is TestFailSendSiblingKeepsOwnerAttemptBackoff below).
 func TestFailSendOwnClearsAttemptBackoff(t *testing.T) {
 	s := New(Options{BaseBackoff: 80 * time.Millisecond, MaxBackoff: time.Second})
-	if d := s.BackoffFor("k", 0); d <= 0 {
-		t.Fatal("expected attempt backoff")
-	}
-	if attempt, _ := groupBackoffState(s, "k"); attempt != 80*time.Millisecond {
-		t.Fatalf("attempt backoff = %v, want 80ms", attempt)
+	// The first call advances the streak to one, so a kept streak answers the
+	// next call with the doubled 160ms while a cleared one answers with base.
+	if d := s.BackoffFor("k", 0); d < 60*time.Millisecond || d > 100*time.Millisecond {
+		t.Fatalf("first attempt backoff = %v, want ~base 80ms", d)
 	}
 	s.FailSend("k", true)
-	if attempt, _ := groupBackoffState(s, "k"); attempt != 0 {
-		t.Fatalf("owner FailSend kept attempt backoff = %v, want 0", attempt)
-	}
 	if d := s.BackoffFor("k", 0); d < 60*time.Millisecond || d > 100*time.Millisecond {
 		t.Fatalf("post-owner backoff = %v, want ~base 80ms (streak must restart)", d)
 	}
@@ -380,29 +373,33 @@ func TestFailSendPacesNextWaitSend(t *testing.T) {
 }
 
 func TestEndSendResetsRequestBackoff(t *testing.T) {
-	s := New(Options{BaseBackoff: 80 * time.Millisecond, MaxBackoff: 200 * time.Millisecond})
+	s := New(Options{BaseBackoff: 20 * time.Millisecond, MaxBackoff: 80 * time.Millisecond})
 	s.FailSend("k", false)
 	s.FailSend("k", false)
-	if _, request := groupBackoffState(s, "k"); request == 0 {
-		t.Fatal("expected leftover request backoff")
-	}
-	if !s.Trip("k", time.Millisecond) {
-		t.Fatal("expected to own")
-	}
-	s.EndSend("k", true) // recovered after retries
-	if _, request := groupBackoffState(s, "k"); request != 0 {
-		t.Fatalf("request backoff after success = %v, want 0", request)
-	}
 	start := time.Now()
-	if _, err := s.WaitSend(context.Background(), "k", WaiterHooks{}, false, false); err != nil {
+	if _, err := s.WaitSend(context.Background(), "k", WaiterHooks{}, false, true); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > 40*time.Millisecond {
+	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
+		t.Fatalf("probe before success waited %v, want the 40ms request backoff", elapsed)
+	}
+	// The probe owns the send token; the recovered request ends it.
+	s.EndSend("k", true) // recovered after retries
+	start = time.Now()
+	if _, err := s.WaitSend(context.Background(), "k", WaiterHooks{}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 15*time.Millisecond {
 		t.Fatalf("probe after recovered request waited %v, want immediate", elapsed)
 	}
 	s.FailSend("k", false)
-	if _, request := groupBackoffState(s, "k"); request != 80*time.Millisecond {
-		t.Fatalf("fail after success = %v, want base 80ms not leftover 2^n", request)
+	start = time.Now()
+	if _, err := s.WaitSend(context.Background(), "k", WaiterHooks{}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	// Base 20ms, not the leftover 80ms the two pre-success failures reached.
+	if elapsed := time.Since(start); elapsed < 15*time.Millisecond || elapsed > 60*time.Millisecond {
+		t.Fatalf("fail after success waited %v, want ~base 20ms not leftover 2^n", elapsed)
 	}
 }
 
@@ -505,19 +502,17 @@ func TestFailSendOwnReleasesProbing(t *testing.T) {
 
 func TestFailSendSiblingKeepsOwnerAttemptBackoff(t *testing.T) {
 	s := New(Options{BaseBackoff: 80 * time.Millisecond, MaxBackoff: time.Second})
-	if d := s.BackoffFor("k", 0); d <= 0 {
-		t.Fatal("expected attempt backoff")
-	}
-	want, _ := groupBackoffState(s, "k")
-	if want != 80*time.Millisecond {
-		t.Fatalf("attempt backoff = %v, want 80ms", want)
+	if d := s.BackoffFor("k", 0); d < 60*time.Millisecond || d > 100*time.Millisecond {
+		t.Fatalf("attempt backoff = %v, want ~base 80ms", d)
 	}
 	if !s.Trip("k", time.Millisecond) {
 		t.Fatal("expected to own")
 	}
 	s.FailSend("k", false)
-	if got, _ := groupBackoffState(s, "k"); got != want {
-		t.Fatalf("sibling FailSend wiped owner attempt backoff: %v, want %v", got, want)
+	// A sibling failure leaves the owner's streak alone, so the next call
+	// answers with the doubled 160ms rather than base.
+	if d := s.BackoffFor("k", 0); d < 120*time.Millisecond || d > 200*time.Millisecond {
+		t.Fatalf("sibling FailSend wiped owner attempt backoff: %v, want ~160ms", d)
 	}
 	g := s.groupFor("k", 0)
 	g.mu.Lock()
