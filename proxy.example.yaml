@@ -954,10 +954,11 @@ provider_aliases: {}
 # or replaces upstream headers (names are canonicalized, values must be non-empty
 # single-line), remove_headers deletes them, and body sets max_tokens /
 # max_completion_tokens (1..1000000) on a Chat Completions or Anthropic client body.
-# Credential and protocol headers are rejected at load. Credential class is judged by
-# role, not by a list of vendor spellings: any name carrying authorization/auth, api-key,
-# secret, password, credential, bearer, jwt, signature, cookie, key or token is refused,
-# so x-auth-key, x-amz-credential, x-functions-key and x-subscription-key are covered.
+# Credential and protocol headers are rejected in an override at load (provider headers
+# may use them; they apply after the credential). Credential class is judged by role, not
+# by a list of vendor spellings: any name carrying authorization/auth, api-key, secret,
+# password, credential, bearer, jwt, signature, cookie, key or token is refused, so
+# x-auth-key, x-amz-credential, x-functions-key and x-subscription-key are covered.
 # Identifier and accounting shapes stay admitted: key-id, cache-key, idempotency-key, and
 # the token counters (x-prompt-tokens, x-token-count) plus the x-ratelimit-* and
 # anthropic-ratelimit-* families. Protocol and framing names (host, content-type,

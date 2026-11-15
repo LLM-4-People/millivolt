@@ -231,13 +231,14 @@ not the secret behind it.
 Header rules are the operator's last word on the upstream wire: the resolved
 merge applies after client-forwarded values, configured provider headers and
 the client's `X-Proxy-Headers` map, so a matching override wins over all of
-them. The proxy-owned transport-mode names `accept-encoding` and `range` are
-the exception: the client header maps (`X-Proxy-Headers` and an
-`X-Proxy-Auth-Header` naming one) reject them with a 400 before any send, and
-configured provider headers or request-override values are stripped from the
-final upstream request, so the transport keeps its own gzip negotiation and
-never sends a partial range. Two header classes are rejected at load in both
-header lists. Protocol and framing names (`host`, `content-type`,
+them. Only the proxy-owned transport-mode names `accept-encoding` and `range`
+are stripped from the final upstream request before send, whichever source set
+them, so the transport keeps its own gzip negotiation and never sends a partial
+range; the client header maps (`X-Proxy-Headers` and an
+`X-Proxy-Auth-Header` naming one) also reject them with a 400 before any send.
+
+The request-override list refuses two further header classes at load. Protocol
+and framing names (`host`, `content-type`,
 `content-length`, `transfer-encoding`, `te`, `connection`, `keep-alive`,
 `proxy-authenticate`, `proxy-connection`, `trailer`, `upgrade`) and the whole
 `x-proxy-` control prefix belong to the proxy and the transport. Credential
@@ -263,6 +264,13 @@ The client header maps reject `content-length` before any send so the transport
 keeps ownership of message framing. Header
 names are trimmed and canonicalized
 case-insensitively, and values must be non-empty single-line header values.
+
+Provider `headers` refuse neither class above. They are applied after the
+extracted credential is placed, so a credential name (including the target's
+own auth header) or an `x-proxy-` name is legal there and takes effect over the
+forwarded and extracted value. Configured provider values are still stripped
+for `accept-encoding` and `range` at the final request, exactly like override
+values.
 
 The body rewrite is fail closed. It applies to Chat Completions or Anthropic
 client bodies before translation, whatever the target (a Responses client body
