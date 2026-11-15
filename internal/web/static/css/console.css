@@ -621,9 +621,6 @@ button.oc-chip[aria-pressed="true"]::before {
   display: flex; align-items: center; justify-content: flex-end; gap: 1px;
   flex: none; flex-wrap: nowrap;
 }
-.oc-rule-actions .oc-icon-btn { opacity: .72; }
-.oc-rule:hover .oc-rule-actions .oc-icon-btn,
-.oc-rule:focus-within .oc-rule-actions .oc-icon-btn { opacity: 1; }
 .oc-icon-btn {
   min-height: 20px; padding: 1px 4px;
   border: 1px solid transparent; border-radius: 4px; background: none;
