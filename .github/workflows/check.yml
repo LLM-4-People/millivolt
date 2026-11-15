@@ -225,6 +225,8 @@ jobs:
           # credential: the dashboard gate is fail closed, and the harnesses
           # sign in through it for gated fixture cleanup.
           MILLIVOLT_OPERATOR_TOKEN: "ci-browser-fixture-credential"
+          # Opt-in for the integration test below; a plain local run stays fast.
+          MILLIVOLT_MCP_INTEGRATION: "1"
         run: |
           trap 'scripts/dev.sh stop' EXIT
           scripts/dev.sh up
@@ -235,8 +237,10 @@ jobs:
           # the browser fixture. In the unit job it would mean a second proxy in
           # a source-and-unit suite, which is the wrong place for it. It used to
           # be manual, and a regression in the audit lifecycle or the purge
-          # guards would merge green; it is opt-in only for local runs.
-          MILLIVOLT_MCP_INTEGRATION=1 bash scripts/check.sh go test -count=1 ./internal/mcp/...
+          # guards would merge green; MILLIVOLT_MCP_INTEGRATION above is its
+          # opt-in, and tests/python/workflows_jobs.py pins both the variable
+          # and this command so dropping either fails the contract.
+          bash scripts/check.sh go test -count=1 ./internal/mcp/...
 
   container:
     name: container (${{ matrix.platform }})

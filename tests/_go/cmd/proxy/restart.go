@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -289,7 +290,22 @@ func TestRestartHandoffProtocol(t *testing.T) {
 		t.Fatal(err)
 	}
 	readyW.Close() // the parent never writes; the child holds the only write end
-	defer cmd.Process.Kill()
+	// The child serves until this teardown kills it. Reaping it turns a child
+	// that quietly stopped serving into a failure instead of a leaked zombie:
+	// Wait must report exactly the SIGKILL sent here, never a clean exit or a
+	// crash status of its own.
+	defer func() {
+		killErr := cmd.Process.Kill()
+		waitErr := cmd.Wait()
+		var exit *exec.ExitError
+		if !errors.As(waitErr, &exit) {
+			t.Errorf("child Wait = %v, want the teardown signal", waitErr)
+			return
+		}
+		if status, ok := exit.Sys().(syscall.WaitStatus); !ok || status.Signal() != syscall.SIGKILL {
+			t.Errorf("child status = %v (kill error %v), want SIGKILL from teardown", waitErr, killErr)
+		}
+	}()
 
 	if err := awaitReady(readyR, 15*time.Second); err != nil {
 		t.Fatalf("child readiness: %v", err)

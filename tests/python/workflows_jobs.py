@@ -125,11 +125,13 @@ def container_matrix_mutation(job: dict, platform: str, field: str | None = None
     return mutated
 
 
+BROWSER_STEP = "Check isolated browser fixtures"
+MCP_GATE_ENV = "MILLIVOLT_MCP_INTEGRATION"
 GATE_STEP_COMMANDS = (
     ("unit", "Check source and unit tests", ("bash scripts/check.sh",)),
-    ("browser", "Check isolated browser fixtures", (
+    ("browser", BROWSER_STEP, (
         'bash scripts/check.sh browser --target "http://${DEV_HOST}:${DEV_PORT}"',
-        "MILLIVOLT_MCP_INTEGRATION=1 bash scripts/check.sh go test -count=1 ./internal/mcp/...",
+        "bash scripts/check.sh go test -count=1 ./internal/mcp/...",
     )),
 )
 CONTAINER_CHECK_COMMAND = 'bash scripts/check.sh container --image "$IMAGE_ID"'
@@ -162,6 +164,13 @@ def gate_command_errors(workflow: dict) -> list[str]:
             errors.append(f"check.yml: {job_name} {step_name} must not continue on error")
         if any("||" in line for line in non_comment_lines(run)):
             errors.append(f"check.yml: {job_name} {step_name} must not mask a failure with ||")
+    browser = jobs.get("browser", {})
+    integration = next((entry for entry in steps(browser)
+                        if entry.get("name") == BROWSER_STEP), {})
+    gate_env = integration.get("env") or {}
+    if str(gate_env.get(MCP_GATE_ENV)) != "1":
+        errors.append(f"check.yml: {BROWSER_STEP} must export {MCP_GATE_ENV}=1, "
+                      "or the live MCP test silently skips")
     container = jobs.get("container", {})
     check = next((entry for entry in steps(container)
                   if entry.get("name") == "Check isolated container"), {})
@@ -320,6 +329,9 @@ def check_job_graph(checks: dict, errors: list[str]) -> None:
         ("dropping the live MCP command",
          lambda workflow: named_step_in(workflow, "browser", "Check isolated browser fixtures")
          .update({"run": 'bash scripts/check.sh browser --target "http://${DEV_HOST}:${DEV_PORT}"'})),
+        ("dropping the live MCP opt-in",
+         lambda workflow: named_step_in(workflow, "browser", BROWSER_STEP)
+         ["env"].pop(MCP_GATE_ENV)),
         ("renaming the image build id",
          lambda workflow: named_step_in(workflow, "container",
                                         "Build native image without publishing")
