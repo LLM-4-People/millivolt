@@ -56,6 +56,32 @@ func TestWriterDrainsWithoutProducerLock(t *testing.T) {
 	}
 }
 
+// TestPurgePreviewCountsTheQueuedBatch pins R1-4: the delete preview must see
+// the writer's still-queued batch. The confirmation travels back with the
+// preview, so a count that misses accepted-but-unflushed rows makes the delete
+// transaction refuse the very population the operator saw (409 on a store the
+// preview reported as empty). CountWhere barriers the batch into the read view
+// before counting.
+func TestPurgePreviewCountsTheQueuedBatch(t *testing.T) {
+	opts := testOpts
+	opts.FlushInterval = time.Hour // only the barrier can commit this batch
+	s := openPurgeTestStore(t, opts)
+	s.Record(&metrics.Record{ID: "a", Provider: "alpha", Model: "m", Start: time.Now(), StatusCode: 200})
+	s.Record(&metrics.Record{ID: "b", Provider: "alpha", Model: "m", Start: time.Now(), StatusCode: 200})
+
+	f := PurgeFilter{Provider: "alpha"}
+	reviewed, err := s.CountWhere(t.Context(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviewed != 2 {
+		t.Fatalf("preview count = %d, want the two queued matching rows", reviewed)
+	}
+	if _, err := s.Clear(t.Context(), &f, &reviewed, nil); err != nil {
+		t.Fatalf("the delete refused the previewed population: %v", err)
+	}
+}
+
 func TestPendingPurgeFenceAcrossWriterDrains(t *testing.T) {
 	for _, mode := range []string{"normal", "flush", "close"} {
 		t.Run(mode, func(t *testing.T) {

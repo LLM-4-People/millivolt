@@ -302,11 +302,16 @@ func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, reviewed *int64,
 // preview). It runs on the read pool like the other filter read paths
 // (ExportWhere/QueryBefore): the HasError predicate's full-table json_each
 // scan must never pin the sole writer connection up to QueryTimeout and
-// stall insertBatch. With WAL the preview reads the committed snapshot, so
-// it may miss the last un-flushed batch - exactly like the ExportWhere it
-// previews, keeping the count==download contract.
+// stall insertBatch. Before counting it barriers the writer's still-queued
+// batch into the committed snapshot: the confirmation the operator sends back
+// travels with this count, so a batch the writer accepted but has not flushed
+// yet would otherwise make the delete transaction refuse exactly the
+// population the preview showed.
 func (s *Store) CountWhere(ctx context.Context, f PurgeFilter) (int64, error) {
 	if err := f.Validate(); err != nil {
+		return 0, err
+	}
+	if err := s.Flush(); err != nil {
 		return 0, err
 	}
 	q, args := buildCountQuery(f)

@@ -244,17 +244,19 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			result, err = store.Clear(r.Context(), filter, reviewed, buffer)
 		} else if err = r.Context().Err(); err == nil {
 			// Without a store there is no transaction to count in. The ring
-			// is the only history and it cannot grow while the handler runs,
-			// so the check is exact - but it must run before the removal, or a
-			// refused deletion would still have emptied it.
+			// is the only history, so the removal boundary is taken before the
+			// count: a record that finalizes after it stays behind instead of
+			// being deleted without having been in the confirmed preview.
+			boundary := buffer.RemovalBoundary()
+			var match func(*metrics.Record) bool
+			if filter != nil {
+				match = filter.MatchRecord
+			}
 			if reviewed != nil {
-				live := int64(buffer.Len())
-				if filter != nil {
-					live = 0
-					for _, row := range buffer.Snapshot() {
-						if filter.MatchRecord(row) {
-							live++
-						}
+				live := int64(0)
+				for _, row := range buffer.Snapshot() {
+					if match == nil || match(row) {
+						live++
 					}
 				}
 				if live != *reviewed {
@@ -262,12 +264,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 				}
 			}
 			if err == nil {
-				if filter == nil {
-					result.BufferRemoved = buffer.Len()
-					buffer.Reset()
-				} else {
-					result.BufferRemoved = buffer.RemoveWhere(filter.MatchRecord)
-				}
+				result.BufferRemoved = buffer.RemoveThrough(boundary, match)
 			}
 		}
 		if errors.Is(err, storage.ErrPurgeCountChanged) {

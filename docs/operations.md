@@ -1556,11 +1556,17 @@ category, and nowhere else. Delete matching uses the same filter/count owner
 as the export, and its scope is the chosen filter; Delete everything wipes
 the whole database. Deletion requires confirmation in the dashboard; it does
 not happen when the sheet opens. A selected filter makes a read-only
-`POST /admin/purge/count` preview. Current traffic can change the count
+`POST /admin/purge/count` preview; the count first commits the writer's queued
+batch into the read view, so a just-finalized request cannot read as empty. A
+ring-only deployment removes through the boundary the count saw, so a record
+that finalizes during the delete stays behind instead of disappearing
+uncounted. Current traffic can still change the count
 before the action, but the UI retains the previewed age cutoff rather than
 silently moving it, and sends the rendered count with the delete so the
 proxy re-checks it inside the delete transaction and refuses a moved row
-set with 409 instead of deleting unpredicted rows. The filter selections reset every time the sheet
+set with 409 instead of deleting unpredicted rows. A 409 drops the sheet's
+preview and re-counts, so the operator confirms the new set instead of
+repeating the refusal. The filter selections reset every time the sheet
 refills, so a stale invisible filter never arms a destructive default.
 Both actions are irreversible without a backup.
 

@@ -202,6 +202,56 @@ func TestPurgeRoutesRejectQueryFilters(t *testing.T) {
 	}
 }
 
+// TestPurgeRingRemovalStopsAtTheCountBoundary pins the ring half of R1-4:
+// without a store the ring is the only history, so the removal boundary is
+// taken before the count and a matching record that finalizes between the
+// snapshot and the removal survives - it was never in the previewed count.
+func TestPurgeRingRemovalStopsAtTheCountBoundary(t *testing.T) {
+	b := metrics.NewBuffer(20000)
+	mux := http.NewServeMux()
+	registerLogRoutes(mux, b, nil)
+	exaggerated, conflicts := 0, 0
+	for range 200 {
+		b.Reset()
+		for i := range 19000 {
+			b.Record(&metrics.Record{ID: fmt.Sprintf("seed-%d", i), Provider: "steady", StatusCode: 200})
+		}
+		reviewed := int64(b.Len())
+		done := make(chan struct{})
+		// One arrival per round: when it lands while the handler's ring
+		// snapshot holds the read side, it queues as the next writer and lands
+		// right after the count, before the removal.
+		go func() {
+			defer close(done)
+			b.Record(&metrics.Record{ID: "late", Provider: "steady", StatusCode: 200})
+		}()
+		body := fmt.Sprintf(`{"filter":{"provider":"steady"},"reviewed_count":%d}`, reviewed)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", strings.NewReader(body)))
+		<-done
+		if w.Code == http.StatusConflict {
+			conflicts++
+			continue
+		}
+		if w.Code != http.StatusOK {
+			t.Fatalf("filtered purge = %d %s", w.Code, w.Body.String())
+		}
+		var resp struct {
+			BufferRemoved int `json:"buffer_removed"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if int64(resp.BufferRemoved) > reviewed {
+			exaggerated++
+		}
+	}
+	t.Logf("conflicts=%d exaggerated=%d", conflicts, exaggerated)
+	if exaggerated > 0 {
+		t.Fatalf("%d successful deletes removed more ring rows than the preview confirmed", exaggerated)
+	}
+}
+
 // TestPurgeEmptyBodyVersusEmptyFilter pins one empty-filter guard across both
 // body-only routes: "{}" reads as a filter body, while a bodyless post means
 // the full set, so the preview must answer the same 400 as the delete instead

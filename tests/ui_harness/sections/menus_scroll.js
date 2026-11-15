@@ -298,6 +298,29 @@ module.exports = async function menusScroll(H) {
       d.getElementById('del-count').textContent === 'will delete 3 records' &&
       !d.getElementById('btn-del-matching').disabled &&
       rows().every((row, i) => row === selectedRows[i]));
+    // A refused count (409) is not a generic failure: the previewed set moved.
+    // The sheet drops the stale preview, disables the button and counts again,
+    // so the next click confirms the new set instead of repeating the 409.
+    let replyRefusedCount, checks = 0;
+    w.fetch = (url, options) => {
+      if (String(url).includes('/admin/purge/count')) {
+        return new Promise(resolve => { replyRefusedCount = resolve; });
+      }
+      if (String(url).includes('/admin/purge')) {
+        return Promise.resolve({ok: false, status: 409, json: async () => ({error: 'the row set changed since the preview; preview again and confirm the new count'})});
+      }
+      checks++;
+      return savedFetch(url, options);
+    };
+    await sleep(5); // drain the previous case's queued count render before the fetch swap
+    await w.deleteMatching();
+    check('a refused count drops the stale preview and recounts instead of re-arming it', replyRefusedCount !== undefined &&
+      d.getElementById('del-count').textContent === 'counting…' &&
+      d.getElementById('btn-del-matching').disabled && w.previewedFilter('del') === null);
+    replyRefusedCount({ok: true, json: async () => ({count: 5})});
+    await settleUntil(() => d.getElementById('btn-del-matching').disabled === false);
+    check('the recount confirms the new set and re-arms the button', checks === 0 &&
+      d.getElementById('del-count').textContent === 'will delete 5 records' && w.previewedFilter('del').count === 5);
     let replyPurge, posts = 0;
     w.fetch = () => { posts++; return new Promise(resolve => { replyPurge = resolve; }); };
     const first = w.deleteMatching();

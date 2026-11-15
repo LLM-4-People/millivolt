@@ -690,6 +690,13 @@ async function purgeMetrics(body) {
     return true;
   } catch (err) {
     settingsStatus(String(err.message || fail), 'error');
+    // A refused count means the previewed set moved under the operator: drop
+    // the stale preview and count again, so the sheet offers the new set
+    // instead of repeating the same 409 on the next click.
+    if (err.status === 409) {
+      _filterPreviews.delete('del');
+      updateDelCount();
+    }
     return false;
   } finally {
     _purgeBusy = false;
