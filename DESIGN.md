@@ -376,7 +376,7 @@ Settings reads as an explorer topology, not a form dump: a modal sheet with a fi
 - **Sheet:** 1080px maximum width, 14px radius, Case Panel fill, strong hairline, settings shadow; header and footer use the rail fill with a 7px tick strip.
 - **Rail:** 220px column on Rail Shadow; rows share the explorer rail chrome (7px radius, 2px active left edge) with the category's entity color and a right-aligned tabular count.
 - **Fields:** label in 12px/600 sans, control in 12px mono on a raised fill with 8px radius; each row is a `1fr / minmax(220px, 300px)` grid separated by a hairline.
-- **States:** search hits accent the count, misses drop to 70%; disabled fields sit at 50%; the settings switch is the only capsule control (36px by 20px, 10px track radius, round knob).
+- **States:** search hits accent the count, misses drop to 70%; disabled fields sit at 70%; the settings switch is the only capsule control (36px by 20px, 10px track radius, round knob).
 - **Actions:** Revert is a ghost button, Apply is the one accent-filled commit. At 720px the rail becomes a wrapped strip and rows go single column.
 
 ## Do's and Don'ts

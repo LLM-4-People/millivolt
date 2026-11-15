@@ -162,7 +162,7 @@
     width: 100%; font: 12px var(--mono); padding: 6px 10px; border-radius: 8px;
     background: var(--panel2); border: 1px solid var(--border2); color: var(--text);
   }
-  .st-ctl input:disabled, .st-ctl textarea:disabled { opacity: .5; cursor: not-allowed; }
+  .st-ctl input:disabled, .st-ctl textarea:disabled { opacity: .7; cursor: not-allowed; }
   .st-ctl textarea { min-height: 64px; resize: vertical; }
   .st-hint { font: 10px var(--mono); color: var(--muted); }
   .st-help { min-width: 0; max-width: 100%; }
