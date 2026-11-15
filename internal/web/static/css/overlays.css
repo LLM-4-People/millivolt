@@ -216,7 +216,8 @@
   /* The provider icon rides the entity system: both emitters (the provider
      card header and the picker menu) set --ent to the provider entity
      color, so the icon and its glow rekey with the entity palette. */
-  .prov-ic { color: var(--ent); font-size: 12px; flex-shrink: 0; filter: drop-shadow(0 0 7px color-mix(in srgb, var(--ent) 50%, transparent)); }
+  .prov-ic { color: var(--ent); font-size: 12px; flex-shrink: 0; display: inline-flex; filter: drop-shadow(0 0 7px color-mix(in srgb, var(--ent) 50%, transparent)); }
+  .prov-ic svg { width: 12px; height: 12px; display: block; stroke: currentColor; fill: none; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   [data-mode="clear"] .prov-ic { color: var(--ent-ink, var(--ent)); }
   .prov-hd .sp-label {
     flex: 1; min-width: 0; background: transparent; border-color: transparent;

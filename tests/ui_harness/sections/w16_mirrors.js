@@ -642,15 +642,23 @@ module.exports = async function w16Mirrors(H) {
       {
         const palette = sw.eval('ENTITY_TYPES');
         const want = {
-          client: ['#56B4E9', '◈', 'Client'], provider: ['#0072B2', '☁', 'Provider'],
-          model: ['#CC79A7', '◆', 'Model'], conversation: ['#009E73', '❝', 'Conversation'],
-          key: ['#F0E442', '⚷', 'Key'], status: ['#8A8F98', '●', 'Status'],
-          time: ['#5AC8FA', '◷', 'Time'], tool: ['#1ABC9C', '⚒', 'Tool'],
-          request: ['#E69F00', '⇄', 'Request'], error: ['#D55E00', '⚠', 'Error'],
+          client: ['#56B4E9', 'Client'], provider: ['#0072B2', 'Provider'],
+          model: ['#CC79A7', 'Model'], conversation: ['#009E73', 'Conversation'],
+          key: ['#F0E442', 'Key'], status: ['#8A8F98', 'Status'],
+          time: ['#5AC8FA', 'Time'], tool: ['#1ABC9C', 'Tool'],
+          request: ['#E69F00', 'Request'], error: ['#D55E00', 'Error'],
         };
-        const got = Object.fromEntries(Object.entries(palette).map(([k, v]) => [k, [v.color, v.icon, v.label]]));
-        check('ENTITY_TYPES carries the colorblind-safe palette triple for every dimension',
+        const got = Object.fromEntries(Object.entries(palette).map(([k, v]) => [k, [v.color, v.label]]));
+        check('ENTITY_TYPES carries the colorblind-safe palette pair for every dimension',
           JSON.stringify(got) === JSON.stringify(want));
+        // Every type glyph is an authored SVG in the one 14px box, never a
+        // Unicode symbol whose rendering is left to the OS font.
+        const glyph = v => String(v.icon || '');
+        check('every entity glyph is an authored 14px svg',
+          Object.values(palette).every(v =>
+            glyph(v).startsWith('<svg viewBox="0 0 14 14"') &&
+            (glyph(v).includes('<path') || glyph(v).includes('<circle') || glyph(v).includes('<rect'))) &&
+          new Set(Object.values(palette).map(glyph)).size === Object.keys(palette).length);
         const colors = Object.values(palette).map(v => v.color.toLowerCase());
         check('entity palette colors stay pairwise distinct', new Set(colors).size === colors.length);
         // The clear-mode ink is the hue carried into the light palette: it

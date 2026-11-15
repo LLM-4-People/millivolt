@@ -50,7 +50,7 @@ function syncProvMenuList(row) {
   if (!list) return;
   const taken = new Set([...row.querySelectorAll('.st-prov .sp-label')].map(l => l.value.trim()));
   const known = (typeof pauseState === 'object' && pauseState && Array.isArray(pauseState[KNOWN_PROVIDERS_KEY])) ? pauseState[KNOWN_PROVIDERS_KEY] : [];
-  list.innerHTML = known.filter(p => !taken.has(p)).map(p => `<button type="button" class="prov-menu-item" data-prov-pick="${escapeHtml(p)}" role="menuitem"><span class="prov-ic" style="--ent:${ENTITY_TYPES.provider.color};--ent-ink:${ENTITY_TYPES.provider.ink}" aria-hidden="true">☁</span>${escapeHtml(p)}</button>`).join('');
+  list.innerHTML = known.filter(p => !taken.has(p)).map(p => `<button type="button" class="prov-menu-item" data-prov-pick="${escapeHtml(p)}" role="menuitem"><span class="prov-ic" style="--ent:${ENTITY_TYPES.provider.color};--ent-ink:${ENTITY_TYPES.provider.ink}" aria-hidden="true">${ENTITY_TYPES.provider.icon}</span>${escapeHtml(p)}</button>`).join('');
 }
 
 // INPUT_FLASH_MS is the invalid-input red flash: long enough to register,

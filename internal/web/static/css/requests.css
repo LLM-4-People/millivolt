@@ -9,6 +9,10 @@
      below a 14px image (`|-` not `| /name`). */
   .ent { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11px; line-height: 1; min-width: 0; vertical-align: middle; }
   .ent-ic { color: var(--ent); font-size: 11px; line-height: 1; flex-shrink: 0; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; text-align: center; }
+  /* The type glyphs are authored 14px paths (entities.js), drawn in one stroke
+     language so a type is recognizable at a glance instead of whatever the
+     OS font substitutes for a symbol. */
+  .ent-ic svg { width: 12px; height: 12px; display: block; stroke: currentColor; fill: none; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   /* A provider favicon can be a dark plate (OpenDesign's is near-black), which
      all but disappears against a dark surface on its own. The 1px padding and
      its text-derived hairline ring give every icon a visible tile edge without

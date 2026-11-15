@@ -39,9 +39,19 @@ module.exports = async function mcpCategory(H) {
     check('every mcp row is restart-required and the category banner says so',
       mcpRows.every(r => r.dataset.hot === '0') &&
       d.querySelector('#settings-pane-hd .st-banner').textContent === 'takes a process restart');
-    check('the mcp rail badge resolves through SETTINGS_CAT_REF to the tool entity',
-      d.querySelector('[data-st-cat="mcp"] .ent-ic').textContent === w.eval('ENTITY_TYPES.tool.icon') &&
-      d.querySelector('[data-st-cat="mcp"] .rail-n').textContent === '7');
+    {
+      // The rail badge is the registry's authored tool glyph, path for path
+      // (the serializer closes empty paths, so the geometry is compared).
+      const paths = html => {
+        const host = d.createElement('div');
+        host.innerHTML = html;
+        return [...host.querySelectorAll('path')].map(p => p.getAttribute('d')).join('|');
+      };
+      const rendered = paths(d.querySelector('[data-st-cat="mcp"] .ent-ic').innerHTML);
+      check('the mcp rail badge resolves through SETTINGS_CAT_REF to the tool entity',
+        rendered === paths(w.eval('ENTITY_TYPES.tool.icon')) && rendered.length > 0 &&
+        d.querySelector('[data-st-cat="mcp"] .rail-n').textContent === '7');
+    }
     w.__mcpDoc = JSON.parse(JSON.stringify(cfgDoc));
     w.eval('settingsDoc = window.__mcpDoc; fillSettingsForm(settingsDoc)');
     w.closeSettings(true);
