@@ -543,6 +543,15 @@ func logPageWire(t *testing.T, v any) any {
 // only the narrow candidate projection for rejected rows. The pre-fix path
 // measured about 55-72ms and 8.1MB per limit-60 miss on this shape; the
 // ceilings below sit well under that while leaving headroom for drivers.
+//
+// raceByteFactor scales the byte ceiling in the instrumented build only. The
+// race detector moves stack slots to the heap, so bytes roughly double there
+// (measured 3.7-4.0MB against the plain 2.0MB) while the allocation count
+// barely moves (34.8k against 33.4k). The count therefore keeps the plain
+// ceiling: it is what still rejects the earlier full-decode shape, which allocs
+// about 51k under race.
+const raceByteFactor = 2
+
 func TestLogPageNarrowScanMatchesFullDecode(t *testing.T) {
 	const rows = 20_000
 	s := logPageRegressionStoreN(t, rows)
@@ -601,8 +610,9 @@ func TestLogPageNarrowScanMatchesFullDecode(t *testing.T) {
 	// 4,096 full rows cost ~8MB/190k allocs; the narrow scan without the
 	// plan-declared columns cost ~2.9MB/66k. The scan now decodes only the
 	// columns its residual scope reads, so a status-class miss never touches
-	// the tool or error JSON. The ceiling leaves allocator/driver variance
-	// headroom under race while rejecting both earlier shapes.
+	// the tool or error JSON. The ceiling leaves allocator/driver headroom while
+	// rejecting both earlier shapes; only the byte arm scales under race, and the
+	// allocation count carries the regression there.
 	for _, tc := range []struct {
 		name, query string
 		maxBytes    int64
@@ -619,8 +629,13 @@ func TestLogPageNarrowScanMatchesFullDecode(t *testing.T) {
 					t.Fatalf("%s status=%d body=%s", tc.query, w.Code, w.Body.String())
 				}
 			})
-			if bytes > tc.maxBytes {
-				t.Fatalf("%s allocated %d bytes/op, want at most %d", tc.query, bytes, tc.maxBytes)
+			t.Logf("%s allocated %d bytes, %.0f allocs", tc.query, bytes, allocs)
+			maxBytes := tc.maxBytes
+			if raceInstrumented {
+				maxBytes *= raceByteFactor
+			}
+			if bytes > maxBytes {
+				t.Fatalf("%s allocated %d bytes/op, want at most %d", tc.query, bytes, maxBytes)
 			}
 			if got := int64(allocs); got > tc.maxAllocs {
 				t.Fatalf("%s allocated %d times/op, want at most %d", tc.query, got, tc.maxAllocs)
