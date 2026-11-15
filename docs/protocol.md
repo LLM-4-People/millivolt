@@ -88,6 +88,30 @@ semantics: when a request carries the header more than once, the first value is
 authoritative and later values are ignored. The rule is deterministic across
 the whole control prefix, including `X-Proxy-Query` and `X-Proxy-Headers`.
 
+### Upstream allowlist matching
+
+`allowed_base_urls` is empty (allow any target) or a list of entry spellings;
+each entry admits exactly one authority plus that entry's path and its children.
+Both sides are compared as written, with one normalization: the scheme's
+default port is filled in when either side has no port. Entries are validated
+at load into the only spellings that can ever match, and those spellings are
+the contract:
+
+- the scheme must be literally lowercase `http://` or `https://`;
+- the host must be lowercase ASCII as written, with an optional numeric port in
+  1..65535 after a hostname;
+- no userinfo, query, fragment or trailing slash;
+- a port-less entry admits only the scheme's default port, never every port on
+  that host.
+
+What the byte comparison does not do: lowercase the request's own host, strip a
+trailing dot (`example.com.` and `example.com` differ), normalize a leading-zero
+port (`:080` differs from `:80`), or apply IDNA folding (the punycode or Unicode
+bytes must be spelled the same on both sides). A path prefix is compared on the
+escaped path, so percent-encoding that decodes the same is still different
+bytes.
+
+
 Client identity labels are retention-bounded before the record enters the live
 ring, analytics or durable store: classified client and language 256 bytes,
 user agent 1024 bytes, and the first forwarded address 128 bytes. Longer values
