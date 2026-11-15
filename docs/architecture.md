@@ -96,7 +96,7 @@ for the element index, id and `function.name`, with the typed decode kept only
 as the fallback for a shape the lexical grammar rejects: 1,728-1,850 ns and 6
 allocs per frame became 945-991 ns and 1 alloc, and the 1,000-frame dedupe
 benchmark at 10,000 retained names went from 11.05-11.40 ms, 2.89 MB and 60,158
-allocs to 4.45-4.70 ms, 246 KB and 10,109 allocs
+allocs to 6.2-6.7 ms, 190 KB and 10,112 allocs
 (`BenchmarkAnalyzerFeed/tool_call`, `BenchmarkAnalyzerToolNameDedupe`). A
 differential corpus and a fuzz target compare both paths over every analyzer
 field they touch. The Anthropic translator
