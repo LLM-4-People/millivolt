@@ -217,6 +217,7 @@
      card header and the picker menu) set --ent to the provider entity
      color, so the icon and its glow rekey with the entity palette. */
   .prov-ic { color: var(--ent); font-size: 12px; flex-shrink: 0; filter: drop-shadow(0 0 7px color-mix(in srgb, var(--ent) 50%, transparent)); }
+  [data-mode="clear"] .prov-ic { color: var(--ent-ink, var(--ent)); }
   .prov-hd .sp-label {
     flex: 1; min-width: 0; background: transparent; border-color: transparent;
     font: 600 12px var(--mono); color: var(--text); padding: 4px 8px; border-radius: 7px;

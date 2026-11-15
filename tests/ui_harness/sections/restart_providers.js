@@ -343,13 +343,13 @@ module.exports = async function restartProviders(H) {
   topBtn.click();
   check('reopening the picker moves it onto the sheet again',
     !menu.hidden && menu.parentElement === d.getElementById('settings-sheet'));
-  // Both provider-icon emitters carry the entity color through --ent, so
-  // the icon and its glow ride the entity palette instead of a hardcoded
-  // hex in the stylesheet.
+  // Both provider-icon emitters carry the entity pair through --ent and
+  // --ent-ink, so the icon and its glow ride the entity palette (and its
+  // light-mode ink) instead of a hardcoded hex in the stylesheet.
   check('the card icon keys its color to the provider entity token',
-    card.querySelector('.prov-hd .prov-ic').getAttribute('style') === '--ent:#0072B2');
+    card.querySelector('.prov-hd .prov-ic').getAttribute('style') === '--ent:#0072B2;--ent-ink:#005f96');
   check('the picker icon keys its color to the provider entity token',
-    menu.querySelector('.prov-menu-item .prov-ic').getAttribute('style') === '--ent:#0072B2');
+    menu.querySelector('.prov-menu-item .prov-ic').getAttribute('style') === '--ent:#0072B2;--ent-ink:#005f96');
   menu.querySelector('.prov-new-label').value = 'gamma.example';
   menu.querySelector('[data-prov-add]').click();
   check('new provider card collects with empty maps', JSON.stringify(w.collectSettingsValues().providers['gamma.example']) === JSON.stringify({ cost_keys: [], usage_keys: {}, models_path: '', models_keys: {}, ensure_tools: [], headers: {} }));

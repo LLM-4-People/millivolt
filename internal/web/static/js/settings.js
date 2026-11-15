@@ -239,8 +239,8 @@ function fillSettingsForm(doc) {
     const ref = SETTINGS_CAT_REF[c.id] || SETTINGS_CAT_REF.server;
     const badge = ref.dim
       ? entityBadge(ref.dim, '', c.label, null, c.label)
-      : `<span class="ent" style="--ent:${vis.color}" title="${escapeHtml(c.label)}"><span class="ent-ic" aria-hidden="true">${vis.icon}</span><span class="ent-lb" title="${escapeHtml(c.label)}">${escapeHtml(c.label)}</span></span>`;
-    return `<button type="button" class="st-rail-item${on}" style="--ent:${vis.color}" data-st-cat="${escapeHtml(c.id)}" aria-current="${c.id === settingsCat ? 'page' : 'false'}" aria-label="${escapeHtml(c.label)}, ${n} settings">${badge}<span class="rail-n" aria-hidden="true">${n}</span></button>`;
+      : `<span class="ent" style="--ent:${vis.color};--ent-ink:${vis.ink || vis.color}" title="${escapeHtml(c.label)}"><span class="ent-ic" aria-hidden="true">${vis.icon}</span><span class="ent-lb" title="${escapeHtml(c.label)}">${escapeHtml(c.label)}</span></span>`;
+    return `<button type="button" class="st-rail-item${on}" style="--ent:${vis.color};--ent-ink:${vis.ink || vis.color}" data-st-cat="${escapeHtml(c.id)}" aria-current="${c.id === settingsCat ? 'page' : 'false'}" aria-label="${escapeHtml(c.label)}, ${n} settings">${badge}<span class="rail-n" aria-hidden="true">${n}</span></button>`;
   }).join('');
   // The storage pane also owns both database deletions: the scoped
   // delete-matching block and the whole-database action row ride the same

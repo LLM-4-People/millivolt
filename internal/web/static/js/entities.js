@@ -101,17 +101,22 @@ function recordIsError(r) {
 // a dark theme); parent/child pairs share a hue family (provider→model).
 // Error reserves vermillion and never shares it. Every surface
 // (rail, gallery, scope chips, inspector) renders through entityBadge().
+//
+// `ink` is the same hue carried into the light palette. The eight hues are
+// picked against a dark ground and fall to 1.3-2.4:1 on the Clear surfaces;
+// the ring keeps the hue as identity while the ink is what carries the glyph
+// and the hovered label at 5:1 or better.
 const ENTITY_TYPES = {
-  client:       { label: 'Client',       color: '#56B4E9', icon: '◈' }, // app-window (sky blue)
-  provider:     { label: 'Provider',     color: '#0072B2', icon: '☁' }, // cloud (blue)
-  model:        { label: 'Model',        color: '#CC79A7', icon: '◆' }, // bot (reddish purple)
-  conversation: { label: 'Conversation', color: '#009E73', icon: '❝' }, // messages (bluish green)
-  key:          { label: 'Key',          color: '#F0E442', icon: '⚷' }, // key (yellow)
-  status:       { label: 'Status',       color: '#8A8F98', icon: '●' }, // circle (neutral grey)
-  time:         { label: 'Time',         color: '#5AC8FA', icon: '◷' }, // clock (light cyan)
-  tool:         { label: 'Tool',         color: '#1ABC9C', icon: '⚒' }, // hammer-pick (teal)
-  request:      { label: 'Request',      color: '#E69F00', icon: '⇄' }, // arrow-left-right (orange)
-  error:        { label: 'Error',        color: '#D55E00', icon: '⚠' }, // triangle-alert (vermillion)
+  client:       { label: 'Client',       color: '#56B4E9', ink: '#14607f', icon: '◈' }, // app-window (sky blue)
+  provider:     { label: 'Provider',     color: '#0072B2', ink: '#005f96', icon: '☁' }, // cloud (blue)
+  model:        { label: 'Model',        color: '#CC79A7', ink: '#9c4272', icon: '◆' }, // bot (reddish purple)
+  conversation: { label: 'Conversation', color: '#009E73', ink: '#00785a', icon: '❝' }, // messages (bluish green)
+  key:          { label: 'Key',          color: '#F0E442', ink: '#7a6100', icon: '⚷' }, // key (yellow)
+  status:       { label: 'Status',       color: '#8A8F98', ink: '#5b6068', icon: '●' }, // circle (neutral grey)
+  time:         { label: 'Time',         color: '#5AC8FA', ink: '#0f6c8c', icon: '◷' }, // clock (light cyan)
+  tool:         { label: 'Tool',         color: '#1ABC9C', ink: '#0b7a66', icon: '⚒' }, // hammer-pick (teal)
+  request:      { label: 'Request',      color: '#E69F00', ink: '#8a5f00', icon: '⇄' }, // arrow-left-right (orange)
+  error:        { label: 'Error',        color: '#D55E00', ink: '#b04600', icon: '⚠' }, // triangle-alert (vermillion)
 };
 // entityType returns the registry entry for a dimension (defaults to request).
 function entityType(dim) { return ENTITY_TYPES[dim] || ENTITY_TYPES.request; }
@@ -151,7 +156,7 @@ function entityBadge(dim, id, label, rec, labelTitle) {
   // element a pointer actually hovers, not on a wrapper that never receives
   // the event.
   const labelTitleAttr = labelTitle ? ` title="${escapeHtml(labelTitle)}"` : '';
-  return `<span class="ent" style="--ent:${t.color}"${ttl}${extra}>${icon}<span class="ent-lb"${labelTitleAttr}>${escapeHtml(disp)}</span></span>`;
+  return `<span class="ent" style="--ent:${t.color};--ent-ink:${t.ink}"${ttl}${extra}>${icon}<span class="ent-lb"${labelTitleAttr}>${escapeHtml(disp)}</span></span>`;
 }
 
 // entityPivot wraps entityBadge in a pivot link so an entity reference is both

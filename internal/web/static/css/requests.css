@@ -19,6 +19,16 @@
   .ent-fav { width: 14px; height: 14px; padding: 1px; border-radius: 3px; flex-shrink: 0; object-fit: contain; display: block; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 30%, transparent); }
   .ent-lb { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 14px; height: 14px; display: inline-flex; align-items: center; }
   a.ent:hover .ent-lb { color: var(--ent); }
+  /* Clear mode: these hues are picked against a dark ground and fall to
+     1.3-2.4:1 on the light panels. The hue stays the identity as a hairline
+     ring around the glyph, while the glyph and the hovered label take the
+     type's own light-mode ink (5:1 or better). */
+  [data-mode="clear"] .ent-ic {
+    color: var(--ent-ink, var(--ent));
+    border-radius: 3px;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ent) 65%, transparent);
+  }
+  [data-mode="clear"] a.ent:hover .ent-lb { color: var(--ent-ink, var(--ent)); }
   /* entityPivot: an entityBadge wrapped in a navigable link. */
   a.ent-link { text-decoration: none; border-radius: 5px; padding: 1px 2px; }
   a.ent-link:hover { background: var(--panel2); }

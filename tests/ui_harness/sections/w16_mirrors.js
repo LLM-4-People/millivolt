@@ -1,6 +1,7 @@
 // W16 mirror pins: the Go<->JS pairs the mutation rounds proved unguarded
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function w16Mirrors(H) {
+  const { contrast } = require('../../theme_check_color');
   const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, modelFixture, observerFixture, pageOptions, path, rows, settleUntil} = H;
   const {fs, STATIC} = H;
   const state = H.state;
@@ -652,9 +653,17 @@ module.exports = async function w16Mirrors(H) {
           JSON.stringify(got) === JSON.stringify(want));
         const colors = Object.values(palette).map(v => v.color.toLowerCase());
         check('entity palette colors stay pairwise distinct', new Set(colors).size === colors.length);
-        check('every rendered entity badge keys its color through the registry',
+        // The clear-mode ink is the hue carried into the light palette: it
+        // must clear the text floor on the lightest clear panel in the
+        // product, and read stronger there than the dark-ground hue does.
+        check('every entity ink clears the clear-panel contrast floor',
+          Object.entries(palette).every(([, v]) =>
+            /^#[0-9a-f]{6}$/i.test(v.ink || '') &&
+            contrast(v.ink, '#fffdf7') >= 4.5 &&
+            contrast(v.ink, '#fffdf7') > contrast(v.color, '#fffdf7')));
+        check('every rendered entity badge keys its color and light ink through the registry',
           Object.entries(palette).every(([dim, v]) =>
-            sw.entityBadge(dim, 'fixture-id').includes(`style="--ent:${v.color}"`)));
+            sw.entityBadge(dim, 'fixture-id').includes(`style="--ent:${v.color};--ent-ink:${v.ink}"`)));
         check('turn-role colors reference the registry, not a second palette',
           JSON.stringify(sw.eval('TURN_ROLE_COLOR')) === JSON.stringify({
             user: '#56B4E9', assistant: '#CC79A7', tool: '#1ABC9C',
