@@ -412,14 +412,34 @@ function paintBackupPane() {
   showSettingsCat();
 }
 
-function runBackupApply() {
+async function runBackupApply() {
   if (!backupInspect || !backupInspect.file) return;
   const q = backupQuery(true);
   if (!q.get('config') && !q.get('database')) { settingsStatus('select config, database, or both'); return; }
   if (backupBusy) return;
+  // One confirmation naming what is written, how, and whether it can be taken
+  // back: a restore used to start on the single click that also picked the
+  // file, and merge has no rollback at all.
+  const members = [q.get('config') ? 'config' : '', q.get('database') ? 'database' : ''].filter(Boolean).join(' and ');
+  const merge = backupMode === 'merge';
+  const body = merge
+    ? `Adds the archive's ${members} to this instance and leaves everything else. Merge never rolls back: config keys are overlaid and request ids already stored are kept.`
+    : `Overwrites the live ${members} with the archive's copy. A replace cannot be undone from here, and a replaced database is applied on the next restart.`;
+  // ocConfirm is a modal, and the modal layer preempts the open sheet; the
+  // sheet is put back with the same restore pane after the answer, whichever
+  // way it went.
+  const reopen = settingsIsOpen();
+  const restoreSheet = async () => { if (reopen && !settingsIsOpen()) await openSettings(); };
+  if (reopen && !(await ocConfirm({ title: 'Restore this backup?', body, confirm: 'restore', danger: !merge }))) {
+    await restoreSheet();
+    return;
+  }
+  await restoreSheet();
+  if (backupBusy) return;
   const req = ++backupReq;
   backupSetBusy(true);
   settingsStatus('restoring');
+  const dbOnly = !!q.get('database') && !q.get('config');
   operatorJsonBody('/admin/restore?' + q, {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream' },
@@ -430,7 +450,9 @@ function runBackupApply() {
     backupSetBusy(false);
     const restart = settingsRestartNotice(j);
     settingsStatus(restart ? 'restored · ' + restart : 'restored', restart ? '' : 'ok');
-    return fetchSettings(true);
+    // A database-only restore leaves the config snapshot alone, so an open,
+    // dirty config draft is still valid and must survive the refill.
+    return fetchSettings(!dbOnly);
   }).catch(err => {
     if (req !== backupReq) return;
     backupSetBusy(false);
@@ -483,6 +505,11 @@ function fillSettingsLive(doc) {
     `<div class="st-live-row"><span class="k">listen</span><span class="v" title="${escapeHtml(String(listen))}">${escapeHtml(String(listen))}</span></div>` +
     `<div class="st-live-row"><span class="k">store</span><span class="v" title="${escapeHtml(String(db))}">${escapeHtml(String(db || 'ring'))}</span></div>` +
     `<div class="st-live-row"><span class="k">write</span><span class="v">${escapeHtml(persist)}</span></div>` +
+    (doc.backup && doc.backup.pending_database
+      // A staged database lands on restart, and nothing else on this sheet
+      // carries the fact at the level the operator reads system state from.
+      ? `<div class="st-live-row"><span class="k">staged</span><span class="v" title="a restored database is waiting for the next restart">database restore</span></div>`
+      : '') +
     lastApply;
 }
 

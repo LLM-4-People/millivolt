@@ -376,6 +376,14 @@ module.exports = async function modelCanon(H) {
     live = d.getElementById('settings-live').textContent;
     check('no last_reload row renders before the first server apply',
       !/last apply/.test(live) && /listen/.test(live) && /store/.test(live) && /write/.test(live));
+    // A staged database restore is a system fact: it lands on restart and must
+    // be visible beside the other runtime facts, not only in the backup pane.
+    w.__lrPending = JSON.parse(JSON.stringify(cfgDoc));
+    w.__lrPending.backup = { config: true, database: true, requests: 4, pending_database: true };
+    w.eval('fillSettingsLive(window.__lrPending)');
+    check('a staged database restore is named in the system facts',
+      /staged/.test(d.getElementById('settings-live').textContent) &&
+      /database restore/.test(d.getElementById('settings-live').textContent));
     w.__lrJunk = JSON.parse(JSON.stringify(cfgDoc));
     w.__lrJunk.last_reload = { ok: true, at: 'not-a-time' };
     w.eval('fillSettingsLive(window.__lrJunk)');
@@ -598,6 +606,64 @@ module.exports = async function modelCanon(H) {
       calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1') && c.u.includes('database=1') && !c.u.includes('config=1')));
     check('restore refreshes settings even when a database restart is pending',
       calls.some(c => c.u.includes('/admin/config') && c.method === 'GET'));
+    // A restore applies only after one confirmation naming the members, the
+    // mode and the missing rollback. Cancel writes nothing and the sheet lives.
+    {
+      if (w.eval('settingsIsOpen()')) await w.openSettings(); // the ternary closes when open
+      await w.openSettings();
+      await settleUntil(() => !!w.eval('settingsIsOpen()'));
+      calls.length = 0;
+      w.eval("backupInspect = { file: new Blob(['x']), data: { config: { present: true }, database: { present: true, inspectable: true, requests: 1 } } }");
+      w.runBackupApply();
+      await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
+      const dlg = d.getElementById('oc-confirm-dialog');
+      check('the restore asks first and names the member, mode and the missing rollback (' + (dlg ? dlg.textContent.slice(0, 120) : 'no dialog') + '|' + w.eval('settingsIsOpen()') + '|' + d.getElementById('settings-count').textContent + ')',
+        !!dlg && /database/.test(dlg.textContent) && !/config/.test(dlg.textContent) &&
+        /cannot be undone/.test(dlg.textContent) &&
+        dlg.querySelector('[data-oc-confirm="ok"]').textContent === 'restore');
+      dlg.querySelector('[data-oc-confirm="cancel"]').click();
+      await settleUntil(() => !!w.eval('settingsIsOpen()'));
+      check('a cancelled restore writes nothing and puts the sheet back',
+        !calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1')) &&
+        !!w.eval('settingsIsOpen()'));
+      calls.length = 0;
+      w.eval("backupInspect = { file: new Blob(['x']), data: { config: { present: true }, database: { present: true, inspectable: true, requests: 1 } } }");
+      w.runBackupApply();
+      await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
+      d.getElementById('oc-confirm-dialog').querySelector('[data-oc-confirm="ok"]').click();
+      check('a confirmed restore posts and the sheet comes back',
+        await settleUntil(() => calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1') && c.u.includes('database=1'))) &&
+        await settleUntil(() => !!w.eval('settingsIsOpen()')));
+      await settleUntil(() => !d.getElementById('btn-backup-apply')?.dataset.busy);
+      // A database-only restore leaves the config alone, so an open dirty
+      // config draft is still valid: the refill must not discard it, while a
+      // config restore must.
+      {
+        const savedFetchSettings = w.fetchSettings;
+        const discards = [];
+        w.fetchSettings = discard => { discards.push(discard); return savedFetchSettings(discard); };
+        try {
+          w.eval('backupIncludeConfig = false; backupIncludeDatabase = true');
+          w.eval("backupInspect = { file: new Blob(['x']), data: { config: { present: true }, database: { present: true, inspectable: true, requests: 1 } } }");
+          w.runBackupApply();
+          await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
+          d.getElementById('oc-confirm-dialog').querySelector('[data-oc-confirm="ok"]').click();
+          await settleUntil(() => discards.length > 0);
+          check('a database-only restore keeps the config draft', discards[discards.length - 1] === false);
+          discards.length = 0;
+          w.eval('backupIncludeConfig = true; backupIncludeDatabase = true');
+          w.eval("backupInspect = { file: new Blob(['x']), data: { config: { present: true }, database: { present: true, inspectable: true, requests: 1 } } }");
+          w.runBackupApply();
+          await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
+          d.getElementById('oc-confirm-dialog').querySelector('[data-oc-confirm="ok"]').click();
+          await settleUntil(() => discards.length > 0);
+          check('a config restore discards the stale draft', discards[discards.length - 1] === true);
+        } finally {
+          w.fetchSettings = savedFetchSettings;
+        }
+      }
+      w.closeSettings(true);
+    }
     // A failed restore must read as an error, not as an informational line:
     // the status tone is the only difference between "restored" and "did not".
     w.fetch = (url, opts) => String(url).includes('/admin/restore')

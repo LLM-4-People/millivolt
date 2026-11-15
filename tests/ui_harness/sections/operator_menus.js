@@ -2101,6 +2101,13 @@ module.exports = async function operatorMenus(H) {
         check('restart asks for confirmation and sends nothing on cancel',
           asked && asked.title === 'Rebuild and restart?' &&
           state.restartState.postCount === before);
+        // A staged database restore is applied by the restart that follows: the
+        // dialog that commits the restart must say so.
+        w.eval('window.__savedDoc = settingsDoc; settingsDoc = Object.assign({}, settingsDoc, {backup: {pending_database: true}})');
+        click('#btn-restart-now');
+        check('the restart dialog names a staged database restore',
+          !!asked && /restored database is staged/.test(asked.body || ''));
+        w.eval('settingsDoc = window.__savedDoc; delete window.__savedDoc');
       } finally {
         w.ocConfirm = savedConfirm;
         w.closeOperatorConsole();

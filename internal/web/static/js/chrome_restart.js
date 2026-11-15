@@ -186,9 +186,13 @@ async function watchRestart(onEvent, signal) {
 
 async function restartProxy() {
   if (restartInProgress()) return;
+  // A restored database is staged until the next boot: this is that boot.
+  const staged = typeof settingsDoc !== 'undefined' && settingsDoc &&
+    settingsDoc.backup && settingsDoc.backup.pending_database
+    ? ' A restored database is staged and is applied first.' : '';
   const ok = await ocConfirm({
     title: 'Rebuild and restart?',
-    body: 'Build the latest source, finish in-flight streams, and save metrics before the new process takes over. New requests queue during the handoff.',
+    body: 'Build the latest source, finish in-flight streams, and save metrics before the new process takes over. New requests queue during the handoff.' + staged,
     confirm: 'restart now',
   });
   if (!ok) return;
