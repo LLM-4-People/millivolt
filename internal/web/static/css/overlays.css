@@ -266,6 +266,7 @@
   .mr-move { display: flex; gap: 2px; justify-content: flex-end; }
   .mr-move button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px; font-size: 9px; line-height: 1; }
   .mr-move button:hover { color: var(--accent); }
+  .mr-move button:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
   .mr-move .mr-vis[aria-pressed="false"] { color: var(--text); }
   .mr-row[data-mr-off="1"] { opacity: .7; }
   .mr-err { grid-column: 1 / -1; font-size: 9.5px; line-height: 1.35; min-height: 0; }
@@ -277,6 +278,7 @@
   .mr-tools select { font-size: 10px; padding: 3px 5px; max-width: 190px; }
   .mr-restore { background: none; border: none; color: var(--muted); font: inherit; font-size: 9.5px; cursor: pointer; padding: 0; }
   .mr-restore:hover { color: var(--accent); }
+  .mr-restore:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .mr-count { margin-left: auto; font-size: 9.5px; white-space: nowrap; }
   .mr-trace { font-size: 9.5px; line-height: 1.7; margin: 2px 0 4px; overflow-wrap: anywhere; }
   .mr-trace .mr-step-in { color: var(--muted); }
@@ -334,6 +336,9 @@
     transition: background .16s ease;
   }
   .prov-menu-item:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+  /* The list is its own scroller: the edge rides inside the row so it is
+     never clipped by the scroll box. */
+  .prov-menu-item:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
   .prov-menu-item .prov-ic { font-size: 11px; }
   .prov-menu-custom { display: flex; gap: 5px; align-items: center; border-top: 1px solid var(--border); padding-top: 10px; }
   .prov-menu-custom input { flex: 1; min-width: 0; font: 11px var(--mono); color: var(--text); background: var(--rail); border: 1px solid var(--border); border-radius: 7px; padding: 5px 9px; }
@@ -352,6 +357,7 @@
     transition: transform .16s ease;
   }
   .prov-chev:hover { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
+  .prov-chev:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
   .st-prov.collapsed .prov-chev svg { transform: rotate(-90deg); }
   .st-prov.collapsed .prov-body { display: none; }
   .prov-x {
@@ -364,6 +370,7 @@
     stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
   }
   .prov-x:hover { color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); }
+  .prov-x:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
   .prov-bad, .prov-bad:focus { border-color: var(--err) !important; box-shadow: 0 0 0 2px color-mix(in srgb, var(--err) 15%, transparent) !important; }
   .ro-wrap { min-width: 0; max-width: 100%; }
   .ro-wrap .mr-tools { flex-wrap: wrap; }
