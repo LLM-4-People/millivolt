@@ -931,6 +931,17 @@ func (s *Server) finishPauseLocked() ([]persistedPause, uint64) {
 // holds pauseMu and must not touch it after this returns; the same lock
 // discipline as commitHolds applies.
 func (s *Server) commitPause() error {
+	snap, gen := s.finalizePause()
+	return s.persistLatest(snap, gen)
+}
+
+// finalizePause is the shared tail of every accepted hold mutation: it
+// finalizes the set, releases pause.mu and derives the pins, then returns the
+// snapshot and generation for persistence. Callers hold pause.mu. A caller that
+// waits on the write (commitPause) and one that hands it to a helper (the quota
+// path, where the relay must never wait on SQLite) share this owner, so a
+// quota hold pins its scope exactly like a manual one.
+func (s *Server) finalizePause() ([]persistedPause, uint64) {
 	snap, gen := s.finishPauseLocked()
 	s.pause.mu.Unlock()
 	// Every accepted hold mutation passes through here - create, edit, resume,
@@ -938,7 +949,7 @@ func (s *Server) commitPause() error {
 	// per handler instead would leave the removal and expiry paths pinning a
 	// scope that no longer exists.
 	s.syncNamePins()
-	return s.persistLatest(snap, gen)
+	return snap, gen
 }
 
 func (s *Server) persistHolds(holds []persistedPause) error {

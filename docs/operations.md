@@ -1297,7 +1297,9 @@ The retry-mode gate shares the storm scheduler's parking, probes and pacing,
 so storm recovery settings configure it without storm protection being
 enabled. It surfaces in the storm banner as a quota incident with a
 **Resume now** action (`POST /admin/quota`); manual-mode holds appear on the
-pause surface with their reason and resume like any hold. A quota 429 never
+pause surface with their reason and resume like any hold, and they derive their
+provider pin through the same commit owner as a manual pause so the provider
+stays offered in the scope pickers. A quota 429 never
 arms the rate-limit pacing trip (the rate-limit health series still counts the
 429 itself), and quota re-sends never burn the transient
 `max_retries` budget. The retry gate is in-memory - a restart drops it and

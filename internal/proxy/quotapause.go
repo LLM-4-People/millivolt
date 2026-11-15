@@ -113,8 +113,10 @@ func (s *Server) addQuotaHold(target scheduler.PolicyTarget, reason string) bool
 		return false
 	}
 	s.pause.holds = append(s.pause.holds, h)
-	snap, gen := s.finishPauseLocked()
-	s.pause.mu.Unlock()
+	// The shared commit tail derives the pins (a quota hold is an operator hold
+	// and must keep its provider offered) and releases pause.mu; only the write
+	// moves to the helper goroutine.
+	snap, gen := s.finalizePause()
 	log.Printf("quota pause: provider %s paused (%s)", provider, reason)
 	go func() {
 		if err := s.persistLatest(snap, gen); err != nil {
