@@ -361,6 +361,9 @@ func TestClaimPortReclaimsStaleSameBinaryOwner(t *testing.T) {
 		{`pid=,`, ""},    // empty field
 		{`pid=abc,`, ""}, // not numeric
 		{`pid=12a,`, ""}, // partly numeric
+		{`users:(("x",uid=1000,pid=4321,fd=5))`, "4321"}, // junk field before pid
+		{`pid=abc,pid=77,`, "77"},                        // junk candidate, then a real one
+		{`apid=9,pid=4321,`, "4321"},                     // a longer field that ends in pid=
 		{`no field at all`, ""},
 	} {
 		if got := extractPID(row.in); got != row.want {

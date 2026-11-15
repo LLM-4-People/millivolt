@@ -237,15 +237,19 @@ func extractPID(s string) string {
 		if start < 0 {
 			return ""
 		}
-		start += offset + len(marker)
-		if end := strings.IndexByte(s[start:], ','); end > 0 {
-			if pid := s[start : start+end]; pid != "" {
+		start += offset
+		// The marker must begin a field: a longer key that merely ends in
+		// "pid=" (apid=...) is not the pid field.
+		boundary := start == 0 || strings.ContainsRune("(, ", rune(s[start-1]))
+		value := start + len(marker)
+		if end := strings.IndexByte(s[value:], ','); boundary && end > 0 {
+			if pid := s[value : value+end]; pid != "" {
 				if _, err := strconv.Atoi(pid); err == nil {
 					return pid
 				}
 			}
 		}
-		offset = start
+		offset = value
 	}
 }
 
