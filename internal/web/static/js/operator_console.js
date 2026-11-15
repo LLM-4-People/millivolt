@@ -926,7 +926,7 @@ function ocSchedulePhrase(schedule) {
   const days = Array.isArray(schedule.days) && schedule.days.length
     ? schedule.days.map(d => CAL_DAYS[d]?.letter || '?').join('') : 'every day';
   if (start === end) return days + ' · all day';
-  return days + ' · ' + fmtClockOfDay(start) + '-' + fmtClockOfDay(end);
+  return days + ' · ' + fmtClockRange(fmtClockOfDay(start), fmtClockOfDay(end));
 }
 
 // ocUntilPhrase is the console's wording for a server deadline. The

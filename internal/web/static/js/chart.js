@@ -126,7 +126,7 @@ function chartBucketRange(t0, t1) {
   const formatter = chartSpansYears() || start.getFullYear() !== end.getFullYear()
     ? CHART_FULL_DATE_FORMAT : CHART_DATE_FORMAT;
   const endDate = start.toDateString() !== end.toDateString() ? formatter.format(end) + ' · ' : '';
-  return formatter.format(start) + ' · ' + fmtClockMs(t0) + '–' + endDate + fmtClockMs(t1);
+  return formatter.format(start) + ' · ' + fmtClockRange(fmtClockMs(t0), endDate + fmtClockMs(t1));
 }
 
 // asinhTickLadder returns round decade values (1…1e15) for the arcsinh bars

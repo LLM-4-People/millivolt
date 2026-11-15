@@ -124,9 +124,9 @@ function shortId(dim, id) {
 // TIME_BUCKET_LABELS renders the four time buckets (see timeBucket) as readable
 // windows. Single source for the bucket → label mapping.
 const TIME_BUCKET_LABELS = {
-  night: 'night 00–08',
-  work: 'work 08–16',
-  evening: 'evening 16–24',
+  night: 'night ' + fmtClockRange('00', '08'),
+  work: 'work ' + fmtClockRange('08', '16'),
+  evening: 'evening ' + fmtClockRange('16', '24'),
   weekend: 'weekend',
 };
 

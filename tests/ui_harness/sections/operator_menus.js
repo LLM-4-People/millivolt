@@ -2569,8 +2569,8 @@ module.exports = async function operatorMenus(H) {
       // run of letters rather than a spaced list.
       check('the schedule phrase names days, hours and the all-day case',
         w.eval('ocSchedulePhrase({days: [1], start_minute: 0, end_minute: 0})') === 'M · all day' &&
-        w.eval('ocSchedulePhrase({days: [], start_minute: 540, end_minute: 1020})') === 'every day · 09:00-17:00' &&
-        w.eval('ocSchedulePhrase({days: [0, 6], start: 60, end: 120})') === 'SS · 01:00-02:00' &&
+        w.eval('ocSchedulePhrase({days: [], start_minute: 540, end_minute: 1020})') === 'every day · 09:00–17:00' &&
+        w.eval('ocSchedulePhrase({days: [0, 6], start: 60, end: 120})') === 'SS · 01:00–02:00' &&
         // A stored document names its minutes and a draft names its hours; the
         // reader accepts both spellings of the same window.
         w.eval('ocSchedulePhrase({days: [1], start: 540, end: 1020})') ===

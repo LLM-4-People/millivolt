@@ -398,6 +398,11 @@ const fmtClockMs = ms => {
 };
 // fmtClockOfDay renders minutes since local midnight as HH:MM.
 const fmtClockOfDay = minutes => fmtClock(Math.floor(minutes / 60), minutes % 60);
+// fmtClockRange is the one start-end form for a clock range. The en dash is
+// the instrument's range glyph: a schedule window, the chart's bucket range
+// and the explorer's time buckets all read with it, so a hyphen in one surface
+// could make the same window look like subtraction.
+const fmtClockRange = (start, end) => start + '–' + end;
 // CAL_DAYS is the one weekday table, indexed to the server's day numbering
 // (0 = Sunday). Each row carries the three spellings the dashboard actually
 // shows: the one letter a schedule chip paints, the three-letter stamp a log
