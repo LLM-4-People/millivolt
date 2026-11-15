@@ -1,10 +1,14 @@
 package main
 
 import (
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPortFromAddr(t *testing.T) {
@@ -98,5 +102,148 @@ func TestProbePIDsPATHFixture(t *testing.T) {
 	}
 	if got := probePIDs(tool, "8080/tcp"); len(got) != 0 {
 		t.Fatalf("missing tool = %v, want no PIDs", got)
+	}
+}
+
+// selfSocketInodes returns the inode of every socket currently open in this
+// process. A listener and the connections to it are all sockets, so the set
+// proves which of them the LISTEN table does and does not name.
+func selfSocketInodes(t *testing.T) map[string]struct{} {
+	t.Helper()
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("no /proc/self/fd: %v", err)
+	}
+	inodes := map[string]struct{}{}
+	for _, fd := range fds {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name()))
+		if err != nil || !strings.HasPrefix(target, "socket:[") {
+			continue
+		}
+		inodes[strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")] = struct{}{}
+	}
+	return inodes
+}
+
+// TestListenerInodesExcludesConnectedSockets pins the ownership rule: only a
+// LISTEN socket owns the port. A same-binary process that merely holds a
+// client connection to :PORT used to be reclaimed alongside the listener, and
+// an unrelated client of a remote :PORT could consume the whole retry loop.
+func TestListenerInodesExcludesConnectedSockets(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	listeners := listenerInodes(port)
+	if len(listeners) == 0 {
+		t.Fatalf("no listening socket found for :%d", port)
+	}
+	before := selfSocketInodes(t)
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	accepted, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer accepted.Close()
+	after := selfSocketInodes(t)
+	var opened []string
+	for inode := range after {
+		if _, had := before[inode]; !had {
+			opened = append(opened, inode)
+		}
+	}
+	if len(opened) < 2 {
+		t.Fatalf("expected the client and accepted sockets to be new, got %v", opened)
+	}
+	for _, inode := range opened {
+		if _, listed := listeners[inode]; listed {
+			t.Errorf("connected socket inode %s was reported as the listener", inode)
+		}
+	}
+	// The process holding the listener resolves back as its owner.
+	owners := listenerOwners(listeners)
+	found := false
+	for _, pid := range owners {
+		if pid == strconv.Itoa(os.Getpid()) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("listenerOwners(%v) = %v, want it to include this pid %d", listeners, owners, os.Getpid())
+	}
+}
+
+// TestOwnsListenerRejectsAConnectedOnlyProcess pins the socket-level check
+// used by every probe strategy.
+func TestOwnsListenerRejectsAConnectedOnlyProcess(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	listeners := listenerInodes(port)
+	if !ownsListener(os.Getpid(), listeners) {
+		t.Fatalf("this process owns the listener on :%d but was rejected", port)
+	}
+	// A port with no listening socket at all: nothing can own it.
+	if ownsListener(os.Getpid(), listenerInodes(1)) {
+		t.Error("ownsListener matched a listener on port 1")
+	}
+}
+
+// TestKillWithLsofRestrictsToListeners pins that the lsof probe asks for
+// LISTEN state itself; without it the probe also returns client sockets.
+func TestKillWithLsofRestrictsToListeners(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "lsof"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	killWithLsof(8080, nil, time.Second)
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("the lsof probe never ran: %v", err)
+	}
+	if !strings.Contains(string(args), "-sTCP:LISTEN") {
+		t.Errorf("lsof args = %q, want -sTCP:LISTEN", args)
+	}
+}
+
+// TestProcessAliveTreatsZombieAsDead pins the reclaim wait: a zombie has
+// exited, holds no socket and cannot answer a signal, so it must not consume
+// the whole SIGKILL grace window.
+func TestProcessAliveTreatsZombieAsDead(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start a fixture child: %v", err)
+	}
+	pid := cmd.Process.Pid
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if state, err := processState(pid); err == nil && state == 'Z' {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if state, err := processState(pid); err != nil || state != 'Z' {
+		_ = cmd.Wait()
+		t.Skipf("fixture child never reached zombie state: %v %q", err, state)
+	}
+	// Still unreaped here: the parent process group has not called Wait.
+	if processAlive(pid) {
+		t.Error("a zombie reports alive")
+	}
+	_ = cmd.Wait()
+	if processAlive(pid) {
+		t.Error("a reaped pid reports alive")
 	}
 }
