@@ -6,6 +6,7 @@ package proxy
 // turns must carry status 200 so the row finalizes.
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -146,5 +147,86 @@ func TestEstimateInputTokens(t *testing.T) {
 	bad := estimateInputTokens([]byte(`not json`))
 	if bad != cursorAgentContextBaseTokens {
 		t.Fatalf("bad-body estimate = %d, want base %d", bad, cursorAgentContextBaseTokens)
+	}
+}
+
+// TestCursorResumeJSONWritesChatCompletion covers the non-streaming resume:
+// the same parked turn answered with `stream:false` must render one
+// chat.completion document (not an SSE frame), still finish on "stop" and
+// persist the same finalized record. The JSON accumulator and writeRunJSON had
+// no resume coverage at all.
+func TestCursorResumeJSONWritesChatCompletion(t *testing.T) {
+	serverIn, testIn := io.Pipe()
+	run := format.NewCursorRun(io.Discard, serverIn, nil, func() {
+		testIn.Close()
+	}, 5*time.Second)
+	run.Start()
+	parkMcpArgsRun(t, run, testIn)
+
+	buf := metrics.NewBuffer(100)
+	s := New(config.Default(), buf)
+	scope := s.cursorScopeFor(&target{baseURL: "http://upstream.invalid", authHeader: "Authorization", authPrefix: "Bearer "}, "cursor-key", "cursor-alpha-1", "go")
+	if !s.cursorRuns.park(scope, run) {
+		t.Fatal("park failed")
+	}
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"cursor-alpha-1","messages":[{"role":"tool","tool_call_id":"call-abc","name":"read","content":"ok"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer cursor-key")
+	req.Header.Set("X-Proxy-Client", "go")
+	req.Header.Set("X-Proxy-Base-URL", "http://upstream.invalid")
+	req.Header.Set("X-Proxy-Format", "cursor")
+
+	type res struct {
+		resp *http.Response
+		err  error
+	}
+	resCh := make(chan res, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		resCh <- res{resp, err}
+	}()
+	finishResumedRun(t, run, testIn)
+
+	out := <-resCh
+	if out.err != nil {
+		t.Fatal(out.err)
+	}
+	body, _ := io.ReadAll(out.resp.Body)
+	out.resp.Body.Close()
+	if out.resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", out.resp.StatusCode, body)
+	}
+	if got := out.resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Errorf("content-type = %q, want application/json", got)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("resume body is not one JSON document: %v; body: %s", err, body)
+	}
+	if doc["object"] != "chat.completion" {
+		t.Errorf("object = %v, want chat.completion", doc["object"])
+	}
+	choices, _ := doc["choices"].([]any)
+	if len(choices) != 1 {
+		t.Fatalf("choices = %v, want one", doc["choices"])
+	}
+	choice, _ := choices[0].(map[string]any)
+	if choice["finish_reason"] != "stop" {
+		t.Errorf("finish_reason = %v, want stop", choice["finish_reason"])
+	}
+	message, _ := choice["message"].(map[string]any)
+	if message == nil || message["role"] != "assistant" {
+		t.Errorf("message = %v, want an assistant message", choice["message"])
+	}
+
+	recs := waitForRecord(t, buf, 1)
+	if got := recs[0].StatusCode; got != 200 {
+		t.Errorf("record status_code = %d, want 200", got)
+	}
+	if recs[0].FinishReason != "stop" {
+		t.Errorf("finish_reason = %q, want stop", recs[0].FinishReason)
 	}
 }
