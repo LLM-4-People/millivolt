@@ -250,7 +250,11 @@ Responsive steps:
 - 440px: an odd final KPI tile spans the row.
 - 360px: the theme caption bar stacks.
 
-Touch follows `--tap` (44px) for menu rows and chips, triggers, the status filter, provider fields and sheet actions at 800px and below or on any coarse pointer; the console workspace uses a 38px rung at 800px and below on a fine pointer and the 44px target on any coarse pointer. Small utility affordances (copy, collapse, drawer navigation) keep their 32px to 38px boxes. Dense 24px to 28px controls remain on a fine pointer at desktop width.
+Touch follows `--tap` (44px) for menu rows and chips, triggers, the status filter, provider fields and sheet actions at 800px and below or on any coarse pointer; the console workspace uses a 38px rung at 800px and below on a fine pointer and the 44px target on any coarse pointer. Dense 24px to 28px controls remain on a fine pointer at desktop width. Small
+utility affordances (copy, collapse, drawer navigation) keep their 32px to 38px
+boxes on a fine pointer only; the drawer header is the way through and out of a
+request on a phone, so its navigation, copy and close take the 44px target at
+any coarse pointer.
 
 ## Elevation & depth
 
