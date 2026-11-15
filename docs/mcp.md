@@ -176,6 +176,10 @@ across dimensions and OR-ed within one dimension. `dim` is one of `client`,
 live in-flight class (`streaming`, `paused`, `throttled`, `pending`). It is not
 the explorer's status-class vocabulary, which travels as `status:2xx`.
 
+Two bounds apply to `f=` itself: at most 64 filters, and each `dim:id` value at
+most 2048 bytes. The list is refused whole when either is exceeded; no filter
+is silently dropped.
+
 An unknown dimension, malformed filter or unknown status is refused before the
 request is sent.
 
