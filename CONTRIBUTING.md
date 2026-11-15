@@ -265,6 +265,18 @@ documentation changes, and `pages.yml` deploys from `main` through the official
 GitHub Pages Actions flow. Repository-level Pages enablement and the
 `github-pages` environment are one-time administrator settings.
 
+The three files every page loads before content renders (`tokens.css`,
+`site.css`, `site.js`) are published at content-hashed names such as
+`site.11c6502e41.css`. GitHub Pages sets its own `Cache-Control`, so the URL is
+the only cache key this repository controls: a page cached from the previous
+deployment names the previous hash, and it must find those bytes. The build
+therefore republishes the last `SHELL_RETENTION` generations of each file,
+regenerated from the revisions that produced them, which is why the Pages
+workflow checks out full history. A checkout without history still builds the
+current page correctly but cannot retain earlier generations. Do not add a
+hand-written reference to the unhashed names; `tests/python/site.py` rejects
+one.
+
 The site is published at `https://millivolt.llm4people.dev/`. That origin has two
 owners, and neither is a file in this repository: the Pages custom domain in the
 repository settings, which is what GitHub serves and certifies, and the DNS
