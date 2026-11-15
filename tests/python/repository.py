@@ -739,7 +739,7 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("org.opencontainers.image.revision=${{ steps.cut.outputs.revision }}", meta)
         self.assertIn("build-args: REVISION=${{ steps.cut.outputs.revision }}", publish)
 
-        operations = self.read("docs/operations.md")
+        operations = self.read("docs/containers.md")
         section = operations.split("## Versions and images", 1)[1].split("\n## ", 1)[0]
         rows = dict(re.findall(r"^\| `([^`]+)` \| (.*?) \|$", section, re.M))
         self.assertIn("merged promotion PR", rows["main"])
@@ -798,7 +798,8 @@ class PublishedContracts(unittest.TestCase):
         operations_open = self.open_surface(operations, "docs/operations.md")
         for phrase in ("/session", "brand/PWA", "transparent inference"):
             self.assertIn(phrase, operations_open)
-        canonical = operations.split("### Operator access", 1)[1].split("\n### ", 1)[0]
+        routes = self.read("docs/routes.md")
+        canonical = routes.split("### Operator access", 1)[1].split("\n### ", 1)[0]
         for phrase in ("GET /healthz", "POST /session", "/manifest.webmanifest",
                        "/sw.js", "transparent inference", "canonical open-path list"):
             self.assertIn(phrase, canonical)
@@ -809,7 +810,7 @@ class PublishedContracts(unittest.TestCase):
         security_open = self.open_surface(security, "SECURITY.md")
         for phrase in ("/session", "brand/PWA", "transparent inference"):
             self.assertIn(phrase, security_open)
-        self.assertIn("docs/operations.md#operator-access", security_open)
+        self.assertIn("docs/routes.md#operator-access", security_open)
         security_mcp = self.mcp_surface(security, "SECURITY.md")
         self.assertIn("Bearer", security_mcp)
         self.assertRegex(security_mcp, r"refuses? a session cookie|session cookie[^.]*refused")
@@ -818,7 +819,7 @@ class PublishedContracts(unittest.TestCase):
         reverse_open = self.open_surface(reverse, "docs/reverse-proxy.md")
         for phrase in ("/session", "brand/PWA", "transparent inference"):
             self.assertIn(phrase, reverse_open)
-        self.assertIn("operations.md#operator-access", reverse_open)
+        self.assertIn("routes.md#operator-access", reverse_open)
         reverse_mcp = self.mcp_surface(reverse, "docs/reverse-proxy.md")
         self.assertIn("Bearer", reverse_mcp)
         self.assertIn("session cookie", reverse_mcp)
@@ -861,8 +862,8 @@ class PublishedContracts(unittest.TestCase):
         # The allow lists evaluate the resolved address, so the one-hop trust
         # limit must be stated where they are described.
         self.assertIn("chooses what", reverse)
-        operations = self.read("docs/operations.md")
-        self.assertIn("X-Forwarded-Proto", operations)
+        routes = self.read("docs/routes.md")
+        self.assertIn("X-Forwarded-Proto", routes)
 
     def test_stdlib_log_is_limited_to_fatal_sites(self):
         # internal/logging owns the one logging pipeline. Only the two boot
@@ -996,14 +997,16 @@ class PublishedContracts(unittest.TestCase):
     def test_operations_known_limits_pin_translation_cap_and_strict_backup_read(self):
         operations = re.sub(r"\s+", " ", self.read("docs/operations.md"))
         self.assertIn("`translated_response_max_bytes` each (default 32 MiB)", operations)
-        self.assertIn("restored from the streamed chunk count", operations)
-        self.assertIn("up to 1,024 distinct indexes", operations)
         self.assertIn("502 `response_too_large`", operations)
+        routes = re.sub(r"\s+", " ", self.read("docs/routes.md"))
+        self.assertIn("restored from the streamed chunk count", routes)
+        self.assertIn("up to 1,024 distinct indexes", routes)
+        containers = re.sub(r"\s+", " ", self.read("docs/containers.md"))
         self.assertIn(
             "same strict, bounded reader used by config reload and restore, not the boot repair path",
-            operations,
+            containers,
         )
-        self.assertNotIn("same strict, bounded reader as boot and restore", operations)
+        self.assertNotIn("same strict, bounded reader as boot and restore", containers)
 
         adapters = re.sub(r"\s+", " ", self.read("docs/adapters.md"))
         self.assertIn("`translated_response_max_bytes` each (default 32 MiB)", adapters)

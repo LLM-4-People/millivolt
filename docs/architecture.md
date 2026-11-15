@@ -5,7 +5,7 @@ The client-facing OpenAI-compatible interface and upstream relay/translation
 are separate boundaries; the [compatibility matrix](adapters.md#client-and-upstream-compatibility)
 defines their supported combinations.
 [Contributing](../CONTRIBUTING.md) covers change and verification rules;
-[protocol](protocol.md) and [operations](operations.md) describe public behavior.
+[protocol](protocol.md) and the [operations overview](operations.md) describe public behavior.
 
 ## Source map
 
@@ -13,6 +13,7 @@ defines their supported combinations.
 | --- | --- |
 | [cmd/proxy](../cmd/proxy/main.go) | Config/CLI, dependency wiring, routes, process lifecycle. Restart, log, backup and operator-gate handlers have separate existing files. |
 | [internal/config](../internal/config/config.go) | Config/defaults/validation, split by subject into `config_types.go`, `config_defaults.go`, `config_clone.go`, `config_load.go`, `config_validate.go` and `config_validate_overrides.go`; schema, YAML generation, revision-checked Settings, model-rule execution, and the credential-class header vocabulary and redactor in `credentials.go`. |
+| [internal/settingsdoc](../internal/settingsdoc/settingsdoc.go) | Renders the generated [settings reference](settings.md) from `Schema()`, the defaults passed through the YAML writer and the proxy flag registration; [cmd/docgen](../cmd/docgen/main.go) exposes it as `-write` and `-check`, and the config suite fails when the page drifts. |
 | [internal/backup](../internal/backup/archive.go) | Streamed self-checked operator archive format (VACUUM INTO snapshot + zstd + SHA-256), with byte- and file-backed database members. One decoder core serves byte and file callers; restore stages its upload and decoded database as private files instead of heap copies. `params/params.go` owns the backup/restore query keys, boolean spelling, restore modes and archive magic shared by the HTTP handlers and `mvctl`; the leaf imports no encoder, SQLite or zstd. |
 | [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, scoped request overrides, native-run ownership, operator state/capture; inbound/outbound protocol selection and canonical paths in [protocol.go](../internal/proxy/protocol.go); the quota-pause reaction owner [quotapause.go](../internal/proxy/quotapause.go) (settleQuotaFailure/addQuotaHold) and GET/POST /admin/quota. |
 | [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds, and limit policies selected by provider, model, client, key hash and conversation with optional recurring schedules; the provider-wide durable quota/billing recovery gate (quota facet, probe-paced recovery). |
@@ -61,7 +62,7 @@ directly, because a testing push has no promotion proof to wait for. The
 `main-testing-first` ruleset adds the pull-request and merge-commit requirements
 with no bypass actors.
 [Contributing](../CONTRIBUTING.md#branch-workflow) owns the maintainer
-checklist; [operations](operations.md#versions-and-images) owns the published
+checklist; [operations](containers.md#versions-and-images) owns the published
 tag contract.
 
 ## Request and scheduling path

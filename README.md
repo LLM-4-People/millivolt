@@ -24,7 +24,7 @@ a small team.
 
 [![Checks and images](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml?query=branch%3Amain)
 
-[Quickstart](#quickstart) · [Documentation](docs/README.md) · [Docs site](https://llm-4-people.github.io/millivolt/) ·
+[Quickstart](#quickstart) · [Documentation](docs/README.md) · [Docs site](https://millivolt.llm4people.dev/) ·
 [Dashboard guide](docs/dashboard.md) · [Support](SUPPORT.md) · [Security](SECURITY.md)
 
 <sub>Pre-1.0 · Linux · MIT · single operator or small team. The 0.x series can change configuration and API details between releases.</sub>
@@ -36,7 +36,9 @@ a small team.
 ## Quickstart
 
 Linux with Docker Engine and the Compose plugin. No Go, Node, or source
-checkout is needed for the container path.
+checkout is needed for the container path. The full path, including every
+environment variable and a first request on each client protocol, is in
+[install and first run](docs/install.md).
 
 ### Docker Compose
 
@@ -61,14 +63,14 @@ The Compose file publishes on loopback only. It keeps history and settings in
 named volumes, runs non-root with a read-only root filesystem, and accepts
 `MILLIVOLT_PORT` for an unused host port. For bind mounts, pre-create
 directories writable by UID/GID `65532:65532`; see
-[persistent state](docs/operations.md#persistent-state-and-configuration). For
+[persistent state](docs/containers.md#persistent-state-and-configuration). For
 image selection, backups, updates, shutdown, or protected ingress, see
-[container operation](docs/operations.md#containers) and the
+[container operation](docs/containers.md#containers) and the
 [reverse-proxy guide](docs/reverse-proxy.md).
 
 The published image is `ghcr.io/llm-4-people/millivolt:main` for amd64 and
 arm64. Version tags identify releases; pin a digest when exact bytes matter.
-See [versions and images](docs/operations.md#versions-and-images).
+See [versions and images](docs/containers.md#versions-and-images).
 
 ### From source
 
@@ -198,7 +200,7 @@ system, or a compliance audit log.
 | **Accounting** | Best-effort, not a guarantee. Sustained overload can drop records even when inference succeeds. Backups, capacity, and storage drops are covered in [storage and accounting](docs/operations.md#storage-and-accounting). |
 | **Relay contract** | Transparent by default, not byte-for-byte or exactly-once. Normal paths preserve content, with documented exceptions. See [protocol](docs/protocol.md). |
 | **Billing and compliance** | Not an invoice or audit log. Cost is provider-reported; this is not an independent billing system or a complete compliance record. |
-| **Portability** | Linux is the only supported target. See [containers](docs/operations.md#containers). |
+| **Portability** | Linux is the only supported target. See [containers](docs/containers.md#containers). |
 
 ---
 
@@ -216,10 +218,11 @@ It includes enabled compatibility profiles without registering provider keys or
 upstream URLs. Your local `proxy.yaml` is ignored; do not commit it.
 
 Defaults, example profiles, and validation are defined in `internal/config`;
-Settings uses that same schema. See [operations](docs/operations.md) for
-overrides, reloads, backups, and restart requirements.
+Settings uses that same schema. See [configuration](docs/configuration.md) for
+overrides and reloads, and [containers and data](docs/containers.md) for
+backups and restart requirements.
 
-`VERSION` owns the application version; [versions and images](docs/operations.md#versions-and-images)
+`VERSION` owns the application version; [versions and images](docs/containers.md#versions-and-images)
 covers publication and verification.
 
 ## Contributing
@@ -239,7 +242,7 @@ vulnerabilities.
 
 | Guide | Path | Covers |
 | --- | --- | --- |
-| `01` | [Quickstart](#quickstart) · [container operation](docs/operations.md#containers) | First run, images, volumes, shutdown |
+| `01` | [Quickstart](#quickstart) · [container operation](docs/containers.md#containers) | First run, images, volumes, shutdown |
 | `02` | [Protocol](docs/protocol.md) · [adapters](docs/adapters.md) | Client setup, translation, compatibility |
 | `03` | [Operations](docs/operations.md) · [operator CLI](docs/cli.md) · [performance](docs/performance.md) · [reverse proxy](docs/reverse-proxy.md) | Day-to-day operation and measurements |
 | `04` | [MCP server](docs/mcp.md) | The 22-tool operator API |

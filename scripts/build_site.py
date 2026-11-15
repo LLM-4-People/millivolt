@@ -31,7 +31,11 @@ from markdown.extensions.toc import TocExtension
 ROOT = Path(__file__).resolve().parent.parent
 SITE_SRC = ROOT / "site-src"
 TEMPLATES = SITE_SRC / "templates"
-DEFAULT_BASE_URL = "https://llm-4-people.github.io/millivolt/"
+# The published site's canonical origin. The Pages workflow passes the live base
+# URL from `actions/configure-pages`, so a preview or a fork builds with its own
+# origin; the repository default is the one the site is published at.
+CUSTOM_DOMAIN = "millivolt.llm4people.dev"
+DEFAULT_BASE_URL = f"https://{CUSTOM_DOMAIN}/"
 GITHUB_REPOSITORY = "https://github.com/LLM-4-People/millivolt"
 GITHUB_BRANCH = "main"
 GITHUB_BLOB = f"{GITHUB_REPOSITORY}/blob/{GITHUB_BRANCH}/"
@@ -67,43 +71,53 @@ ROOT_PAGE_MAP = {
     "CONTRIBUTING.md": "contributing.html",
     "SECURITY.md": "security.html",
     "LICENSE": "license.html",
+    "SUPPORT.md": "support.html",
     "THIRD_PARTY_NOTICES.md": "third-party.html",
     "docs/README.md": "docs/index.html",
 }
 
 NAV_GROUPS = (
     (
-        "Get started",
+        "Start",
         (
             ("Documentation", "docs/index.html", "docs/README.md"),
-            ("Quickstart", "index.html#quickstart", None),
-            ("Dashboard", "docs/dashboard.html", "docs/dashboard.md"),
-            ("Protocol", "docs/protocol.html", "docs/protocol.md"),
+            ("Install and first run", "docs/install.html", "docs/install.md"),
+            ("Dashboard tour", "docs/dashboard.html", "docs/dashboard.md"),
+            ("Protocol and clients", "docs/protocol.html", "docs/protocol.md"),
         ),
     ),
     (
-        "Guides",
+        "Integrate",
         (
             ("Adapters", "docs/adapters.html", "docs/adapters.md"),
-            ("Reverse proxy", "docs/reverse-proxy.html", "docs/reverse-proxy.md"),
             ("MCP server", "docs/mcp.html", "docs/mcp.md"),
             ("Operator CLI", "docs/cli.html", "docs/cli.md"),
+        ),
+    ),
+    (
+        "Operate",
+        (
+            ("Operations", "docs/operations.html", "docs/operations.md"),
+            ("Configuration", "docs/configuration.html", "docs/configuration.md"),
+            ("Settings reference", "docs/settings.html", "docs/settings.md"),
+            ("Containers and data", "docs/containers.html", "docs/containers.md"),
+            ("Routes and debugging", "docs/routes.html", "docs/routes.md"),
+            ("Reverse proxy", "docs/reverse-proxy.html", "docs/reverse-proxy.md"),
+            ("Performance", "docs/performance.html", "docs/performance.md"),
             ("Security", "security.html", "SECURITY.md"),
         ),
     ),
     (
-        "Reference",
+        "Extend",
         (
-            ("Operations", "docs/operations.html", "docs/operations.md"),
-            ("Performance", "docs/performance.html", "docs/performance.md"),
             ("Architecture", "docs/architecture.html", "docs/architecture.md"),
+            ("Contributing", "contributing.html", "CONTRIBUTING.md"),
         ),
     ),
     (
         "Project",
         (
-            ("Contributing", "contributing.html", "CONTRIBUTING.md"),
-            ("Support", "https://github.com/LLM-4-People/millivolt/blob/main/SUPPORT.md", None),
+            ("Support", "support.html", "SUPPORT.md"),
             ("License", "license.html", "LICENSE"),
             ("Third-party notices", "third-party.html", "THIRD_PARTY_NOTICES.md"),
         ),
@@ -345,6 +359,15 @@ def nav_links(current_output: str) -> str:
     return "".join(blocks)
 
 
+def nav_group_of(output: str) -> str:
+    """Return the nav group a page belongs to, for its breadcrumb."""
+    for label, entries in NAV_GROUPS:
+        for _text, target, _source in entries:
+            if target.split("#", 1)[0] == output:
+                return label
+    return "Docs"
+
+
 def flatten_nav() -> list[tuple[str, str, str]]:
     pages: list[tuple[str, str, str]] = []
     for _label, entries in NAV_GROUPS:
@@ -515,6 +538,50 @@ def markdown_engine() -> markdown.Markdown:
     )
 
 
+# GitHub alert syntax: a blockquote whose first paragraph opens with
+# `[!KIND]`. The set is closed because each kind maps to one label and one
+# icon; an unknown marker stays a plain blockquote rather than inventing a
+# callout nobody styled.
+CALLOUT_KINDS = {
+    "NOTE": ("Note", '<circle cx="7" cy="7" r="5.4"/><path d="M7 6.5v4"/><circle cx="7" cy="4.3" r=".7" fill="currentColor" stroke="none"/>'),
+    "TIP": ("Tip", '<path d="M4.6 10.4a4 4 0 1 1 4.8 0v1.4H4.6z"/><path d="M6 13.4h2"/>'),
+    "IMPORTANT": ("Important", '<path d="M7 1.9 13 12H1z"/><path d="M7 5.6v3.3"/><circle cx="7" cy="10.7" r=".6" fill="currentColor" stroke="none"/>'),
+    "WARNING": ("Warning", '<path d="M7 1.9 13 12H1z"/><path d="M7 5.6v3.3"/><circle cx="7" cy="10.7" r=".6" fill="currentColor" stroke="none"/>'),
+    "CAUTION": ("Caution", '<path d="M7 1.9 13 12H1z"/><path d="M7 5.6v3.3"/><circle cx="7" cy="10.7" r=".6" fill="currentColor" stroke="none"/>'),
+}
+# Raw-Markdown form of the same alerts, used when a page's description is
+# derived before rendering. The blockquote's own continuation lines go with the
+# marker, so a warning never becomes the page summary.
+CALLOUT_SOURCE = re.compile(
+    r"^>\s*\[!(?:NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][^\n]*(?:\n>.*)*\n*", re.M
+)
+CALLOUT_BLOCK = re.compile(
+    r"<blockquote>\s*<p>\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*?)</p>(.*?)</blockquote>",
+    re.S,
+)
+
+
+def render_callouts(content: str) -> str:
+    """Turn GitHub alert blockquotes into the docs callout vocabulary.
+
+    Runs after sanitizing and link rewriting, so the blockquote and its inner
+    content are already final and this only wraps them in build-owned markup.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        kind = match.group(1)
+        label, icon = CALLOUT_KINDS[kind]
+        first, rest = match.group(2), match.group(3)
+        return (
+            f'<aside class="callout callout-{kind.lower()}" role="note">'
+            f'<p class="callout-label"><svg class="callout-icon" viewBox="0 0 14 14" '
+            f'aria-hidden="true">{icon}</svg>{label}</p>'
+            f"<p>{first}</p>{rest}</aside>"
+        )
+
+    return CALLOUT_BLOCK.sub(replace, content)
+
+
 def render_fragment(
     md: markdown.Markdown, text: str, source: Path, output: str, site_root: Path
 ) -> str:
@@ -530,6 +597,7 @@ def render_fragment(
     content = sanitize_content(content)
     content = rewrite_content_urls(content, source, output)
     content = enhance_images_with_root(content, output, site_root)
+    content = render_callouts(content)
     return content
 
 
@@ -543,10 +611,48 @@ def render_markdown(source: Path, output: str, site_root: Path) -> tuple[str, st
     title = strip_html(heading.group(1)) if heading else source.stem.replace("-", " ").title()
     md = markdown_engine()
     content = render_fragment(md, text, source, output, site_root)
-    first_paragraph = PARAGRAPH.search(content)
+    # A page lede describes the page, not the warning that leads it. Callouts
+    # are build-owned asides and are skipped so a page whose first blocks are
+    # `[!WARNING]` still gets a real description for search and social cards.
+    described = re.sub(r'<aside class="callout.*?</aside>', "", content, flags=re.S)
+    first_paragraph = PARAGRAPH.search(described)
     description = plain_text(first_paragraph.group(1)) if first_paragraph else title
     description = summarize(description)
     return title, description, content, md.toc_tokens
+
+
+# Search indexes a page as its lede plus one document per h2. The split is on the
+# rendered heading, which is where the sanitizer has already closed the markup,
+# so a section's text is exactly what a reader sees between two headings.
+SEARCH_SECTION = re.compile(r'<h([23])\b[^>]*\bid="([^"]+)"[^>]*>', re.S)
+SEARCH_TEXT_MAX = 1200
+
+
+def search_sections(content: str) -> list[dict]:
+    """Split one rendered document into its sections for the search index.
+
+    A section starts at an h2 or an h3 and ends at the next heading, so its text
+    is what a reader sees under that heading and no text is indexed twice. An h3
+    carries its h2 as context, which is what the result list shows.
+    """
+    matches = list(SEARCH_SECTION.finditer(content))
+    sections: list[dict] = []
+    parent = ""
+    for index, match in enumerate(matches):
+        level, anchor = match.group(1), match.group(2)
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        chunk = content[match.end():end]
+        heading_html, _, body = chunk.partition("</h" + level + ">")
+        heading = strip_html(heading_html).rstrip("#\u00b6 ").strip()
+        if level == "2":
+            parent = heading
+        sections.append({
+            "heading": heading,
+            "id": anchor,
+            "text": plain_text(body)[:SEARCH_TEXT_MAX],
+            "context": "" if level == "2" else parent,
+        })
+    return sections
 
 
 def toc_html(tokens: list[dict]) -> str:
@@ -585,7 +691,8 @@ def page_for_source(source: Path, *, kind: str) -> Page:
         text = source.read_text(encoding="utf-8")
         heading = HEADING.search(text)
         title = strip_html(heading.group(1)) if heading else source.stem.replace("-", " ").title()
-        paragraph = PARAGRAPH.search(markdown.markdown(text, extensions=["extra"]))
+        described = CALLOUT_SOURCE.sub("", text)
+        paragraph = PARAGRAPH.search(markdown.markdown(described, extensions=["extra"]))
         description = plain_text(paragraph.group(1)) if paragraph else title
         description = summarize(description)
     return Page(source=source, output=output, title=title, description=description, kind=kind)
@@ -649,7 +756,6 @@ def base_values(
         "version": html.escape(version),
         "nav_overview": ' aria-current="page"' if active == "overview" else "",
         "nav_docs": ' aria-current="page"' if active == "docs" else "",
-        "nav_dashboard": ' aria-current="page"' if active == "dashboard" else "",
     }
 
 
@@ -770,32 +876,56 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
     source_key = page.source.relative_to(ROOT).as_posix()
     edit_url = GITHUB_EDIT + source_key
     source_url = GITHUB_BLOB + source_key
+    group = nav_group_of(page.output)
+    crumbs = "" if page.output == "docs/index.html" else (
+        '<nav class="crumbs" aria-label="Breadcrumb">'
+        f'<a href="{attr_escape(page_relative("docs/index.html", page.output))}">Docs</a>'
+        '<span class="crumb-sep" aria-hidden="true">/</span>'
+        f'<span class="crumb-group">{html.escape(group)}</span>'
+        "</nav>"
+    )
     doc_body = (
         '<div class="wrap docs-shell">'
         '<details class="docs-nav" open>'
-        '<summary class="docs-nav-summary">Documentation menu</summary>'
-        f'<nav class="docs-nav-inner" aria-label="Documentation">{nav_links(page.output)}</nav>'
+        '<summary class="docs-nav-summary">'
+        '<span class="docs-nav-summary-text">'
+        f'<span class="docs-nav-group">{html.escape(group)}</span>'
+        f'<span class="docs-nav-page">{html.escape(title)}</span>'
+        "</span>"
+        '<svg class="docs-nav-chevron" viewBox="0 0 16 16" aria-hidden="true">'
+        '<path d="m4 6 4 4 4-4"/></svg>'
+        "</summary>"
+        '<button class="docs-nav-collapse" type="button" aria-expanded="true" '
+        'aria-controls="docs-nav-list">Collapse menu</button>'
+        f'<nav class="docs-nav-inner" id="docs-nav-list" aria-label="Documentation">'
+        f"{nav_links(page.output)}</nav>"
         "</details>"
+        '<details class="toc" open>'
+        '<summary class="toc-summary">On this page'
+        '<svg class="docs-nav-chevron" viewBox="0 0 16 16" aria-hidden="true">'
+        '<path d="m4 6 4 4 4-4"/></svg></summary>'
+        '<div class="toc-sticky"><p class="toc-title">On this page</p>'
+        + toc_html(tokens)
+        + "</div></details>"
         '<main id="main" class="doc-main">'
-        '<div class="doc-meta"><span class="mono-label">'
-        + ("project" if page.kind == "project" else "documentation")
-        + '</span><span class="doc-links"><a href="'
-        + attr_escape(source_url)
-        + '" target="_blank" rel="noopener noreferrer">view source</a><a href="'
-        + attr_escape(edit_url)
-        + '" target="_blank" rel="noopener noreferrer">edit this page</a></span></div>'
-        '<article class="doc-content">'
+        '<div class="read-progress" aria-hidden="true"></div>'
+        '<button class="docs-nav-reveal" type="button" aria-expanded="false" '
+        'aria-controls="docs-nav-list">Show menu</button>'
+        + crumbs
+        + '<article class="doc-content">'
         + content
         + "</article>"
+        '<footer class="doc-footer">'
+        '<div class="doc-links"><a href="'
+        + attr_escape(source_url)
+        + '" target="_blank" rel="noopener noreferrer">View source</a><a href="'
+        + attr_escape(edit_url)
+        + '" target="_blank" rel="noopener noreferrer">Edit this page</a></div>'
         '<nav class="page-nav" aria-label="Documentation pages">'
         + previous_html
         + following_html
-        + "</nav>"
+        + "</nav></footer>"
         "</main>"
-        "<aside class=\"toc\" aria-label=\"On this page\">"
-        '<div class="toc-sticky"><span class="mono-label">On this page</span>'
-        + toc_html(tokens)
-        + "</div></aside>"
         "</div>"
     )
     values = base_values(
@@ -807,7 +937,7 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
         body=doc_body,
         body_class="docs",
         theme_color=theme_color,
-        active="dashboard" if page.output == "docs/dashboard.html" else "docs",
+        active="docs",
     )
     return render_base(values), {
         "title": title,
@@ -818,7 +948,11 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
             for node in tokens
             if int(node.get("level", 0)) in (2, 3)
         ],
-        "text": plain_text(content)[:5000],
+        # The lede is what the page says before its first section; the sections
+        # themselves carry the reference text, so a long page is indexed whole
+        # instead of being cut at one fixed character count.
+        "text": plain_text(SEARCH_SECTION.split(content)[0])[:SEARCH_TEXT_MAX],
+        "sections": search_sections(content),
     }
 
 
@@ -968,6 +1102,7 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
                 "CONTRIBUTING.md",
                 "SECURITY.md",
                 "LICENSE",
+                "SUPPORT.md",
                 "THIRD_PARTY_NOTICES.md",
             } else "doc"
             pages.append(page_for_source(source, kind=kind))
@@ -1026,6 +1161,17 @@ def main(argv: list[str] | None = None) -> int:
         help="public site URL used for canonical and social metadata",
     )
     args = parser.parse_args(argv)
+    # The domain has one owner outside this repository: the Pages setting. Warn
+    # when a build for the live site disagrees with the committed default, which
+    # is what a half-finished domain migration looks like from here.
+    live = os.environ.get("SITE_URL")
+    if live and urlsplit(live).hostname != urlsplit(DEFAULT_BASE_URL).hostname:
+        print(
+            f"build_site: building for {urlsplit(live).hostname}, but the repository "
+            f"default is {urlsplit(DEFAULT_BASE_URL).hostname}; set the Pages custom "
+            "domain to match, or the published metadata will name the wrong origin",
+            file=sys.stderr,
+        )
     try:
         outputs = build_site(Path(args.output), base_url=args.base_url)
     except BuildError as exc:

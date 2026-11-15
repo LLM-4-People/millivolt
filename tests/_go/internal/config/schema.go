@@ -1059,7 +1059,10 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 	normalize := func(rel string) string {
 		return strings.Join(strings.Fields(repositoryText(t, filepath.Join("docs", rel))), " ")
 	}
-	operations := normalize("operations.md")
+	operations := strings.Join([]string{
+		normalize("operations.md"), normalize("configuration.md"),
+		normalize("routes.md"), normalize("containers.md"),
+	}, " ")
 	adapters := normalize("adapters.md")
 	protocol := normalize("protocol.md")
 	example := exampleHelpText(repositoryText(t, "proxy.example.yaml"))
@@ -1212,9 +1215,9 @@ func TestSchemaHelpPinsValidationRules(t *testing.T) {
 			t.Errorf("request_overrides help omits %q: %s", phrase, overrides.Help)
 		}
 	}
-	operations := repositoryText(t, filepath.Join("docs", "operations.md"))
+	operations := repositoryText(t, filepath.Join("docs", "configuration.md"))
 	if !strings.Contains(operations, "The list is capped at 64 rules.") {
-		t.Error("docs/operations.md omits the model_rules cap")
+		t.Error("docs/configuration.md omits the model_rules cap")
 	}
 }
 

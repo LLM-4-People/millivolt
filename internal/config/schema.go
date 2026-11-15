@@ -539,30 +539,8 @@ func (f Field) TypeLine(def any) string {
 	if f.Kind == KindInt && f.Unit != "" {
 		b.WriteString(" (" + f.Unit + ")")
 	}
-	if f.Min != nil || f.Max != nil || f.ZeroMeans != "" {
-		b.WriteString(" · range ")
-		switch {
-		case f.Min != nil && f.Max != nil:
-			b.WriteString(fmt.Sprintf("%s..%s", f.formatBound(*f.Min), f.formatBound(*f.Max)))
-		case f.Min != nil:
-			b.WriteString(">= " + f.formatBound(*f.Min))
-		case f.Max != nil:
-			b.WriteString("<= " + f.formatBound(*f.Max))
-		}
-		if f.ZeroMeans != "" {
-			zero := "0"
-			if f.ZeroToken != "" {
-				zero = f.ZeroToken
-			}
-			if f.Min != nil || f.Max != nil {
-				b.WriteString(" (" + zero + " = " + f.ZeroMeans + ")")
-			} else {
-				b.WriteString(zero + " = " + f.ZeroMeans)
-			}
-		}
-	}
-	if f.Kind == KindDuration && f.Min == nil && f.Max == nil && f.ZeroMeans == "" {
-		b.WriteString(" · range > " + FormatDuration(0))
+	if rangeText := f.RangeText(); rangeText != "" {
+		b.WriteString(" · range " + rangeText)
 	}
 	switch {
 	case f.Kind == KindModelRules:
@@ -590,6 +568,40 @@ func typeLineDefault(f Field, def any) string {
 		}
 	}
 	return fmt.Sprint(def)
+}
+
+// RangeText is the one bound sentence the schema owns: the display labels for
+// a finite band, the formatted zero and its meaning. TypeLine renders it into
+// YAML comments and the generated settings reference renders it as a table
+// cell, so the two surfaces cannot describe a bound differently. Empty when
+// the field declares neither a bound nor a zero meaning, except for a duration
+// with no explicit band, whose validator requires a positive value.
+func (f Field) RangeText() string {
+	var b strings.Builder
+	if f.Min != nil || f.Max != nil || f.ZeroMeans != "" {
+		switch {
+		case f.Min != nil && f.Max != nil:
+			b.WriteString(fmt.Sprintf("%s..%s", f.formatBound(*f.Min), f.formatBound(*f.Max)))
+		case f.Min != nil:
+			b.WriteString(">= " + f.formatBound(*f.Min))
+		case f.Max != nil:
+			b.WriteString("<= " + f.formatBound(*f.Max))
+		}
+		if f.ZeroMeans != "" {
+			zero := "0"
+			if f.ZeroToken != "" {
+				zero = f.ZeroToken
+			}
+			if f.Min != nil || f.Max != nil {
+				b.WriteString(" (" + zero + " = " + f.ZeroMeans + ")")
+			} else {
+				b.WriteString(zero + " = " + f.ZeroMeans)
+			}
+		}
+	} else if f.Kind == KindDuration {
+		b.WriteString("> " + FormatDuration(0))
+	}
+	return b.String()
 }
 
 // formatBound is TypeLine's range-bound printer: durations via FormatDuration

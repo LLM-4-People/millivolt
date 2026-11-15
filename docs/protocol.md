@@ -9,7 +9,7 @@ documents the canonical model and its loss policy. No endpoint/API-key registry
 is required. Read
 [Security](../SECURITY.md): routing credentials do not authorize operator access,
 and the whole dashboard plane is gated by `MILLIVOLT_OPERATOR_TOKEN`
-([operator access](operations.md#operator-access)); only `/healthz` and
+([operator access](routes.md#operator-access)); only `/healthz` and
 `/readyz`, `/favicon.ico` (and the other origin-root brand/PWA files), the
 `/session` login handshake and the relay stay open.
 
@@ -18,7 +18,7 @@ and the whole dashboard plane is gated by `MILLIVOLT_OPERATOR_TOKEN`
 The dashboard, embedded assets, `/admin/*` actions, `/healthz`, `/readyz`, the
 `/session` login handshake, the `/mcp` MCP endpoint and registered `/metrics/*`
 routes belong to millivolt. Their methods and meanings are listed in
-[operations](operations.md#operator-and-data-routes). `GET /v1/models` and
+[routes and debugging](routes.md#operator-and-data-routes). `GET /v1/models` and
 `GET /models` use the discovery path described below. `POST /v1/chat/completions`,
 `POST /v1/responses` and `POST /v1/messages` select the client wire protocol.
 Other paths reach the relay catch-all and require valid routing headers; the
@@ -30,7 +30,7 @@ does an explicit format equal to the client protocol. Without a configured
 request rewrite, a passthrough request's body bytes are relayed unchanged;
 configured request overrides, a sub-conversation strip or ensured tools can
 still rewrite the upstream body (see
-[request overrides](operations.md#request-overrides)). `X-Proxy-In-Format`
+[request overrides](configuration.md#request-overrides)). `X-Proxy-In-Format`
 overrides the protocol named by the path, so an
 otherwise unknown path is translated when that header names the inbound wire;
 without the override, paths outside the three known endpoints are never
@@ -122,8 +122,11 @@ path prefix can be left.
 
 Client identity labels are retention-bounded before the record enters the live
 ring, analytics or durable store: classified client and language 256 bytes,
-user agent 1024 bytes, and the first forwarded address 128 bytes. Longer values
+user agent 1024 bytes, and `client_ip` 128 bytes. Longer values
 are cut on a UTF-8 boundary and end with `…`; normal labels are unchanged.
+`client_ip` records the first `X-Forwarded-For` element when that header is
+present and the socket peer otherwise; the value is diagnostic, never verified,
+and a directly reachable caller can set it.
 
 Finalized and pending record text is retention-bounded at the record boundary
 before it enters the live ring, pending view or durable store: path 1024 bytes,
@@ -158,7 +161,7 @@ model, client, key hash, conversation or schedule are untouched. The operator
 console shows every policy, its schedule and its source. Request rates are strict sliding windows over the
 configured length, so no window ever admits more than the configured count;
 token rates remain continuously refilled budgets. See
-[Pause and Limits](operations.md#pause-and-limits) for charging and window
+[Pause and Limits](routes.md#pause-and-limits) for charging and window
 behavior.
 
 Supported proxy-control headers never forward upstream. Injected names must be
@@ -466,7 +469,7 @@ rather than a universal rejection.
 Neither transparency nor exactly-once upstream execution is unconditional.
 
 Before relay or translation, the upstream request is subject to the configured
-`request_overrides` (see [request overrides](operations.md#request-overrides)):
+`request_overrides` (see [request overrides](configuration.md#request-overrides)):
 matching rules set, replace or remove upstream headers as the last header
 stage, and their body fields set `max_tokens` / `max_completion_tokens` on
 Chat Completions or Anthropic client bodies before translation, whatever the
@@ -540,7 +543,7 @@ structured error counts as the upstream error it observed. That is the
 provider's in-band stream failure the client aborted around, or a truncated
 stream whose completion marker never arrived - an abort must be classified by
 its outcome, never by which relay write happened to fail.
-See [metric interpretation](operations.md#dashboard-data-and-request-inspection)
+See [metric interpretation](routes.md#dashboard-data-and-request-inspection)
 for duration, first-token latency and throughput.
 
 ### Error storm protection
@@ -692,7 +695,7 @@ fields accept it. An absent or dropped identity is never a client
 error. A tracked identity never declares a parent: `X-Proxy-Parent-Session`
 still requires its explicit session pair, and the session wins identity. The
 identity rules, name grammar, caps and the settings surface live in
-[operations](operations.md#sub-conversation-tracking).
+[configuration](configuration.md#sub-conversation-tracking).
 
 ### Declaring a parent
 

@@ -265,6 +265,15 @@ documentation changes, and `pages.yml` deploys from `main` through the official
 GitHub Pages Actions flow. Repository-level Pages enablement and the
 `github-pages` environment are one-time administrator settings.
 
+The site is published at `https://millivolt.llm4people.dev/`. That origin has two
+owners, and neither is a file in this repository: the Pages custom domain in the
+repository settings, which is what GitHub serves and certifies, and the DNS
+record, which is a `CNAME` from `millivolt` to `llm-4-people.github.io` with the
+proxy disabled. `scripts/build_site.py` warns when a build for `SITE_URL` names
+a different host than `DEFAULT_BASE_URL`, because that is what a half-finished
+migration looks like. GitHub ignores a `CNAME` file in an Actions deployment, so
+this repository does not ship one.
+
 ### Push gate
 
 Never push `main` directly: open a promotion pull request and merge it with a
@@ -318,7 +327,7 @@ gate, and push the fix. Do not leave `testing` or `main` red or start unrelated
 work on top of a failing run.
 
 For changes to configuration, update the Config/default/validation/schema owners
-and regenerate the example as described in [operations](docs/operations.md).
+and regenerate the example as described in [configuration](docs/configuration.md).
 Do not edit `proxy.yaml`: it may be a running operator's configuration.
 
 ## Isolated development
@@ -597,7 +606,7 @@ Run the shared checks before relying on a release. Confirm the hosted container
 build and smoke tests succeed, then check the package visibility and anonymous
 pull. Do not report a release/image as available merely because validation or a
 local build passed. Image usage and persistence limits live in
-[operations](docs/operations.md#versions-and-images). The gate clears inherited
+[operations](docs/containers.md#versions-and-images). The gate clears inherited
 Git routing/configuration variables before checking
 source identity, so another worktree or external ignore policy cannot satisfy
 the release checks accidentally.

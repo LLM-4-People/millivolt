@@ -12,6 +12,10 @@ case "$mode" in
   core)
     (( $# <= 1 )) || die "$usage"
     for tool in go gofmt node npm python3 git jq; do need "$tool"; done
+    # A promotion PR is rejected when origin/main is not an ancestor of the
+    # testing tip. Fail the local push gate with the remedy instead of losing
+    # the whole gate to a workflow rule minutes later.
+    scripts/promote.sh check
     go version
     node --version
     npm --version

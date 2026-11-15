@@ -17,7 +17,7 @@ equal to the client protocol also stays passthrough. Passthrough is not an
 unconditional byte-identity promise: configured `request_overrides`, a
 `sub_conversations` strip, or ensured tools can still rewrite the upstream
 body before it is sent (see
-[request overrides](operations.md#request-overrides)). Without any of those
+[request overrides](configuration.md#request-overrides)). Without any of those
 configured, the body bytes are relayed unchanged.
 
 | Client path | Client protocol | `X-Proxy-Format` | Upstream protocol |
@@ -341,7 +341,7 @@ is cut at the byte budget, possibly inside the final field, and ends with
 are never fatal; a non-streaming response reports them in `X-Proxy-Warnings`,
 while a streaming response cannot add a header after the status line is
 committed and drops them. The field is described under
-[settings](operations.md#finding-a-setting).
+[settings](configuration.md#finding-a-setting).
 
 A provider error envelope that arrives inside HTTP 200 is translated too, but
 the client status becomes 502: a translated client would read 200 as a
@@ -535,7 +535,7 @@ Responses or Anthropic client, and as the inbound protocol for
 images, tools and results, thinking blocks, cache control, selected parameters,
 usage and streaming events. Fields with no target representation follow the
 [translation loss policy](#cross-protocol-translation). A configured
-[sub-conversation tracking](operations.md#sub-conversation-tracking) value is
+[sub-conversation tracking](configuration.md#sub-conversation-tracking) value is
 injected as a top-level `prompt_cache_key`. That field is a proxy tracking
 extension, not an Anthropic cache control: Anthropic caching uses
 `cache_control`, and the injection is only safe for upstreams that tolerate

@@ -34,11 +34,77 @@
   });
 
   const docsNav = document.querySelector(".docs-nav");
-  if (docsNav) {
-    const mobile = window.matchMedia("(max-width: 900px)");
-    const syncDocsNav = () => { docsNav.open = !mobile.matches; };
-    syncDocsNav();
-    mobile.addEventListener("change", syncDocsNav);
+  const toc = document.querySelector(".toc");
+  if (docsNav || toc) {
+    // Both rails are disclosures: always open while they are side rails, closed
+    // while they are inline panels above the article, so a phone lands on the
+    // page title instead of a 30-item list.
+    const wide = window.matchMedia("(max-width: 1180px)");
+    const syncRails = () => {
+      if (docsNav) docsNav.open = !wide.matches;
+      if (toc) toc.open = !wide.matches;
+    };
+    syncRails();
+    wide.addEventListener("change", syncRails);
+  }
+
+  // Keep the current page visible in a long rail: the list is taller than the
+  // viewport once the docs pass about twenty pages, and a page near the end
+  // would otherwise open scrolled to the top of the rail.
+  if (docsNav && docsNav.open) {
+    const current = docsNav.querySelector('a[aria-current="page"]');
+    if (current) {
+      const navBox = docsNav.getBoundingClientRect();
+      const rowBox = current.getBoundingClientRect();
+      if (rowBox.top < navBox.top || rowBox.bottom > navBox.bottom) {
+        docsNav.scrollTop += rowBox.top - navBox.top - navBox.height / 3;
+      }
+    }
+  }
+
+  // The desktop rail collapses to give the article the full shell width, and
+  // the choice survives a reload. The reveal button lives in the article so it
+  // is reachable by keyboard from the top of the page.
+  const collapse = document.querySelector(".docs-nav-collapse");
+  const reveal = document.querySelector(".docs-nav-reveal");
+  if (collapse && reveal) {
+    const key = "millivolt.docsNav";
+    const apply = (collapsed) => {
+      document.documentElement.classList.toggle("nav-collapsed", collapsed);
+      collapse.setAttribute("aria-expanded", String(!collapsed));
+      reveal.setAttribute("aria-expanded", String(!collapsed));
+    };
+    let stored = false;
+    try { stored = window.localStorage.getItem(key) === "collapsed"; } catch { stored = false; }
+    apply(stored);
+    const set = (collapsed) => {
+      apply(collapsed);
+      try { window.localStorage.setItem(key, collapsed ? "collapsed" : "open"); } catch { /* private mode */ }
+      if (collapsed) reveal.focus();
+      else collapse.focus();
+    };
+    collapse.addEventListener("click", () => set(true));
+    reveal.addEventListener("click", () => set(false));
+  }
+
+  const progress = document.querySelector(".read-progress");
+  if (progress) {
+    let queued = false;
+    const paint = () => {
+      queued = false;
+      const doc = document.documentElement;
+      const span = doc.scrollHeight - doc.clientHeight;
+      const ratio = span > 0 ? Math.min(1, Math.max(0, doc.scrollTop / span)) : 0;
+      progress.style.transform = `scaleX(${ratio})`;
+    };
+    const schedule = () => {
+      if (queued) return;
+      queued = true;
+      window.requestAnimationFrame(paint);
+    };
+    paint();
+    document.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
   }
 
   // The landing page's console miniature is a real tablist, so a visitor can
@@ -147,12 +213,24 @@
     const observer = new IntersectionObserver((entries) => {
       entries.forEach((entry) => {
         if (!entry.isIntersecting) return;
-        tocLinks.forEach((link) => link.classList.remove("active"));
+        tocLinks.forEach((link) => {
+          link.classList.remove("active");
+          link.removeAttribute("aria-current");
+        });
         const link = byId.get(entry.target.id);
-        if (link) link.classList.add("active");
+        if (link) {
+          link.classList.add("active");
+          link.setAttribute("aria-current", "location");
+        }
       });
     }, { rootMargin: "-100px 0px -70% 0px", threshold: 0 });
     headings.forEach((heading) => observer.observe(heading));
+    // Before any scroll, name where the reader is: the first section, unless a
+    // fragment already points at one.
+    const initial = tocLinks.find((link) => "#" + link.getAttribute("href").slice(1) === window.location.hash)
+      || tocLinks[0];
+    initial.classList.add("active");
+    initial.setAttribute("aria-current", "location");
   }
 
   const dialog = document.getElementById("search-dialog");
@@ -181,17 +259,40 @@
     return indexPromise;
   };
 
-  const resultFor = (entry, term) => {
+  // Every indexed document is either a page (its lede and title) or a section
+  // (one h2 and its text). Flattening here keeps the ranking in one place and
+  // lets a result link straight to the section that matched.
+  const documents = () => {
+    const docs = [];
+    for (const entry of index) {
+      docs.push({
+        title: entry.title,
+        url: entry.url,
+        context: "Page",
+        body: [entry.description, entry.text, (entry.headings || []).map((h) => h.text).join(" ")]
+          .join(" "),
+      });
+      for (const section of entry.sections || []) {
+        docs.push({
+          title: section.heading,
+          url: entry.url + "#" + section.id,
+          context: section.context ? entry.title + " / " + section.context : entry.title,
+          body: section.text,
+        });
+      }
+    }
+    return docs;
+  };
+
+  const resultFor = (doc) => {
     const item = document.createElement("li");
     const link = document.createElement("a");
-    link.href = root + entry.url;
+    link.href = root + doc.url;
     const title = document.createElement("strong");
-    title.textContent = entry.title;
+    title.textContent = doc.title;
     link.appendChild(title);
-    const heading = (entry.headings || []).find((item) => item.text.toLowerCase().includes(term));
-    if (heading && heading.id) link.href = root + entry.url + "#" + heading.id;
     const detail = document.createElement("span");
-    detail.textContent = heading ? heading.text : entry.description;
+    detail.textContent = doc.context;
     link.appendChild(detail);
     item.appendChild(link);
     return item;
@@ -215,19 +316,21 @@
     }
     const terms = term.split(/\s+/).filter(Boolean);
     const matches = [];
-    for (const entry of index) {
-      const headings = (entry.headings || []).map((item) => item.text).join(" ");
-      const haystack = [entry.title, entry.description, headings, entry.text].join(" ").toLowerCase();
+    for (const doc of documents()) {
+      const haystack = doc.body.toLowerCase();
       if (!terms.every((part) => haystack.includes(part))) continue;
-      let score = 0;
-      if (entry.title.toLowerCase().includes(term)) score += 8;
-      if (headings.toLowerCase().includes(term)) score += 4;
-      if (entry.description.toLowerCase().includes(term)) score += 2;
-      matches.push({ entry, score });
+      const title = doc.title.toLowerCase();
+      let score = 1;
+      if (title.includes(term)) score += 8;
+      if (title.startsWith(term)) score += 4;
+      if (doc.context.toLowerCase().includes(term)) score += 2;
+      matches.push({ doc, score, title });
     }
-    matches.sort((a, b) => b.score - a.score || a.entry.title.localeCompare(b.entry.title));
-    const shown = matches.slice(0, 12);
-    shown.forEach(({ entry }) => results.appendChild(resultFor(entry, term)));
+    matches.sort((a, b) => b.score - a.score ||
+      (a.doc.context === "Page" ? -1 : b.doc.context === "Page" ? 1 : 0) ||
+      a.doc.title.localeCompare(b.doc.title));
+    const shown = matches.slice(0, 20);
+    shown.forEach(({ doc }) => results.appendChild(resultFor(doc)));
     empty.hidden = matches.length > 0;
     if (!matches.length) empty.textContent = "No matching page. Try a shorter term or browse the docs.";
     live.textContent = !matches.length
@@ -266,6 +369,13 @@
     input.addEventListener("input", () => {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => search(input.value), 90);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" || !results) return;
+      const first = results.querySelector("a");
+      if (!first) return;
+      event.preventDefault();
+      first.focus();
     });
   }
 
