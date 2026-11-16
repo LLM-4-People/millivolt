@@ -17,7 +17,6 @@ import json
 import os
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import textwrap
@@ -34,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from scripts import site_llm
+from scripts.site_media import SITE_IMAGE_EXCLUDES, image_size
 SITE_SRC = ROOT / "site-src"
 TEMPLATES = SITE_SRC / "templates"
 # The published site's canonical origin. The Pages workflow passes the live base
@@ -67,15 +67,6 @@ BRAND_ASSETS = {
 # embeds. The build publishes exactly the faces the stylesheet requests, so the
 # two surfaces cannot ship different fonts and a typo cannot 404 silently.
 FONT_URL = re.compile(r'url\("(fonts/[^"]+)"\)')
-# README-only artwork stays in the repository for GitHub's renderer; no
-# generated site page references it.
-SITE_IMAGE_EXCLUDES = frozenset({
-    "brand/readme-cover-dark.png",
-    "brand/readme-cover-light.png",
-    "brand/readme-spec.svg",
-    "brand/readme-spec-mobile.svg",
-})
-
 ROOT_PAGE_MAP = {
     "README.md": "index.html",
     "CONTRIBUTING.md": "contributing.html",
@@ -395,48 +386,6 @@ def previous_next(current_output: str) -> tuple[tuple[str, str] | None, tuple[st
             following = (pages[index + 1][0], pages[index + 1][1]) if index + 1 < len(pages) else None
             return previous, following
     return None, None
-
-
-def image_size(path: Path) -> tuple[int, int] | None:
-    """Read PNG, WebP or SVG dimensions without requiring an image library."""
-    try:
-        if path.suffix.lower() == ".png":
-            data = path.read_bytes()[:24]
-            if data[:8] != b"\x89PNG\r\n\x1a\n":
-                return None
-            width, height = struct.unpack(">II", data[16:24])
-            return width, height
-        if path.suffix.lower() == ".webp":
-            data = path.read_bytes()[:40]
-            if data[:4] != b"RIFF" or data[8:12] != b"WEBP":
-                return None
-            chunk = data[12:16]
-            if chunk == b"VP8X":
-                width = 1 + int.from_bytes(data[24:27], "little")
-                height = 1 + int.from_bytes(data[27:30], "little")
-                return width, height
-            if chunk == b"VP8 ":
-                start = data.find(b"\x9d\x01\x2a", 20)
-                if start < 0 or start + 7 > len(data):
-                    return None
-                width = int.from_bytes(data[start + 3:start + 5], "little") & 0x3fff
-                height = int.from_bytes(data[start + 5:start + 7], "little") & 0x3fff
-                return width, height
-            if chunk == b"VP8L":
-                if len(data) < 25 or data[20] != 0x2f:
-                    return None
-                bits = int.from_bytes(data[21:25], "little")
-                return 1 + (bits & 0x3fff), 1 + ((bits >> 14) & 0x3fff)
-            return None
-        if path.suffix.lower() == ".svg":
-            head = path.read_text(encoding="utf-8", errors="replace")[:1000]
-            width = re.search(r'\bwidth="(\d+)"', head)
-            height = re.search(r'\bheight="(\d+)"', head)
-            if width and height:
-                return int(width.group(1)), int(height.group(1))
-    except (OSError, ValueError, struct.error):
-        return None
-    return None
 
 
 def site_page_for(source: Path) -> str | None:
