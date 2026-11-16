@@ -19,7 +19,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from scripts.brand import compose, facts, spec
+from scripts.brand import facts, spec
 from scripts.site_media import image_size
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -85,12 +85,16 @@ def build_social() -> None:
 
 
 def build_covers() -> None:
+    from scripts.brand import compose
+
     for theme, target in COVERS.items():
         compose.render(
             f"cover-{theme}", target, compose.cover(theme, 1600, 640), 1600, 640)
 
 
 def build_og() -> None:
+    from scripts.brand import compose
+
     compose.render("og", OG, compose.og_card(), 1200, 630)
 
 
