@@ -24,7 +24,6 @@ const THEME_REGISTRY = {
   ],
   defaults: { theme: 'instrument', mode: 'black' },
 };
-window.MILLIVOLT_THEME_REGISTRY = THEME_REGISTRY;
 try {
   var key = document.querySelector('meta[name="theme-storage-key"]');
   var raw = key ? localStorage.getItem(key.content) : '';
