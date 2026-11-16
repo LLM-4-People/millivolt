@@ -156,6 +156,9 @@ PACKAGE_SELECTORS: dict[str, tuple[str, ...]] = {
         "TestZstdStream*",
         "TestReadCapped*",
     ),
+    # Load decodes the embedded index once behind sync.Once; every test reads
+    # through that shared holder, so the whole small package races.
+    f"{MODULE}/internal/docs": ("Test*",),
     # The in-process and live transports dispatch tool calls through the MCP
     # server and its mutex. Schema and documentation tests are plain.
     f"{MODULE}/internal/mcp": (
