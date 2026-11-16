@@ -7,16 +7,16 @@
       "width": 1600,
       "height": 640,
       "builder": "cover",
-      "bytes": 568121,
-      "sha256": "c5b2a1470534449aecb8e7396edf874560f698b98e853ddfe233cd9cb89b3943"
+      "bytes": 568113,
+      "sha256": "728fe9b2b60918861b273c692e2912d2c0cf6bf81916ccd77f9cd0cb6772c6db"
     },
     {
       "path": "docs/images/brand/readme-cover-light.png",
       "width": 1600,
       "height": 640,
       "builder": "cover",
-      "bytes": 744415,
-      "sha256": "95836b1ce5948ce5fbb5e746c56af572d0362a0c3c63a912ce0c1cc75ba81f40"
+      "bytes": 744407,
+      "sha256": "323f31167280ee2c0a39701989248d5f0b2b3682555b5fcd785839142b727ba7"
     },
     {
       "path": "docs/images/brand/readme-spec.svg",
@@ -47,8 +47,8 @@
       "width": 1280,
       "height": 640,
       "builder": "social",
-      "bytes": 422386,
-      "sha256": "29a45a9d18e7a498793ec9d6af3be6db4945fb9c947ce40d045d67d8b51f8333"
+      "bytes": 422393,
+      "sha256": "f3a52fe944a1a6377d8a102aed3381287b5fe4cafe48f9c7d062722c2ded7d67"
     }
   ]
 }
