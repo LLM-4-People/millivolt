@@ -17,12 +17,20 @@ a benchmark or a capacity measurement. Published measurements live in
 
 **See every AI request. Keep your own routing.** millivolt is a patch bay for
 model traffic. OpenAI Chat Completions, OpenAI Responses and Anthropic Messages
-clients plug in on one side; a chat request can target the Cursor agent bridge,
-and any other HTTP client can use the same relay path with routing headers. The
-upstream you choose answers on the other. It
-can translate when the two ends disagree, pass the request through untouched,
-and measure the crossing: timing, tokens, cost, retries, outcome. Body capture
+clients plug in on one side. A chat request can target the Cursor agent bridge,
+and any other HTTP client can use the same relay path with routing headers.
+
+The upstream you choose answers on the other side. millivolt translates when
+the two ends disagree, passes the request through untouched when they do not,
+and measures the crossing: timing, tokens, cost, retries, outcome. Body capture
 only when you ask.
+
+- **Route.** One endpoint for three client formats, four upstream formats and
+  the Cursor bridge. Your base URL, your key, your path.
+- **Observe.** Live rows, durable SQLite history, scoped timelines, and a
+  drawer with timing, tokens, cost and retry attempts.
+- **Control.** Pause, throttle, capture, export and storm protection from one
+  operator console. The same plane is available as 25 MCP tools.
 
 **millivolt stays a relay, not a platform.** No separate provider registry, no
 API-key vault, no user accounts. One Go binary. One dashboard. One operator or
@@ -32,6 +40,10 @@ a small team.
 
 [Quickstart](#quickstart) · [Documentation](docs/README.md) · [Docs site](https://millivolt.llm4people.dev/) ·
 [Dashboard guide](docs/dashboard.md) · [Support](SUPPORT.md) · [Security](SECURITY.md)
+
+<sub>Docs for LLMs: [llms.txt](https://millivolt.llm4people.dev/llms.txt) ·
+[JSON index](https://millivolt.llm4people.dev/docs.json) ·
+[MCP server](docs/mcp.md)</sub>
 
 <sub>Pre-1.0 · Linux · MIT · single operator or small team. The 0.x series can change configuration and API details between releases.</sub>
 

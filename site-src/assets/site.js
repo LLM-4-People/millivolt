@@ -33,6 +33,55 @@
     wrapper.appendChild(table);
   });
 
+  // The Markdown twin is linked in the document head and beside the page
+  // title. Copy page fetches that same file, so the clipboard carries the
+  // source rather than the rendered HTML.
+  const copyDoc = document.querySelector("[data-copy-doc]");
+  const markdownLink = document.querySelector('link[rel="alternate"][type="text/markdown"]');
+  if (copyDoc && markdownLink) {
+    const status = document.querySelector("[data-copy-status]");
+    const write = async (text) => {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return;
+        } catch (error) {
+          // A denied permission or an expired activation falls through to the
+          // selection copy below rather than leaving the button stuck.
+        }
+      }
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      area.remove();
+      if (!ok) throw new Error("copy unavailable");
+    };
+    copyDoc.addEventListener("click", async () => {
+      const label = copyDoc.textContent;
+      try {
+        const response = await fetch(markdownLink.href, { headers: { Accept: "text/markdown" } });
+        if (!response.ok) throw new Error(String(response.status));
+        await write(await response.text());
+        copyDoc.textContent = "Copied";
+        copyDoc.dataset.copied = "1";
+        if (status) status.textContent = "Page Markdown copied to the clipboard.";
+      } catch (error) {
+        copyDoc.textContent = "Copy failed";
+        if (status) status.textContent = "Could not copy the page Markdown.";
+      }
+      window.setTimeout(() => {
+        copyDoc.textContent = label;
+        delete copyDoc.dataset.copied;
+        if (status) status.textContent = "";
+      }, 2200);
+    });
+  }
+
   const docsNav = document.querySelector(".docs-nav");
   const toc = document.querySelector(".toc");
   if (docsNav || toc) {

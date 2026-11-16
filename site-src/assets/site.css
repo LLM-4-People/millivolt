@@ -620,6 +620,15 @@ html.nav-collapsed .docs-nav-reveal { display: inline-flex; }
   margin: 0 0 24px; max-width: 24ch;
   font: 400 2.4rem/1.1 var(--display); letter-spacing: -.02em; text-wrap: balance;
 }
+.doc-formats { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; margin: -10px 0 22px; }
+.doc-format {
+  min-height: 32px; display: inline-flex; align-items: center; justify-content: center;
+  padding: 0 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel2); color: var(--muted-strong); text-decoration: none;
+  font: 600 10px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; cursor: pointer;
+}
+.doc-format:hover { color: var(--text); border-color: var(--border-control); }
+.doc-format[data-copied="1"] { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
 .doc-content h2 {
   margin: 2.4em 0 12px; padding-top: 1.1em; border-top: 1px solid var(--border); max-width: 70ch;
   font: 650 1.5rem/1.25 var(--sans); letter-spacing: -.022em;

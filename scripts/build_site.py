@@ -882,6 +882,18 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
     edit_url = GITHUB_EDIT + source_key
     source_url = GITHUB_BLOB + source_key
     group = nav_group_of(page.output)
+    markdown_href = Path(site_llm.markdown_name(page.output)).name
+    # The twin is a real page format, not only a crawler affordance: expose it
+    # beside the title so a reader can open the source or copy the whole page.
+    formats = (
+        '<div class="doc-formats">'
+        f'<a class="doc-format" href="{attr_escape(markdown_href)}" target="_blank" '
+        'rel="noopener noreferrer" type="text/markdown">Markdown</a>'
+        '<button class="doc-format" type="button" data-copy-doc>Copy page</button>'
+        '<span class="sr-only" role="status" data-copy-status></span>'
+        "</div>"
+    )
+    content = content.replace("</h1>", "</h1>" + formats, 1)
     crumbs = "" if page.output == "docs/index.html" else (
         '<nav class="crumbs" aria-label="Breadcrumb">'
         f'<a href="{attr_escape(page_relative("docs/index.html", page.output))}">Docs</a>'
@@ -948,7 +960,7 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
         # A root-relative path would break a subpath deployment, and the full
         # output path would resolve to docs/docs/<page>.md.
         head_extra='<link rel="alternate" type="text/markdown" href="'
-        + attr_escape(Path(site_llm.markdown_name(page.output)).name) + '">',
+        + attr_escape(markdown_href) + '">',
     )
     return render_base(values), {
         "title": title,

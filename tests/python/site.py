@@ -336,8 +336,13 @@ def docs_manifest_errors(site: Path, base_url: str) -> list[str]:
         else:
             href = Path(record["markdown"]).name
             link = f'<link rel="alternate" type="text/markdown" href="{href}">'
-            if link not in page.read_text(encoding="utf-8"):
+            page_text = page.read_text(encoding="utf-8")
+            if link not in page_text:
                 errors.append(f"{record['output']} does not advertise its Markdown twin")
+            for needle in ('class="doc-formats"', 'data-copy-doc',
+                           f'<a class="doc-format" href="{href}"'):
+                if needle not in page_text:
+                    errors.append(f"{record['output']} is missing the page-format control: {needle}")
     llms = site / "llms.txt"
     if not llms.is_file():
         errors.append("llms.txt was not generated")
