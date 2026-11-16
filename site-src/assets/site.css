@@ -543,7 +543,7 @@ html.nav-collapsed .docs-nav-reveal { display: inline-flex; }
 .doc-content strong { color: var(--text); }
 .doc-content blockquote { margin: 24px 0; padding: 0 0 0 16px; border-left: 2px solid var(--border-control); color: var(--muted-strong); }
 .doc-content blockquote p:last-child { margin-bottom: 0; }
-.doc-content code { font-family: var(--mono); font-size: .86em; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+.doc-content code { font-family: var(--mono); font-size: .86em; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; overflow-wrap: break-word; }
 .doc-content pre { position: relative; margin: 22px 0; padding: 16px; overflow-x: auto; background: var(--rail); border: 1px solid var(--border2); border-radius: 10px; scrollbar-color: var(--border-control) transparent; }
 .doc-content pre code { display: block; padding: 0; border: 0; background: transparent; color: var(--text); font-size: 13px; line-height: 1.65; }
 .doc-content pre .copy-btn { position: absolute; top: 8px; right: 8px; }
