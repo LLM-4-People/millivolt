@@ -453,6 +453,17 @@ def release_scope_errors() -> list[str]:
                              "MERGED_RELEASE": ""}, 0, "false")
         git(repo, "reset", "--hard", base)
         git(repo, "clean", "-fdq")
+
+        (repo / "internal/docs").mkdir(parents=True)
+        (repo / "internal/docs/docs.json").write_text("{}\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "docs index")
+        scenario("docs-index", {"EVENT": "push", "REF_TYPE": "branch", "BEFORE": base,
+                                "MERGED_RELEASE": "",
+                                "RELEASE_EXEMPT_PATTERNS": "internal/docs/docs.json"},
+                 0, "false")
+        git(repo, "reset", "--hard", base)
+        git(repo, "clean", "-fdq")
     return errors
 
 
