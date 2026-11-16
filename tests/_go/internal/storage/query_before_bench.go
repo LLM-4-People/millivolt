@@ -122,14 +122,15 @@ func BenchmarkQueryBeforeEquality(b *testing.B) {
 		{"status_cursor", cursor, LogStatus, "500", benchQueryBeforeRows / queryBeforeRareStatusEvery / 2},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
-			// The fixture shape is published beside the result. The parent of a
-			// sub-benchmark group has no result line, so each row reports it and
-			// the page refuses rows that disagree.
-			b.ReportMetric(benchQueryBeforeRows, "fixture-rows")
-			b.ReportMetric(benchQueryBeforePage, "fixture-page")
 			filter := &LogFilter{All: []LogPredicate{{Field: tc.field, Value: tc.value}}}
 			b.ReportAllocs()
 			b.ResetTimer()
+			// The fixture shape is published beside the result. The parent of a
+			// sub-benchmark group has no result line, so each row reports it and
+			// the page refuses rows that disagree. ResetTimer clears reported
+			// metrics, so these must follow it.
+			b.ReportMetric(benchQueryBeforeRows, "fixture-rows")
+			b.ReportMetric(benchQueryBeforePage, "fixture-page")
 			for range b.N {
 				records, err := s.QueryBefore(b.Context(), tc.before, filter, benchQueryBeforePage)
 				if err != nil {
