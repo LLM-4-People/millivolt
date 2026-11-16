@@ -15,6 +15,20 @@ The notice was checked against the
 [upstream versioned license](https://github.com/leeoniya/uPlot/blob/1.6.32/LICENSE).
 Update the version, assets and notice together when changing this dependency.
 
+## Embedded typefaces
+
+The dashboard and the documentation site ship four WOFF2 faces in
+`internal/web/static/fonts`: Instrument Sans (roman and italic), Instrument
+Serif, and JetBrains Mono. They are Copyright 2022 The Instrument Sans Project
+Authors, Copyright 2022 The Instrument Serif Project Authors, and Copyright 2020
+The JetBrains Mono Project Authors. All three families are licensed under the
+[SIL Open Font License 1.1](internal/web/static/fonts/LICENSE); the complete
+notice and copyright lines are kept beside the files and included in the
+embedded filesystem. The dashboard, the docs site and the generated brand
+plates all consume these exact faces, so no third-party font request is made at
+runtime. Preserve the notice when redistributing the fonts or a built
+dashboard.
+
 ## Module and development dependencies
 
 [go.mod](go.mod) and [go.sum](go.sum) identify Go dependencies; their upstream

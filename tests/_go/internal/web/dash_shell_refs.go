@@ -167,6 +167,11 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 		if _, brand := brandByURL["/"+rel]; brand {
 			return nil
 		}
+		if strings.HasPrefix(rel, "fonts/") {
+			// Fonts are requested by dashboard.css @font-face rules, not by
+			// index.html; fonts.go owns that reference check.
+			return nil
+		}
 		if settingsModule[rel] {
 			return nil // lazy: injected by the Settings trigger, never first paint
 		}

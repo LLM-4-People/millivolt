@@ -60,6 +60,10 @@ BRAND_ASSETS = {
     "favicon.ico": BRAND_SOURCE / "favicon.ico",
     "apple-touch-icon.png": BRAND_SOURCE / "apple-touch-icon.png",
 }
+# A @font-face URL in the site stylesheet names a file the dashboard already
+# embeds. The build publishes exactly the faces the stylesheet requests, so the
+# two surfaces cannot ship different fonts and a typo cannot 404 silently.
+FONT_URL = re.compile(r'url\("(fonts/[^"]+)"\)')
 # README-only artwork stays in the repository for GitHub's renderer; no
 # generated site page references it.
 SITE_IMAGE_EXCLUDES = frozenset({
@@ -1079,6 +1083,12 @@ def retained_shell_assets() -> dict[str, list[bytes]]:
     return retained
 
 
+def site_fonts() -> list[str]:
+    """Font files the site stylesheet asks for, relative to the assets root."""
+    stylesheet = (SITE_SRC / "assets" / "site.css").read_text(encoding="utf-8")
+    return sorted(set(FONT_URL.findall(stylesheet)))
+
+
 def copy_assets(site_root: Path, tokens: dict[str, str]) -> dict[str, str]:
     assets = site_root / "assets"
     assets.mkdir(parents=True, exist_ok=True)
@@ -1088,6 +1098,13 @@ def copy_assets(site_root: Path, tokens: dict[str, str]) -> dict[str, str]:
         if not source.is_file():
             raise BuildError(f"missing canonical brand asset: {source.relative_to(ROOT)}")
         shutil.copyfile(source, assets / name)
+    for relative in site_fonts():
+        source = BRAND_SOURCE / relative
+        if not source.is_file():
+            raise BuildError(f"missing canonical font: {source.relative_to(ROOT)}")
+        target = assets / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
     if DOC_IMAGES.is_dir():
         for source in sorted(DOC_IMAGES.rglob("*")):
             if not source.is_file():

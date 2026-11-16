@@ -101,8 +101,9 @@ var brandByURL = map[string]struct {
 // under DashPrefix is rejected (deny by default). FileServer is not used:
 // it serves POST and directory listings (net/http historical behavior).
 var dashTypes = map[string]string{
-	".css": "text/css; charset=utf-8",
-	".js":  "text/javascript; charset=utf-8",
+	".css":   "text/css; charset=utf-8",
+	".js":    "text/javascript; charset=utf-8",
+	".woff2": "font/woff2",
 }
 
 // staticAsset is a precomputed immutable asset (embeds are immutable per
@@ -141,7 +142,7 @@ func dashboardContentVersion() string {
 // making clients decompress it again.
 func compressibleAsset(p string) bool {
 	switch path.Ext(p) {
-	case ".png", ".ico":
+	case ".png", ".ico", ".woff2":
 		return false
 	}
 	return true

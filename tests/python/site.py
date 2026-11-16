@@ -20,7 +20,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from scripts.build_site import (DEFAULT_BASE_URL, README_ANCHORS, build_site, image_size,
-                                markdown_engine, performance_headline, render_fragment, toc_html)
+                                markdown_engine, performance_headline, render_fragment,
+                                site_fonts, toc_html)
 from scripts.perf_docs import check as performance_drift_errors
 from tests.repository_check import markdown_anchors
 from tests.support import (PALETTE_OWNER, ROOT, SITE_STYLESHEET, root_custom_properties,
@@ -132,7 +133,11 @@ def asset_reference_errors(site: Path, texts: list[str]) -> list[str]:
         rel = asset.relative_to(site).as_posix()
         if rel in RUNTIME_ASSET_ALLOWLIST or SHELL_GENERATION.fullmatch(rel):
             continue
-        if rel not in corpus:
+        # A stylesheet inside assets/ names a sibling by its path under
+        # assets/ (for example url("fonts/instrument-sans.woff2")), while
+        # HTML names the published path. Either spelling is a real consumer.
+        local = rel.removeprefix("assets/")
+        if rel not in corpus and local not in corpus:
             errors.append(f"published asset {rel} is not referenced by generated HTML, "
                           "a template, JavaScript, or CSS")
     return errors
@@ -709,6 +714,30 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
             errors.append(f"missing generated brand asset: {built_name}")
         elif built.read_bytes() != source.read_bytes():
             errors.append(f"generated {built_name} is not byte-identical to {source_name}")
+
+    for relative in site_fonts():
+        built = site / "assets" / relative
+        source = ROOT / "internal/web/static" / relative
+        if not source.is_file():
+            errors.append(f"missing canonical font: internal/web/static/{relative}")
+        elif not built.is_file():
+            errors.append(f"missing published font: assets/{relative}")
+        elif built.read_bytes()[:4] != b"wOF2":
+            errors.append(f"published font assets/{relative} is not a WOFF2 file")
+        elif built.read_bytes() != source.read_bytes():
+            errors.append(f"published font assets/{relative} is not byte-identical to its source")
+    if not site_fonts():
+        errors.append("site.css requests no self-hosted font")
+    tokens_css = (site / "assets" / referenced_shell(site, "tokens", "css")).read_text(encoding="utf-8")
+    for family in ('"Instrument Sans"', '"JetBrains Mono"'):
+        if family not in tokens_css:
+            errors.append(f"tokens.css does not carry the {family} family from dashboard.css")
+    site_css = (site / "assets" / referenced_shell(site, "site", "css")).read_text(encoding="utf-8")
+    for external in ("fonts.googleapis", "fonts.gstatic", "url(http"):
+        if external in site_css:
+            errors.append(f"site.css makes an external font or asset request: {external}")
+    if "var(--display)" not in site_css:
+        errors.append("site.css does not use the display face for titles")
 
     for name in STALE_SOURCE_ASSETS:
         if (ROOT / name).exists():

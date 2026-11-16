@@ -765,10 +765,11 @@ PALETTE_MIRRORS = ('internal/web/static/favicon.svg', 'internal/web/static/index
                    'internal/web/static/manifest.webmanifest', 'internal/web/static/sw.js',
                    'cmd/proxy/operator.go')
 # The static site only owns values with no dashboard equivalent: a stronger
-# control edge, a second-level text tone, elevation, panel radius and content
-# width. Everything else comes from tokens.css.
+# control edge, a second-level text tone, elevation, panel radius, content width
+# and the editorial display face used by marketing and documentation titles.
+# Everything else, including --sans and --mono, comes from tokens.css.
 SITE_TOKENS = frozenset({
-    '--border-control', '--muted-strong', '--shadow', '--radius', '--max',
+    '--border-control', '--muted-strong', '--shadow', '--radius', '--max', '--display',
 })
 _HEX_LITERAL = re.compile(r'#[0-9a-fA-F]{3,8}(?![0-9a-fA-F])')
 
