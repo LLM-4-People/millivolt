@@ -25,6 +25,7 @@ covers change and verification rules; [protocol](protocol.md) and the
 | [cmd/mvctl](../cmd/mvctl/main.go) | the human operator client: command dispatch, per-command flags, human and JSON rendering, and destructive-action guards. It reuses `internal/mcp` for the operator HTTP client, `internal/config` for setting kinds and bands, and `internal/backup` for archive and query grammar. |
 | [internal/mcp](../internal/mcp) | The MCP tool server for the operator plane: one HTTP client owner (credential, request building, error extraction), one scope-filter owner, one tool registry served by the proxy's streamable HTTP `/mcp` endpoint, the destructive-call guards, and the streamable HTTP handler the proxy mounts at `/mcp`. It owns no analytical projection of its own; the three docs tools read `internal/docs` locally. |
 | [internal/docs](../internal/docs/docs.go) | Embedded generated documentation index: strict decode of `docs.json`, ordered list, section read and ranked search for `docs_list`, `docs_search` and `docs_read`. The checked-in file is produced by `scripts/build_site.py --write-manifest`, and a source-hash test rejects a stale copy. |
+| [scripts/gallery](../scripts/gallery) | The documentation capture registry, scene composition, capture manifest and generated gallery page. `tests/docs_capture.py` executes the scenes against a private redacted instance; `scripts/site_plates.py` upgrades registered images into the published plate chrome. |
 
 ## Logging
 
@@ -992,3 +993,25 @@ Operators use shared mutation/revision gates, lossless Settings collection,
 stable event-path outside-click handling and a focus/inert dialog lifecycle.
 CSS owns responsive breakpoints. Preserve accessibility, saved state and cheap
 boot; jsdom tests do not replace real desktop/mobile canvas checks.
+
+## Documentation captures
+
+`scripts/gallery/data.py` is the one registry for every published application
+capture: path, title, description, scene, viewport and setup. `tests/docs_capture.py`
+owns the scene strategies, and `scripts/gallery/compose.py` composes the two
+surfaces of each plate. A new view is one registry entry plus a scene, never a
+second list in the capture harness or the site build.
+
+The capture writes `docs/images/capture.json`: per-plate bytes, dimensions and
+SHA-256, the verified record count and a digest of `internal/web/static`. The
+digest is the freshness gate; a dashboard change fails `tests/python/gallery.py`
+until the plates are recaptured. The same run regenerates `docs/gallery.md`.
+
+`scripts/site_plates.py` is the one upgrade from a registered image to a plate.
+It serves both a plain Markdown image and the generated page's semantic figure,
+so the published gallery, the prose guide and the Markdown source agree about
+number, station, route and the Black/Clear split legend.
+
+`scripts/gallery/__init__.py` loads and validates the registry at import, so a
+missing alt, duplicate path, unknown scene or bad viewport fails before a browser
+starts. CI runs the same module through `tests/python/gallery.py`.

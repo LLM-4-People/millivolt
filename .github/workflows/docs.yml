@@ -85,6 +85,8 @@ jobs:
         run: python3 -B -O -m tests.python.docs_readability
       - name: Check generated brand assets
         run: python3 -m scripts.brand.build --check
+      - name: Check capture gallery, manifest and freshness
+        run: python3 -B -O -m tests.python.gallery
       - name: Build and validate the static site
         run: python3 -B -O -m tests.python.site
       - name: Check workflow and automation policy

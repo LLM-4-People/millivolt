@@ -544,27 +544,43 @@ removed, and recorded timing, token and cost values are retained. The raw online
 snapshot is temporary and never served. Treat even the derived database as
 sensitive; retained usage and timestamps can reveal activity patterns.
 
+The view list is a registry, not a capture script. `scripts/gallery/data.py`
+declares every plate: its published path, title, description, scene, named
+viewport and setup. `tests/docs_capture.py` owns the scene strategies (page,
+element, scoped explorer, absorbed retries, drawer, console, settings, chart,
+window picker, theme tray). `scripts/gallery/compose.py` turns each scene into
+one plate: the same document is photographed on Instrument Black and Instrument
+Clear, then split along the diagonal from bottom-left to top-right. `applyState`
+is the one theme mutation path, so an open drawer, a selected filter or an open
+tray survives the second half.
+
+The run writes `docs/images/capture.json`, which records every plate's bytes,
+dimensions and SHA-256, the verified record count, and a digest of
+`internal/web/static`. It also writes the generated `docs/gallery.md`. Commit
+both with the images. `tests/python/gallery.py` fails when a registered plate
+has no capture, a capture is not registered, a byte or dimension drifts, the
+digest no longer matches the dashboard source, or the gallery page is stale.
+A UI change therefore requires a recapture in the same branch, not a later one.
+
 Capture last. The gallery is a picture of the shipped dashboard, so a markup,
-CSS or layout change dates every image that shows the affected surface. Recapture
-in the same branch once the last layout edit is in, never before it, and
-recapture again if a later edit moves what an image shows. A recapture diff is
-the review set: inspect each changed file, and expect geometry changes (for
-example the request table's 8px cell padding and retry sub-rows) to come with
-them.
+CSS or layout change dates every image that shows the affected surface.
+Recapture in the same branch once the last layout edit is in, never before it,
+and recapture again if a later edit moves what an image shows. A recapture diff
+is the review set: inspect every changed plate, and expect geometry changes
+(for example the request table's 8px cell padding and retry sub-rows) to come
+with them.
 
 The capture mode revalidates every row and its provenance, plus exact public
 configuration bytes, before and after browser capture. It permits only read-only
 same-origin requests: no inference, POST, purge or Settings save.
 
 Images are staged before publication, and the exit trap stops the private
-process. Review every gallery image before committing. SSE is deliberately
-disabled, so the images' offline indicator describes a static capture session,
-not current service health.
-Captures keep the same category folders under `docs/images/`: `overview`,
-`charts`, `explorer`, `requests`, `console` and `settings`. Update the existing
-capture owner and Markdown links together when adding a view; the site check
-fails on any file under `docs/images/` without a Markdown consumer, so a
-recapture that drops a view cannot leave an orphan behind.
+process. Review every plate before committing. SSE is deliberately disabled, so
+the images' offline indicator describes a static capture session, not current
+service health. Captures keep the same category folders under `docs/images/`:
+`overview`, `charts`, `explorer`, `requests`, `console`, `settings` and `theme`.
+The site fails on any image under `docs/images/` without a Markdown consumer, so
+a recapture that drops a view cannot leave an orphan behind.
 
 The independent `--docs-images` option remains a strict synthetic regression.
 Run it only with `DEV_COPY_DB=0` and direct those two images to a scratch directory,

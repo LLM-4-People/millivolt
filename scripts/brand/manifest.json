@@ -7,16 +7,16 @@
       "width": 1600,
       "height": 640,
       "builder": "cover",
-      "bytes": 548339,
-      "sha256": "8ec9d16386cd280035375e3428e29fcf61b24c57c9839cca75239926b4bc915f"
+      "bytes": 568121,
+      "sha256": "c5b2a1470534449aecb8e7396edf874560f698b98e853ddfe233cd9cb89b3943"
     },
     {
       "path": "docs/images/brand/readme-cover-light.png",
       "width": 1600,
       "height": 640,
       "builder": "cover",
-      "bytes": 726916,
-      "sha256": "aba5eb3657401da79cc13158278c10b8d40aacb3113d19e4ec926c5282aa1416"
+      "bytes": 744415,
+      "sha256": "95836b1ce5948ce5fbb5e746c56af572d0362a0c3c63a912ce0c1cc75ba81f40"
     },
     {
       "path": "docs/images/brand/readme-spec.svg",
@@ -39,16 +39,16 @@
       "width": 1200,
       "height": 630,
       "builder": "og",
-      "bytes": 400739,
-      "sha256": "591d185664fd4b49b5c4bd549f935c559bcf3fb1169f65d4117210cb8c08bbc8"
+      "bytes": 395308,
+      "sha256": "431f2d13ded55acf12ab0ffb8fea552b7952ae842782e211b64fa74c5148afcf"
     },
     {
       "path": ".github/social-preview.png",
       "width": 1280,
       "height": 640,
       "builder": "social",
-      "bytes": 403226,
-      "sha256": "93413883f8a1ab3001e50c6ffa620ba6c3a664499618cfc8627ba3c1b8ffd317"
+      "bytes": 422386,
+      "sha256": "29a45a9d18e7a498793ec9d6af3be6db4945fb9c947ce40d045d67d8b51f8333"
     }
   ]
 }

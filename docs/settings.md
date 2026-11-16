@@ -13,8 +13,9 @@ the dashboard. A `-` under accepted values means the schema declares no bound
 and no closed vocabulary for that key.
 
 Read [configuration](configuration.md) for precedence, the YAML file and the
-settings schema, and [containers](containers.md) for image mounts, restore
-paths and the deployment lifecycle.
+settings schema, [containers](containers.md) for image mounts, restore paths
+and the deployment lifecycle, and the [capture gallery](gallery.md) for the
+rendered sheet on both surfaces.
 
 ## Server
 

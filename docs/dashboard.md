@@ -1,8 +1,8 @@
 # Dashboard guide
 
-The [overview](../README.md#dashboard-overview) shows the complete dashboard.
-Use this guide to follow its charts, explorer, request drawer, operator
-console and Settings without hunting through the interface.
+The plate below is the complete dashboard. Use this guide to follow its
+charts, explorer, request drawer, operator console and Settings without
+hunting through the interface.
 
 These are real application captures from explicitly authorized local history.
 Recorded timing, token and cost values are retained; identifiers are replaced,
@@ -15,6 +15,13 @@ pictures. The capture session blocks external requests and disables live SSE,
 so its **offline** indicator describes a static screenshot session, not
 service health. The images are not latency guarantees, capacity measurements
 or independent bills.
+
+Every capture in this guide and in the [capture gallery](gallery.md) is one
+state photographed on both primary surfaces and split along the diagonal. The
+upper-left half is Instrument Black, the lower-right half is Instrument Clear.
+Data, scroll and any open surface are identical across the cut.
+
+![The millivolt dashboard at 1920 pixels, split diagonally between the Black and Clear surfaces](images/overview/dashboard.png)
 
 ## Error storm banner
 
@@ -57,6 +64,8 @@ the chart: one to three buckets are too few to read a trend, and the totals
 strip still tells the story until a fourth point arrives. A span with no
 stored history says so; a span inside history with no requests says that
 instead.
+
+![Timeframe panel with the stored-coverage rail, the zoom ladder and the calendar presets](images/charts/window.png)
 
 A failed chart request never blanks a good payload: one transient error should
 not hide the history you were reading. The context row states which of the two
@@ -116,8 +125,9 @@ explorer compresses to one gallery row, and the timeline column floors at
 Every tile keeps one fixed size whatever it carries - spark or not, one share
 line or two, and the no-data skeleton swaps in without moving the card - and
 the band sits at its natural height at the top of the card. Only the timeframe
-control applies. This preset has no static capture yet; the gallery capture
-selects the plotted presets only, so no tiles capture exists.
+control applies.
+
+![The overview preset with five summary tiles and their sparklines](images/charts/overview.png)
 
 ### Traffic
 
@@ -223,6 +233,11 @@ storage; see [request metadata](routes.md#request-rows-and-details).
 
 ![Model explorer with pseudonymous model groups and recorded usage metrics](images/explorer/models.png)
 
+![Provider explorer filtered to one provider, with the removable scope chip above the rail and the selected card marked](images/explorer/scoped.png)
+
+The [capture gallery](gallery.md#nine-ways-into-the-traffic) carries all nine
+dimensions. This guide shows the two that move the most.
+
 Conversation ancestry is explicit, not guessed from timing or names. The
 authorized snapshot has no parent declarations, so these screenshots do not
 fabricate an agent tree. See the [client protocol](protocol.md) for
@@ -251,6 +266,8 @@ pills and the actions button abbreviate by design. Its status selector and
 older-history paging operate on the current scope.
 
 ![Request table with recorded statuses, token usage, latency, throughput and cost](images/requests/table.png)
+
+![Request table with one row expanded into its absorbed retry attempts](images/requests/retries.png)
 
 ### Request details
 
@@ -313,6 +330,8 @@ facts. An in-band upstream response that arrived after a committed success is
 disclosed separately rather than presented as a retry. Clicking an absorbed
 attempt, a retry sub-row in the request table or an entry in the drawer's
 retry list opens that attempt's own detail view.
+
+![Request drawer diagnostics group with queue and rate-limit facts and four absorbed attempts](images/requests/diagnostics.png)
 
 These captures deliberately omit request content and Debug payloads; ordinary
 opt-in captures remain sensitive.
@@ -552,12 +571,15 @@ duplicating them.
 
 Static captures of the operator console publish to `docs/images/console/` from
 the same authorized history workflow as the rest of the gallery. The retired
-menu screenshots were removed with the menus they pictured, and the overview
-capture was retired with the traffic band it pictured; git history keeps them.
-The remaining captures are the neutral starting state of the sections they
-cover: no draft is committed, no rule is selected and no filter is armed.
+menu screenshots were removed with the menus they pictured. Every section is
+recorded in its neutral starting state: no draft is committed, no rule is
+selected and no filter is armed.
+
+![Overview section with no policy in force](images/console/overview.png)
 
 ![Limits section with no policy set](images/console/limits.png)
+
+![Limit composer with its scope chips, budgets, window and live preview](images/console/limits-composer.png)
 
 ![Pause section before any hold exists](images/console/pause.png)
 
@@ -572,6 +594,8 @@ failure behavior, [containers and data](containers.md) for restart, and
 [operations](operations.md) for persistence, before using these controls.
 
 ## Theme
+
+![The theme tray split between the Black and Clear surfaces, with the two-pane comparator and all eight palettes](images/theme/tray.png)
 
 Theme has two surfaces and eight palettes. Each palette owns a complete
 surface family (base, panels, rail and borders), its accent family, and its
@@ -651,7 +675,8 @@ is a live region with a distinct error tone.
 Structured fields replace their whole map/list value rather than recursively
 merging nested entries. The generated [configuration
 example](../proxy.example.yaml) documents every field, including categories
-not pictured here.
+not pictured here. The [capture gallery](gallery.md#the-patch-panel) records
+five categories, including the backup and restore sheet.
 
 ### Dashboard cadence
 

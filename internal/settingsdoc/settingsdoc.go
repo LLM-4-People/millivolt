@@ -72,8 +72,9 @@ func render(defaults map[string]string, flags []Flag) ([]byte, error) {
 	b.WriteString("the dashboard. A `-` under accepted values means the schema declares no bound\n")
 	b.WriteString("and no closed vocabulary for that key.\n\n")
 	b.WriteString("Read [configuration](configuration.md) for precedence, the YAML file and the\n")
-	b.WriteString("settings schema, and [containers](containers.md) for image mounts, restore\n")
-	b.WriteString("paths and the deployment lifecycle.\n\n")
+	b.WriteString("settings schema, [containers](containers.md) for image mounts, restore paths\n")
+	b.WriteString("and the deployment lifecycle, and the [capture gallery](gallery.md) for the\n")
+	b.WriteString("rendered sheet on both surfaces.\n\n")
 
 	byCategory := make(map[string][]config.Field, len(config.Categories()))
 	for _, field := range config.Schema() {

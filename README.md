@@ -154,10 +154,12 @@ retries, SSE keepalives, translation, and overrides can change bytes. See
 **Global totals stay global.** Explorer cards, timelines, and the request log
 share one selected scope. See the [visual guide](docs/dashboard.md) for focused
 captures of tokens, speed and latency, cost, providers, models, conversations,
-and Settings.
+and Settings, or open the [capture gallery](docs/gallery.md) for every surface.
 
-![Screenshot of the millivolt dashboard with global request, token, and cost totals above a scoped request log and timeline](docs/images/overview/dashboard.png)
+![The millivolt dashboard with global request, token, and cost totals above a scoped request log and timeline, split diagonally between the Black and Clear surfaces](docs/images/overview/dashboard.png)
 
+Every capture is one state photographed on both primary surfaces and split
+along the diagonal: Instrument Black upper-left, Instrument Clear lower-right.
 Static capture from an authorized, redacted history snapshot; identifiers are
 replaced. The offline indicator reflects the capture session, not service
 health; see [capture limitations](docs/dashboard.md).

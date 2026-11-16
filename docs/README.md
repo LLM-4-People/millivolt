@@ -9,7 +9,8 @@ that matches what you need to do.
 
 1. [Install and first run](install.md) from Compose or a source checkout.
 2. Send one request on a client protocol and find it in the
-   [dashboard](dashboard.md).
+   [dashboard](dashboard.md); the [capture gallery](gallery.md) shows every
+   surface in both themes.
 3. Read [configuration](configuration.md) before changing the example or a
    setting.
 4. Read [security](../SECURITY.md) before exposing the listener.
@@ -23,6 +24,7 @@ that matches what you need to do.
 | Install and send a first request | [Install and first run](install.md) |
 | Configure a setting, request override or provider alias | [Configuration](configuration.md) |
 | Look up a setting's default or a CLI flag | [Settings reference](settings.md) |
+| See every dashboard surface on both themes | [Capture gallery](gallery.md) |
 | Expose the listener behind TLS or a network boundary | [Reverse proxy](reverse-proxy.md), [security](../SECURITY.md) |
 | Debug a 429 or a 5xx | [Routes and debugging](routes.md#error-storm-protection), [pause and limits](routes.md#pause-and-limits) |
 | Back up or restore | [Settings backup and restore](containers.md#settings-backup-and-restore), [image-only backup](containers.md#image-only-backup-and-restore), [online database backup](operations.md#storage-and-accounting) |
