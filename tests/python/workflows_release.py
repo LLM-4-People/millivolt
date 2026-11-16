@@ -14,6 +14,7 @@ from .workflows_support import (
     logical_command_lines,
     missing_needles,
     named_step,
+    shell_declaration,
     steps,
 )
 
@@ -25,7 +26,7 @@ PUBLISH_GUARD = (
     "(github.event_name == 'pull_request' && github.event.action == 'closed' && "
     "github.event.pull_request.merged == true && github.base_ref == 'main' && "
     "github.event.pull_request.head.repo.full_name == github.repository && "
-    "needs.required.outputs.merged_docs_only != 'true'))"
+    "needs.required.outputs.merged_release == 'true'))"
 )
 PUBLISH_TESTING_GUARD = (
     "github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && "
@@ -43,7 +44,7 @@ PUBLISH_GUARD_NEEDLES = (
     "github.event.pull_request.merged == true",
     "github.base_ref == 'main'",
     "github.event.pull_request.head.repo.full_name == github.repository",
-    "needs.required.outputs.merged_docs_only != 'true'",
+    "needs.required.outputs.merged_release == 'true'",
 )
 PUBLISH_TESTING_GUARD_NEEDLES = (
     "github.event_name == 'push'",
@@ -248,7 +249,14 @@ def release_pipeline_errors() -> list[str]:
     not move the latest-release pointer.
     """
     errors = []
-    cut = step_script("Cut the next version", {"${{ github.ref_type }}": "branch"})
+    cut = step_script("Cut the next version", {
+        "${{ github.ref_type }}": "branch",
+        "${{ steps.scope.outputs.needed }}": "true",
+    })
+    release_free_cut = step_script("Cut the next version", {
+        "${{ github.ref_type }}": "branch",
+        "${{ steps.scope.outputs.needed }}": "false",
+    })
     notes = step_script("Create the GitHub release", {
         "${{ steps.image.outputs.digest }}": "sha256:deadbeef",
         "${{ github.repository }}": "LLM-4-People/millivolt",
@@ -294,6 +302,19 @@ def release_pipeline_errors() -> list[str]:
             git(repo, "tag", "-a", f"v{version}", "-m", f"v{version}")
         shim(repo, release_exists)
         return repo
+
+    # A change with no shipped artifact must exit before creating a tag.
+    repo = repo_with_tag("1.2.3", tag=False, release_exists=False)
+    outputs = repo / "out"
+    result = run(release_free_cut, repo, outputs)
+    fields = dict(line.split("=", 1) for line in outputs.read_text().splitlines() if "=" in line)
+    if result.returncode != 0:
+        errors.append(f"check.yml: a release-free change failed the cut step: {result.stderr.strip()}")
+    elif fields.get("skip") != "true" or fields.get("version"):
+        errors.append(f"check.yml: a release-free change must skip without a version: {fields}")
+    elif subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify",
+                         "refs/tags/v1.2.3"], capture_output=True).returncode == 0:
+        errors.append("check.yml: a release-free change must not create a version tag")
 
     # A failed publish that left a public tag and no release is repaired by a
     # re-run: the tag stays, the version is built again, the release is created.
@@ -361,6 +382,80 @@ def release_pipeline_errors() -> list[str]:
     return errors
 
 
+def release_scope_errors() -> list[str]:
+    """Run the real scope step against event shapes and a scratch history."""
+    script = step_script("Classify release scope", {})
+    errors = []
+    with tempfile.TemporaryDirectory(prefix="millivolt-release-scope-") as scratch:
+        repo = Path(scratch)
+        git(repo, "init", "-q", ".")
+        git(repo, "config", "user.email", "scope@example.com")
+        git(repo, "config", "user.name", "scope")
+        (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "initial")
+        base = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True, text=True, capture_output=True).stdout.strip()
+
+        def scenario(name: str, env: dict[str, str], expected_code: int,
+                     expected_needed: str | None) -> None:
+            output = repo / f"out-{name}"
+            if output.exists():
+                output.unlink()
+            result = subprocess.run(
+                ["bash", "-c", script], cwd=repo, text=True, capture_output=True,
+                check=False,
+                env={**os.environ, "GITHUB_OUTPUT": str(output),
+                     "RELEASE_PATH_PATTERNS": "internal/** LICENSE", **env})
+            fields = {}
+            if output.exists():
+                fields = dict(line.split("=", 1) for line in
+                              output.read_text(encoding="utf-8").splitlines() if "=" in line)
+            if result.returncode != expected_code:
+                errors.append(f"check.yml: release scope {name} must exit {expected_code}, "
+                              f"got {result.returncode}: {(result.stderr or result.stdout).strip()}")
+            elif expected_needed is not None and fields.get("needed") != expected_needed:
+                errors.append(f"check.yml: release scope {name} must report "
+                              f"needed={expected_needed}, got {fields}")
+            elif expected_needed is None and fields:
+                errors.append(f"check.yml: rejected release scope {name} must not write {fields}")
+
+        scenario("tag", {"EVENT": "push", "REF_TYPE": "tag", "BEFORE": "",
+                         "MERGED_RELEASE": ""}, 0, "true")
+        scenario("merged", {"EVENT": "pull_request", "REF_TYPE": "branch", "BEFORE": "",
+                            "MERGED_RELEASE": "true"}, 0, "true")
+        scenario("merged-missing", {"EVENT": "pull_request", "REF_TYPE": "branch",
+                                    "BEFORE": "", "MERGED_RELEASE": ""}, 1, None)
+        scenario("no-base", {"EVENT": "push", "REF_TYPE": "branch", "BEFORE": "",
+                             "MERGED_RELEASE": ""}, 1, None)
+        scenario("zero-base", {"EVENT": "push", "REF_TYPE": "branch", "BEFORE": "0" * 40,
+                               "MERGED_RELEASE": ""}, 1, None)
+        scenario("bad-base", {"EVENT": "push", "REF_TYPE": "branch", "BEFORE": "deadbeef",
+                              "MERGED_RELEASE": ""}, 1, None)
+        scenario("dispatch", {"EVENT": "workflow_dispatch", "REF_TYPE": "branch",
+                              "BEFORE": base, "MERGED_RELEASE": ""}, 1, None)
+
+        (repo / "internal/web").mkdir(parents=True)
+        (repo / "internal/web/main.go").write_text("package web\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "app")
+        scenario("app", {"EVENT": "push", "REF_TYPE": "branch", "BEFORE": base,
+                         "MERGED_RELEASE": ""}, 0, "true")
+        git(repo, "reset", "--hard", base)
+        git(repo, "clean", "-fdq")
+
+        (repo / "tests").mkdir()
+        (repo / "tests/support.py").write_text("", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "tooling")
+        scenario("tooling", {"EVENT": "push", "REF_TYPE": "branch", "BEFORE": base,
+                             "MERGED_RELEASE": ""}, 0, "false")
+        git(repo, "reset", "--hard", base)
+        git(repo, "clean", "-fdq")
+    return errors
+
+
 def check_release(checks: dict, errors: list[str]) -> None:
     jobs = checks.get("jobs") or {}
     publish = jobs.get("publish") or {}
@@ -382,12 +477,38 @@ def check_release(checks: dict, errors: list[str]) -> None:
     # image a development deployment runs, so it carries the release image's
     # SBOM, max provenance and artifact attestation. It is the one published
     # image without them.
+    testing_checkout = next((step for step in steps(publish_testing)
+                             if str(step.get("uses", "")).startswith("actions/checkout@")), {})
+    if (testing_checkout.get("with") or {}).get("fetch-depth") != 0:
+        errors.append("check.yml: testing image scope needs the push base in history")
+    testing_scope_index = named_step(publish_testing, "Classify testing image scope")
     testing_image_index = named_step(publish_testing, "Publish testing image")
     testing_attest_index = named_step(publish_testing, "Attest the testing image")
+    testing_scope_run = ""
+    if testing_scope_index < 0:
+        errors.append("check.yml: the testing image must classify the push scope")
+    elif testing_image_index < 0 or testing_scope_index > testing_image_index:
+        errors.append("check.yml: testing image scope must be classified before publishing")
+    else:
+        testing_scope = steps(publish_testing)[testing_scope_index]
+        if (testing_scope.get("env") or {}).get("BEFORE") != "${{ github.event.before }}":
+            errors.append("check.yml: testing image scope must read the push base")
+        testing_scope_run = str(testing_scope.get("run", ""))
+        for needle in (
+            "is_release_path",
+            "RELEASE_PATH_PATTERNS",
+            'git cat-file -e "${BEFORE}^{commit}"',
+            'git diff --name-only --no-renames "$BEFORE" HEAD',
+            'echo "needed=$needed" >> "$GITHUB_OUTPUT"',
+        ):
+            if needle not in testing_scope_run:
+                errors.append(f"check.yml: testing image scope is missing {needle}")
     if testing_image_index < 0:
         errors.append("check.yml: the testing image publish step must exist")
     else:
         testing_image = steps(publish_testing)[testing_image_index]
+        if testing_image.get("if") != "steps.scope.outputs.needed == 'true'":
+            errors.append("check.yml: the testing image must publish only for a shipped change")
         if testing_image.get("with", {}).get("sbom") is not True:
             errors.append("check.yml: the testing image must include an SBOM")
         if testing_image.get("with", {}).get("provenance") != "mode=max":
@@ -398,6 +519,8 @@ def check_release(checks: dict, errors: list[str]) -> None:
             errors.append("check.yml: the testing image attestation must follow the publish step")
         else:
             testing_attest = steps(publish_testing)[testing_attest_index]
+            if testing_attest.get("if") != "steps.scope.outputs.needed == 'true'":
+                errors.append("check.yml: the testing attestation must follow the scope decision")
             if not str(testing_attest.get("uses", "")).startswith("actions/attest@"):
                 errors.append("check.yml: the testing image attestation must use actions/attest")
             if (testing_attest.get("with") or {}).get("subject-digest") != \
@@ -458,6 +581,38 @@ def check_release(checks: dict, errors: list[str]) -> None:
     if "git rev-parse HEAD" not in verify_run or '!= "$EXPECTED"' not in verify_run:
         errors.append("check.yml: publish must verify the checked-out commit")
 
+    scope_index = named_step(publish, "Classify release scope")
+    cut_index = named_step(publish, "Cut the next version")
+    scope_run = ""
+    if scope_index < 0:
+        errors.append("check.yml: publish must classify the release scope")
+    elif cut_index < 0 or scope_index > cut_index:
+        errors.append("check.yml: release scope must be classified before the version cut")
+    else:
+        scope = steps(publish)[scope_index]
+        if scope.get("id") != "scope":
+            errors.append("check.yml: release scope step must use id scope")
+        expected_scope_env = {
+            "EVENT": "${{ github.event_name }}",
+            "REF_TYPE": "${{ github.ref_type }}",
+            "MERGED_RELEASE": "${{ needs.required.outputs.merged_release }}",
+            "BEFORE": "${{ github.event.before }}",
+        }
+        if scope.get("env") != expected_scope_env:
+            errors.append("check.yml: release scope must read the event, ref type, merged "
+                          "decision and push base")
+        scope_run = str(scope.get("run", ""))
+        for needle in (
+            "is_release_path",
+            "RELEASE_PATH_PATTERNS",
+            'if [ "$MERGED_RELEASE" != "true" ]',
+            'git cat-file -e "${BEFORE}^{commit}"',
+            'git diff --name-only --no-renames "$BEFORE" HEAD',
+            'echo "needed=$needed" >> "$GITHUB_OUTPUT"',
+        ):
+            if needle not in scope_run:
+                errors.append(f"check.yml: release scope is missing {needle}")
+
     image_index = named_step(publish, "Publish verified multi-platform image")
     tag_push_index = named_step(publish, "Push verified tag")
     release_index = named_step(publish, "Create the GitHub release")
@@ -486,6 +641,19 @@ def check_release(checks: dict, errors: list[str]) -> None:
             errors.append("check.yml: the attestation must be pushed to the registry")
     cut = next((step for step in steps(publish) if step.get("name") == "Cut the next version"), {})
     cut_run = str(cut.get("run", ""))
+    if ('if [ "${{ steps.scope.outputs.needed }}" != "true" ]' not in cut_run or
+            'echo "skip=true" >> "$GITHUB_OUTPUT"' not in cut_run):
+        errors.append("check.yml: the cut step must skip a release-free change")
+    required_job = jobs.get("required") or {}
+    promotion_step = next((step for step in steps(required_job)
+                           if step.get("name") == "Require main promotions to come from testing"), {})
+    promotion_decl = shell_declaration(str(promotion_step.get("run", "")), "is_release_path")
+    for label, body in (("publish", scope_run), ("publish-testing", testing_scope_run)):
+        declaration = shell_declaration(body, "is_release_path")
+        if not declaration:
+            errors.append(f"check.yml: {label} must define is_release_path inline")
+        elif promotion_decl and declaration != promotion_decl:
+            errors.append(f"check.yml: {label} is_release_path must match the promotion declaration")
     if "git push" in cut_run:
         errors.append("check.yml: the cut step must not push before the image exists")
     if "git commit" in cut_run:
@@ -654,3 +822,4 @@ def check_release(checks: dict, errors: list[str]) -> None:
         errors.append("check.yml: main image must exclude prereleases")
     errors.extend(release_notes_errors())
     errors.extend(release_pipeline_errors())
+    errors.extend(release_scope_errors())

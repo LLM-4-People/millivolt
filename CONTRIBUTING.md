@@ -64,9 +64,10 @@ type is not one of `build`, `brand`, `checks`, `chore`, `ci`, `deps`, `doc`,
 internal types are folded under "Other changes". Write the subject for an
 operator reading the release page.
 
-Completed feature pushes to `testing` publish only the moving development image.
-All pull requests to `testing`, all code-bearing pushes to `testing`, manually
-dispatched `testing` gates, and manually pushed `v*` tags run the full gate.
+Completed feature pushes to `testing` that change a shipped artifact publish
+only the moving development image. All pull requests to `testing`, all non-docs
+pushes to `testing`, manually dispatched `testing` gates, and manually pushed
+`v*` tags run the full gate.
 Docs and site-only pushes to `testing` run the smaller documentation gate in
 `docs.yml`.
 
@@ -83,12 +84,13 @@ must carry a successful `race` job for that exact commit. The proof waits under
 a bounded budget and fails closed. The fallback selects the closest gated
 testing commit from canonical `testing` push runs, with no commit-count bound.
 
-For a code-bearing head, let the `testing` `check.yml` push gate finish before
-opening or re-running a promotion PR. Pending exact check runs get a short
-bounded wait and the proof fails closed while they remain pending. A
-docs/site-only head has no canonical `check.yml` push run of its own, so wait
-for `docs.yml` or only the `required` docs validation. A Dependabot security
-pull request targets `main` directly and therefore still runs the full gate.
+For a head that changes any non-docs path, including tests, workflows and site
+tooling, let the `testing` `check.yml` push gate finish before opening or
+re-running a promotion PR. Pending exact check runs get a short bounded wait and
+the proof fails closed while they remain pending. A docs/site-only head has no
+canonical `check.yml` push run of its own, so wait for `docs.yml` or only the
+`required` docs validation. A Dependabot security pull request targets `main`
+directly and therefore still runs the full gate.
 
 ### Promote testing to main
 
@@ -101,33 +103,42 @@ pull request targets `main` directly and therefore still runs the full gate.
    ```
    If `main` is not an ancestor of `testing`, merge `origin/main` into
    `testing` first and resolve conflicts before continuing.
-2. For a code-bearing promotion, bump `VERSION` on `testing` to a version
-   newer than every existing `v*` tag. Normal SemVer precedence applies; a
-   prerelease is lower than the same stable version. Commit the bump
-   separately:
+2. For a promotion that changes a shipped artifact, bump `VERSION` on
+   `testing` to a version newer than every existing `v*` tag. Shipped artifacts
+   are the paths matched by `RELEASE_PATH_PATTERNS` in
+   [`check.yml`](.github/workflows/check.yml): application code under
+   `cmd/proxy/` and `internal/`, the embedded dashboard, the Go module files,
+   `VERSION`, `version.go`, `proxy.example.yaml`, the container build files,
+   the license collector, `LICENSE`, and `THIRD_PARTY_NOTICES.md`. The generated
+   `internal/docs/docs.json` index is documentation content, not application
+   code, so a docs edit does not force a release; the next application release
+   carries it. Normal SemVer precedence applies; a prerelease is lower than the
+   same stable version. Commit the bump separately:
    ```sh
    printf '<next-version>\n' > VERSION
    git add VERSION
    git commit -m "bump version to <next-version>"
    git push origin testing
    ```
-   A docs/site-only promotion may skip this step. `required` detects that every
-   changed path is covered by the docs/site filter (for example Markdown,
-   `docs/`, `site-src/`, the docs and Pages workflows, and `LICENSE`), and the
-   merged main push stays docs-only.
-3. Open a pull request from `testing` to `main`. For a code-bearing head, wait
-   for the `testing` `check.yml` push gate to finish first. A docs/site-only
-   head has no canonical `check.yml` push run of its own, so wait for `docs.yml`
-   or only the `required` docs validation. Then wait for `required`. The proof
+   A docs/site-only, test-only, workflow-only or site-tooling promotion may skip
+   this step. `required` classifies every changed path: docs/site changes skip
+   the full-gate proof, and only shipped artifacts require a version and a
+   release.
+3. Open a pull request from `testing` to `main`. For a head that changes any
+   non-docs path, wait for the `testing` `check.yml` push gate to finish first.
+   A docs/site-only head has no canonical `check.yml` push run of its own, so
+   wait for `docs.yml` or only the `required` docs validation. Then wait for
+   `required`. The proof
    polls pending exact runs a bounded number of times and fails closed while
    they remain pending, so opening or re-running the PR early only produces a
    red check. `required` does not rerun the full `testing` gate. For
    every non-Dependabot
    promotion it verifies that the head is the current `testing` tip and that
-   `main` is already merged back into `testing`; code-bearing promotions must
+   `main` is already merged back into `testing`; non-docs promotions must
    also have a successful full-gate record for that exact commit, or for the
    closest gated `testing` commit when every path since it is docs/site-only,
-   and `VERSION` newer than every release tag. A non-Dependabot promotion also
+   and shipped-artifact promotions must have `VERSION` newer than every release
+   tag. A non-Dependabot promotion also
    needs the escalation workflow's `race` job to succeed for this head; it
    starts with the PR, and `required` waits for it under a bounded budget.
    If it fails with "Promote the current testing tip", push the final commit to
@@ -159,10 +170,10 @@ pull request targets `main` directly and therefore still runs the full gate.
    If `testing` moved after the promotion merge, merge `origin/main` normally
    and resolve conflicts before the next promotion.
 
-For a code-bearing promotion, the merged-PR release run creates the annotated
-release tag on the reviewed merge commit and publishes the image. It never
-pushes `main`. A delivered `main` push is an idempotent fallback; a manually
-pushed `v*` tag remains the explicit recovery path. Do not push a `v*` tag as
+For a promotion that changes a shipped artifact, the merged-PR release run
+creates the annotated release tag on the reviewed merge commit and publishes the
+image. It never pushes `main`. A delivered `main` push is an idempotent
+fallback; a manually pushed `v*` tag remains the explicit recovery path. Do not push a `v*` tag as
 part of feature work; the manual tag path is only for an explicitly verified
 release and must match `VERSION`.
 
@@ -178,9 +189,13 @@ Docs and site-only pushes to `testing` skip image work. A docs/site-only
 promotion to `main` skips the `VERSION` and full-gate proofs, validates the
 Markdown, generated site, workflow policy and docs contracts in `required`, and
 the merged-PR release path records the change as docs-only, so it does not
-rebuild images or cut a release. A Pages-relevant change deploys the site from
-the `main` push, or from the Pages `workflow_dispatch` fallback when that push
-workflow is not delivered.
+rebuild images or cut a release.
+
+Test, workflow and site-tooling promotions run the full gate when they are not
+docs-only, but they are also release-free. Only a path compiled into, embedded
+in, or copied into the image requires a version and a release. A Pages-relevant
+change deploys the site from the `main` push, or from the Pages
+`workflow_dispatch` fallback when that push workflow is not delivered.
 
 `AGENTS.md` is intentionally local and ignored by the publication guard. Keep its
 working instructions aligned with this shared guide; do not force-add private
@@ -678,9 +693,11 @@ millivolt_version="$(tr -d '\r\n' < VERSION)"
 go run ./cmd/release -revision "$(git rev-parse HEAD)" -tag "v$millivolt_version"
 ```
 
-Publication is automatic. A code-bearing versioned promotion releases when the
-promotion PR merges, after the full gate has passed for the promoted commit, or
-after the closest gated `testing` commit plus a docs-only delta.
+Publication is automatic only when a shipped artifact changed. A versioned
+promotion releases when the promotion PR merges, after the full gate has passed
+for the promoted commit, or after the closest gated `testing` commit plus a
+docs-only delta. A test, workflow or site-tooling promotion runs the full gate
+but does not release.
 
 A non-Dependabot promotion also requires a successful
 [escalation](.github/workflows/escalation.yml) run for the reviewed head. The
@@ -693,13 +710,14 @@ reusing a `testing` result. The release `publish` job waits for `required`.
 The `publish-testing` job waits for `unit`, `browser` and `container` instead,
 because a testing push has no promotion proof to wait for:
 
-1. A code-bearing promotion PR owns the version bump. `required` compares
-   VERSION against every existing `v*` tag with SemVer precedence and rejects a
-   non-Dependabot main PR unless VERSION is newer. Docs/site-only promotions
-   skip that comparison, validate docs, workflow policy and the site in
-   `required`, and stay release-free. If VERSION is already tagged, no
-   release is cut: this is the Dependabot security-merge case, and the next
-   versioned promotion releases the change.
+1. A promotion PR that changes a shipped artifact owns the version bump.
+   `required` compares VERSION against every existing `v*` tag with SemVer
+   precedence and rejects a non-Dependabot main PR unless VERSION is newer.
+   Docs/site, test, workflow and site-tooling promotions skip that comparison.
+   Docs/site-only promotions also skip the full-gate proof and validate docs,
+   workflow policy and the site in `required`. All of them stay release-free.
+   If VERSION is already tagged, no release is cut: this is the Dependabot
+   security-merge case, and the next versioned promotion releases the change.
 2. The workflow creates the annotated `v<version>` tag on the reviewed
    promotion merge commit and builds and publishes the multi-arch image with
    `main`, `sha-*`, `version` and (for non-prereleases) `latest` tags, including
@@ -718,16 +736,19 @@ the generated site, workflow policy and docs contracts.
 A docs/site-only main promotion also skips the VERSION and full-gate proofs but
 runs the same Markdown, generated-site, workflow-policy and repository checks in
 `required`. A Pages-relevant merged main push stays docs-only, so Pages deploys
-without rebuilding images or cutting a release.
+without rebuilding images or cutting a release. A test, workflow or site-tooling
+main promotion runs the full gate but is release-free.
 
-The merged-PR release path classifies the change and skips publication. A
-code-bearing promotion must carry a VERSION newer than every existing tag and
-cuts a release. A manually pushed `v*` tag
-still ships exactly as tagged through the same
+The merged-PR release path classifies the change from the reviewed PR file list;
+a delivered main push classifies the merge commit against its push base. Both
+skip publication when no shipped artifact changed. A shipped-artifact promotion
+must carry a VERSION newer than every existing tag and cuts a release.
+
+A manually pushed `v*` tag still ships exactly as tagged through the same
 pipeline, with the image published before the release is created. A manual tag
-must match VERSION. Code-bearing pushes to `testing` publish the moving
-`ghcr.io/llm-4-people/millivolt:testing` image after the same checks and
-container builds, without cutting a release or any version tag. Its OCI version
+must match VERSION. Non-docs pushes to `testing` that change a shipped artifact
+publish the moving `ghcr.io/llm-4-people/millivolt:testing` image after the
+same checks and container builds, without cutting a release or any version tag. Its OCI version
 label reports the embedded VERSION, which can lag the latest release.
 Manual validation of a candidate remains available:
 

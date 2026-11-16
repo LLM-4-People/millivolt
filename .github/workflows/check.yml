@@ -4,26 +4,27 @@ name: Checks and images
 # - `main` accepts pull requests only. The `main-testing-first` ruleset requires
 #   the `required` check and a merge commit, and it has no bypass actors.
 # - Full checks and native container smoke tests run on all testing pull
-#   requests, code-bearing testing pushes, manually dispatched testing gates,
+#   requests, non-docs testing pushes, manually dispatched testing gates,
 #   manual release tags, and Dependabot's main PRs. Docs and site-only testing
 #   pushes use docs.yml
 #   instead. The full gate does not run again for an ordinary main promotion PR
-#   or a code-bearing main push: those reuse the testing gate. The promotion PR
+#   or a non-docs main push: those reuse the testing gate. The promotion PR
 #   proves the head is the current testing tip, main is already merged back into
 #   testing, and the canonical testing gate run's own suite succeeded for that
 #   exact commit or for the closest gated testing commit plus a docs-only delta,
-#   with VERSION unreleased for code. The fallback selects the closest gated
+#   with VERSION unreleased for shipped artifacts. The fallback selects the closest gated
 #   testing commit from canonical testing gate runs with no commit-count bound. The
 #   proof polls a bounded number of times for pending exact runs and fails
 #   closed if they are still pending. This keeps the release path from
 #   re-running the same suite.
 # - A non-Dependabot pull request to `main` must have its head commit be the
 #   current `testing` tip, with `main` already merged back into `testing`. A
-#   code-bearing promotion must also carry a VERSION newer than every existing
-#   release tag; a docs/site-only promotion skips that check and does not
-#   rebuild images or cut a release. Docs-only promotions instead validate
-#   Markdown, the generated site, workflow policy and docs contracts in
-#   `required`, so the docs workflow is not the only validation.
+#   promotion that changes a shipped artifact must also carry a VERSION newer
+#   than every existing release tag. Docs, site, tests, workflow and tooling
+#   changes do not require a version and do not rebuild images or cut a
+#   release. A docs/site-only promotion still validates Markdown, the generated
+#   site, workflow policy and docs contracts in `required`, so the docs
+#   workflow is not the only validation.
 # - Dependabot security pull requests are the only exception. They still run the
 #   full gate. They normally create no release because their VERSION is already
 #   tagged; if main still carries an untagged pending VERSION, that merge can
@@ -47,9 +48,10 @@ name: Checks and images
 #   waits for `required`, which is the stable gate on every event. A merged
 #   promotion PR is the primary release trigger: the `pull_request: closed`
 #   event carries the exact merge commit and does not depend on GitHub
-#   delivering a separate `main` push event. A code-bearing main push, when
-#   delivered, only reuses the reviewed merge and publishes; it does not
-#   re-prove the promotion checks.
+#   delivering a separate `main` push event. A main push, when delivered,
+#   only reuses the reviewed merge and publishes; it does not re-prove the
+#   promotion checks. Both paths classify the change and release only when a
+#   shipped artifact changed.
 # - Every release path uses the same idempotency key, the version tag. The
 #   merged-PR event, a delivered main push, and a manual tag push can all
 #   arrive for one revision; the release concurrency group serializes them and
@@ -79,6 +81,7 @@ on:
       - 'site-src/**'
       - 'scripts/build_site.py'
       - 'requirements-docs.txt'
+      - 'internal/docs/docs.json'
       - '.github/workflows/docs.yml'
       - '.github/workflows/pages.yml'
   pull_request:
@@ -97,6 +100,22 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # Release-bearing paths are the files that are compiled into, embedded in,
+  # or copied into the published image. This is deliberately narrower than
+  # "everything that is not docs": tests, workflows, site tooling, brand and
+  # gallery scripts, and repository metadata pass the full gate when needed
+  # but never force a VERSION bump or an image release.
+  RELEASE_PATH_PATTERNS: >-
+    VERSION version.go go.mod go.sum proxy.example.yaml Dockerfile .dockerignore
+    LICENSE THIRD_PARTY_NOTICES.md
+    cmd/proxy/** internal/** scripts/licenses/**
+  # The embedded documentation index is generated content, not application
+  # code. A docs-only edit must not force a release just because it refreshes
+  # the index; the next application release carries the new text. Every other
+  # internal path remains release-bearing.
+  RELEASE_EXEMPT_PATTERNS: internal/docs/docs.json
 
 concurrency:
   group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -471,6 +490,7 @@ jobs:
     needs: [unit, browser, container, escalation-proof]
     outputs:
       merged_docs_only: ${{ steps.merged.outputs.docs_only }}
+      merged_release: ${{ steps.merged.outputs.release_needed }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -486,7 +506,8 @@ jobs:
       # and is never part of this family.
       DOCS_PATH_PATTERNS: >-
         docs/** site-src/** scripts/build_site.py requirements-docs.txt LICENSE
-        *.md .github/workflows/docs.yml .github/workflows/pages.yml
+        internal/docs/docs.json *.md .github/workflows/docs.yml
+        .github/workflows/pages.yml
     steps:
       - name: Require every gate
         # A skipped gate job must fail the gate except for the deliberate
@@ -583,9 +604,11 @@ jobs:
             esac
           fi
 
-          # Preserve the docs/site-only release-free policy. The PR file list
-          # is authoritative for what the reviewed change touched; include a
-          # rename's previous path so a code-to-docs rename cannot hide code.
+          # The PR file list is authoritative for what the reviewed change
+          # touched; include a rename's previous path so a rename cannot hide
+          # code from either classifier. docs_only decides whether the full
+          # gate is required. release_needed decides whether the merge needs a
+          # version and a release.
           is_docs_path() {
             local path="$1" pattern
             local -a docs_patterns=()
@@ -593,6 +616,28 @@ jobs:
               read -r -a docs_patterns <<< "$DOCS_PATH_PATTERNS"
             fi
             for pattern in "${docs_patterns[@]}"; do
+              case "$path" in
+                $pattern) return 0 ;;
+              esac
+            done
+            return 1
+          }
+          is_release_path() {
+            local path="$1" pattern
+            local -a release_patterns=()
+            local -a exempt_patterns=()
+            if [ -n "${RELEASE_EXEMPT_PATTERNS:-}" ]; then
+              read -r -a exempt_patterns <<< "$RELEASE_EXEMPT_PATTERNS"
+            fi
+            for pattern in "${exempt_patterns[@]}"; do
+              case "$path" in
+                $pattern) return 1 ;;
+              esac
+            done
+            if [ -n "${RELEASE_PATH_PATTERNS:-}" ]; then
+              read -r -a release_patterns <<< "$RELEASE_PATH_PATTERNS"
+            fi
+            for pattern in "${release_patterns[@]}"; do
               case "$path" in
                 $pattern) return 0 ;;
               esac
@@ -707,15 +752,19 @@ jobs:
           files="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
             --jq '.[] | .filename, (.previous_filename // empty)')"
           docs_only=true
+          release_needed=false
           while IFS= read -r path; do
             [ -n "$path" ] || continue
             if ! is_docs_path "$path"; then
               docs_only=false
-              break
+            fi
+            if is_release_path "$path"; then
+              release_needed=true
             fi
           done <<< "$files"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
-          echo "Merged promotion validated: $MERGE_SHA (docs_only=$docs_only)."
+          echo "release_needed=$release_needed" >> "$GITHUB_OUTPUT"
+          echo "Merged promotion validated: $MERGE_SHA (docs_only=$docs_only, release_needed=$release_needed)."
 
       # Main is promoted from testing. Dependabot security updates are the one
       # documented exception because GitHub opens them against the default
@@ -751,16 +800,18 @@ jobs:
           fi
           # DOCS_PATH_PATTERNS is the single docs/site filter, aligned with the
           # push paths-ignore filter above. A docs-only promotion skips the
-          # VERSION gate and does not rebuild images or cut a release after
-          # merge. --no-renames keeps both sides of a code-to-docs rename, so a
-          # rename can never hide a code change from this classification.
+          # full-gate proof. RELEASE_PATH_PATTERNS is the narrower shipped
+          # artifact filter: only those paths need a newer VERSION and a
+          # release. A tooling-only promotion therefore runs the full gate but
+          # stays release-free. --no-renames keeps both sides of a rename, so
+          # neither classifier can be hidden by moving a file.
           #
           # This checkout is candidate code. `required` reviews that code, so
-          # the matcher is defined here instead of sourcing a script from the
-          # candidate tree. The full-gate proof below carries the same copy,
-          # and the workflow tests pin the two declarations byte-identical.
-          # The real protection is the current-tip rule and review, not this
-          # filter.
+          # the matchers are defined here instead of sourcing a script from the
+          # candidate tree. The full-gate proof below carries the same docs
+          # copy, and the workflow tests pin the declarations byte-identical.
+          # The real protection is the current-tip rule and review, not these
+          # filters.
           is_docs_path() {
             local path="$1" pattern
             local -a docs_patterns=()
@@ -774,20 +825,46 @@ jobs:
             done
             return 1
           }
+          is_release_path() {
+            local path="$1" pattern
+            local -a release_patterns=()
+            local -a exempt_patterns=()
+            if [ -n "${RELEASE_EXEMPT_PATTERNS:-}" ]; then
+              read -r -a exempt_patterns <<< "$RELEASE_EXEMPT_PATTERNS"
+            fi
+            for pattern in "${exempt_patterns[@]}"; do
+              case "$path" in
+                $pattern) return 1 ;;
+              esac
+            done
+            if [ -n "${RELEASE_PATH_PATTERNS:-}" ]; then
+              read -r -a release_patterns <<< "$RELEASE_PATH_PATTERNS"
+            fi
+            for pattern in "${release_patterns[@]}"; do
+              case "$path" in
+                $pattern) return 0 ;;
+              esac
+            done
+            return 1
+          }
           base="$(git merge-base origin/main "$HEAD_SHA")"
           # Capture the diff before classifying it. A failing `git diff` must
           # abort under `set -e`; inside a process substitution its status is
           # lost and an empty loop would leave docs_only=true.
           changed="$(git diff --name-only --no-renames "$base" "$HEAD_SHA")"
           docs_only=true
+          release_needed=false
           while IFS= read -r path; do
             [ -n "$path" ] || continue
             if ! is_docs_path "$path"; then
               docs_only=false
-              break
+            fi
+            if is_release_path "$path"; then
+              release_needed=true
             fi
           done <<< "$changed"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "release_needed=$release_needed" >> "$GITHUB_OUTPUT"
       - name: Require the full testing gate for the promoted commit
         # The normal promotion path does not rerun the suite. It proves the
         # canonical testing gate run for the exact commit (or the closest
@@ -1047,7 +1124,10 @@ jobs:
           python3 -B -m tests.repository_check
           python3 -B -m tests.go test -mod=readonly ./internal/mcp -count=1
       - name: Require an unreleased version for main promotions
-        if: success() && github.event_name == 'pull_request' && github.event.action != 'closed' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.promotion.outputs.docs_only != 'true'
+        # Only a shipped artifact forces a version bump. Tests, workflows,
+        # site and brand tooling, and repository metadata still need the full
+        # gate when they are not docs-only, but they never cut a release.
+        if: success() && github.event_name == 'pull_request' && github.event.action != 'closed' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.promotion.outputs.release_needed == 'true'
         run: |
           set -euo pipefail
           git fetch --tags --force origin
@@ -1066,10 +1146,14 @@ jobs:
             echo "### Main promotion"
             echo "- Head commit is main's merged-back history and the current testing tip."
             if [ "${{ steps.promotion.outputs.docs_only }}" = "true" ]; then
-              echo "- This is a docs/site-only promotion. The VERSION and full-gate checks are skipped, docs, workflow policy and site validation ran here, and the merge will not rebuild images or cut a release."
+              echo "- The full-gate proof is skipped because every changed path is docs/site; docs, workflow policy and site validation ran here."
             else
               echo "- The full testing gate succeeded for this commit, or for the closest gated testing commit with only docs changes after it."
-              echo "- VERSION is newer than every existing release tag."
+            fi
+            if [ "${{ steps.promotion.outputs.release_needed }}" = "true" ]; then
+              echo "- A shipped artifact changed, so VERSION is newer than every existing release tag and the merge will cut a release."
+            else
+              echo "- No shipped artifact changed, so no VERSION bump is required and the merge will not cut a release."
             fi
             echo "- Merge with a merge commit. CI tags this merge and never pushes main."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -1087,8 +1171,10 @@ jobs:
     # for the full gate when the full gate runs. A merged promotion PR carries
     # the exact merge commit and releases even when GitHub drops the separate
     # main push event. A delivered main push or manually pushed tag reuses the
-    # same reviewed merge and tag idempotency guard. Docs/site-only changes are
-    # handled by the docs and Pages workflows and do not publish an image.
+    # same reviewed merge and tag idempotency guard. A change with no shipped
+    # artifact is handled by the gate, docs and Pages workflows and does not
+    # publish an image. A manual tag is an explicit release request and ships
+    # the tagged commit as-is.
     needs: required
     # always() defeats GitHub's implicit success gate, which otherwise skips
     # this job when the gate jobs were deliberately skipped for a main push or
@@ -1102,7 +1188,7 @@ jobs:
        (github.event_name == 'pull_request' && github.event.action == 'closed' &&
         github.event.pull_request.merged == true && github.base_ref == 'main' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
-        needs.required.outputs.merged_docs_only != 'true'))
+        needs.required.outputs.merged_release == 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # The release idempotency guard is a check-then-create over the version tag.
@@ -1158,6 +1244,80 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - name: Classify release scope
+        # Both release entry points carry the decision: a merged PR from the
+        # required job's PR file list, a main push from the commit's own
+        # delta. A tag is an explicit release request. The step fails closed
+        # when it cannot prove the event's delta.
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          MERGED_RELEASE: ${{ needs.required.outputs.merged_release }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          is_release_path() {
+            local path="$1" pattern
+            local -a release_patterns=()
+            local -a exempt_patterns=()
+            if [ -n "${RELEASE_EXEMPT_PATTERNS:-}" ]; then
+              read -r -a exempt_patterns <<< "$RELEASE_EXEMPT_PATTERNS"
+            fi
+            for pattern in "${exempt_patterns[@]}"; do
+              case "$path" in
+                $pattern) return 1 ;;
+              esac
+            done
+            if [ -n "${RELEASE_PATH_PATTERNS:-}" ]; then
+              read -r -a release_patterns <<< "$RELEASE_PATH_PATTERNS"
+            fi
+            for pattern in "${release_patterns[@]}"; do
+              case "$path" in
+                $pattern) return 0 ;;
+              esac
+            done
+            return 1
+          }
+          needed=false
+          if [ "$REF_TYPE" = "tag" ]; then
+            needed=true
+            echo "A release tag is an explicit request to publish the tagged commit."
+          elif [ "$EVENT" = "pull_request" ]; then
+            if [ "$MERGED_RELEASE" != "true" ]; then
+              echo "::error::The merged promotion did not report a shipped-artifact change; refusing to classify a release from an incomplete decision."
+              exit 1
+            fi
+            needed=true
+            echo "The reviewed PR file list reports a shipped-artifact change."
+          elif [ "$EVENT" = "push" ]; then
+            if [ -z "${BEFORE:-}" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              echo "::error::Cannot classify the main push: the event has no usable push base."
+              exit 1
+            fi
+            if ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+              echo "::error::Cannot classify the main push: the push base $BEFORE is not available in the checkout."
+              exit 1
+            fi
+            changed="$(git diff --name-only --no-renames "$BEFORE" HEAD)"
+            while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              if is_release_path "$path"; then
+                needed=true
+                break
+              fi
+            done <<< "$changed"
+            echo "The main push delta was classified against $BEFORE."
+          else
+            echo "::error::Release scope cannot be classified for event $EVENT."
+            exit 1
+          fi
+          echo "needed=$needed" >> "$GITHUB_OUTPUT"
+          if [ "$needed" = "true" ]; then
+            echo "A shipped artifact changed; the release path will continue."
+          else
+            echo "No shipped artifact changed; no tag, image or release will be published."
+          fi
       - name: Cut the next version
         id: cut
         env:
@@ -1165,6 +1325,11 @@ jobs:
         run: |
           set -euo pipefail
           skip=false
+          if [ "${{ steps.scope.outputs.needed }}" != "true" ]; then
+            echo "No release-bearing path changed; no version tag or release is needed."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${{ github.ref_type }}" = "tag" ]; then
             # A manually pushed release tag ships exactly as tagged. HEAD is
             # the commit even when the tag object is annotated.
@@ -1456,8 +1621,8 @@ jobs:
           fi
 
       - name: Summarize the release
-        # The run summary is the release receipt. It must describe both a
-        # published release and the intentional already-tagged skip.
+        # The run summary is the release receipt. It must describe a published
+        # release, the no-shipped-change skip, and the already-tagged skip.
         if: always()
         env:
           RELEASE_VERSION: ${{ steps.cut.outputs.version }}
@@ -1469,6 +1634,10 @@ jobs:
               echo "### Release did not complete"
               echo
               echo "The job did not complete successfully. Inspect the job log; no release receipt is claimed."
+            elif [ "${{ steps.scope.outputs.needed }}" != "true" ]; then
+              echo "### No release cut"
+              echo
+              echo "No shipped artifact changed, so no version tag, image or release was published."
             elif [ "${{ steps.cut.outputs.skip }}" = "true" ]; then
               echo "### No release cut"
               echo
@@ -1495,11 +1664,11 @@ jobs:
 
   publish-testing:
     needs: [unit, browser, container]
-    # A moving development alias, not a release: every code-bearing push to
-    # testing republishes one tag after the same unit, browser and native
-    # container gates as main. It waits for those jobs directly because a
-    # testing push has no promotion proof to wait for. No version is cut and no
-    # release is created.
+    # A moving development alias, not a release: every push that changes a
+    # shipped artifact republishes one tag after the same unit, browser and
+    # native container gates as main. It waits for those jobs directly because
+    # a testing push has no promotion proof to wait for. No version is cut and
+    # no release is created.
     if: github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && github.ref == 'refs/heads/testing'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -1516,9 +1685,64 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Read the testing version
         id: version
         run: echo "version=$(tr -d '\r\n' < VERSION)" >> "$GITHUB_OUTPUT"
+      - name: Classify testing image scope
+        # The moving testing tag follows the shipped artifact, not every
+        # repository edit. A workflow, test, docs or site-tooling push still
+        # runs the full gate above but does not republish an identical image.
+        id: scope
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          is_release_path() {
+            local path="$1" pattern
+            local -a release_patterns=()
+            local -a exempt_patterns=()
+            if [ -n "${RELEASE_EXEMPT_PATTERNS:-}" ]; then
+              read -r -a exempt_patterns <<< "$RELEASE_EXEMPT_PATTERNS"
+            fi
+            for pattern in "${exempt_patterns[@]}"; do
+              case "$path" in
+                $pattern) return 1 ;;
+              esac
+            done
+            if [ -n "${RELEASE_PATH_PATTERNS:-}" ]; then
+              read -r -a release_patterns <<< "$RELEASE_PATH_PATTERNS"
+            fi
+            for pattern in "${release_patterns[@]}"; do
+              case "$path" in
+                $pattern) return 0 ;;
+              esac
+            done
+            return 1
+          }
+          if [ -z "${BEFORE:-}" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "::error::Cannot classify the testing push: the event has no usable push base."
+            exit 1
+          fi
+          if ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            echo "::error::Cannot classify the testing push: the push base $BEFORE is not available in the checkout."
+            exit 1
+          fi
+          changed="$(git diff --name-only --no-renames "$BEFORE" HEAD)"
+          needed=false
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            if is_release_path "$path"; then
+              needed=true
+              break
+            fi
+          done <<< "$changed"
+          echo "needed=$needed" >> "$GITHUB_OUTPUT"
+          if [ "$needed" = "true" ]; then
+            echo "A shipped artifact changed; the testing image will be republished."
+          else
+            echo "No shipped artifact changed; the testing image will not be republished."
+          fi
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -1527,6 +1751,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish testing image
         id: image
+        if: steps.scope.outputs.needed == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -1555,6 +1780,7 @@ jobs:
         # Same artifact attestation as a release, against the testing digest.
         # A dev deployment can then verify what it runs with `gh attestation
         # verify oci://ghcr.io/llm-4-people/millivolt:testing`.
+        if: steps.scope.outputs.needed == 'true'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ghcr.io/llm-4-people/millivolt

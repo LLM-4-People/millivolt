@@ -461,6 +461,9 @@ def check_promotion(checks: dict, errors: list[str]) -> None:
             'pulls/$PR_NUMBER/files',
             '.previous_filename',
             'echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"',
+            'echo "release_needed=$release_needed" >> "$GITHUB_OUTPUT"',
+            'release_needed=false',
+            'is_release_path',
         ):
             if needle not in merged_run:
                 errors.append(f"check.yml: merged promotion validation is missing {needle}")
@@ -491,9 +494,13 @@ def check_promotion(checks: dict, errors: list[str]) -> None:
                 errors.append(f"workflows self-check: cannot mutate {label}")
             elif mutated_if == MERGED_VALIDATION_IF:
                 errors.append(f"workflows self-check: {label} must not satisfy the exact condition")
-    expected_outputs = {"merged_docs_only": "${{ steps.merged.outputs.docs_only }}"}
+    expected_outputs = {
+        "merged_docs_only": "${{ steps.merged.outputs.docs_only }}",
+        "merged_release": "${{ steps.merged.outputs.release_needed }}",
+    }
     if required_job.get("outputs") != expected_outputs:
-        errors.append("check.yml: required must expose merged_docs_only from the merged validation")
+        errors.append("check.yml: required must expose merged_docs_only and merged_release "
+                      "from the merged validation")
     for step in required_steps:
         name = str(step.get("name", ""))
         step_if = " ".join(str(step.get("if", "")).split())
