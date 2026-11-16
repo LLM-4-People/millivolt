@@ -79,9 +79,10 @@ with no key-hash selector, and its equality-only preview count or purge scans
 the table instead of maintaining per-dimension composite indexes.
 `BenchmarkStoreDiskBytes` measures
 this on its deterministic synthetic fixture (10,000 and 100,000 seeded
-records); on that fixture the 100,000-row database fell from 118.2 MiB to
-45.4 MiB. It is a reproducible fixture scope, not a prediction of a
-deployment's disk use or a capacity ceiling.
+records). The current per-record and total bytes are published in
+[storage and retained projection](performance.md#storage-and-retained-projection);
+that is a reproducible fixture scope, not a prediction of a deployment's disk
+use or a capacity ceiling.
 
 Dropping a superseded request-log index only moves its pages to SQLite's
 freelist, so the first startup that finds and removes one also runs a one-time

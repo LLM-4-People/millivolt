@@ -187,9 +187,13 @@ zero values independently. A request can contribute to both badges.
 
 ### Models
 
-Model cards group configured model variants for comparison. Selecting one scopes
-the timeline and request log together. Model grouping is configuration-owned;
-stored model spellings remain available for exact export and deletion filters.
+Model cards group configured model variants for comparison. The shipped rules
+fold provider decorations (vendor namespaces, tags, quantization, service tiers,
+release channels and build stamps) into the base model, so one model served by
+several providers is one card. Model tiers, fine-tunes and parameter counts stay
+distinct. Selecting a card scopes the timeline and request log together. Model
+grouping is configuration-owned; stored model spellings remain available for
+exact export and deletion filters.
 Adapters can normalize those spellings before storage; see
 [request metadata](routes.md#request-rows-and-details).
 

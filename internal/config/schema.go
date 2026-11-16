@@ -445,7 +445,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Kind: KindAliases, HotReload: true},
 		// ---- models ----
 		{Key: "model_rules", Category: "models", Label: "Model grouping rules",
-			Help: "Capped at 64 rules. Ordered rewrite pipeline that merges spelling variants of the same model in every grouped surface (explorer model dimension, scope filters, debug checklist, the Logs download and Settings delete-filter model optgroups, and the request-log leaf\u2019s displayed name). Each rule is one step: exact (whole-string merge old → new), pattern (regex rewrite of all occurrences, $1 capture refs), lower (fold case). Rules apply once in order; the shipped default folds case, strips a `vendor/` namespace, strips a trailing `:tag`, strips a trailing architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies `.` with `-` between digits. An explicitly empty list groups by the exact stored spelling. Stored values remain unchanged; purge/export match them exactly and request details show the original. Debug matching uses separate native base-model normalization, not these display rules. Hot-reloads.",
+			Help: "Capped at 64 rules. Ordered rewrite pipeline that merges spelling variants of the same model in every grouped surface (explorer model dimension, scope filters, debug checklist, the Logs download and Settings delete-filter model optgroups, and the request-log leaf\u2019s displayed name). Each rule is one step: exact (whole-string merge old → new), pattern (regex rewrite of all occurrences, $1 capture refs), lower (fold case). Rules apply once in order; the shipped default folds case, strips one or more leading `vendor/` namespaces, strips trailing `:tag` deployments, strips a trailing run of serving decorations (quantization or format such as `-fp4`, `-q4_k_m`, `-gptq`; service tier such as `-fast`, `-speed`, `-value`; release channel such as `-preview`, `-latest`; build stamp such as `-1017`), and unifies `.` with `-` between digits. Model tiers such as `-flash` or `-pro`, fine-tunes such as `-abliterated` or `-rl`, and parameter counts stay distinct. An explicitly empty list groups by the exact stored spelling. Stored values remain unchanged; purge/export match them exactly and request details show the original. Debug matching uses separate native base-model normalization, not these display rules. Hot-reloads.",
 			Kind: KindModelRules, HotReload: true},
 		// ---- overrides ----
 		{Key: "request_overrides", Category: "overrides", Label: "Request override rules",
@@ -547,7 +547,7 @@ func (f Field) TypeLine(def any) string {
 		// fmt.Sprint of a []ModelRule would dump Go struct literals
 		// ("{lower   false}") - describe the shipped pipeline instead.
 		if def != nil {
-			b.WriteString(" \u00b7 default: the shipped pipeline (lower \u00b7 strip vendor/ \u00b7 strip :tag \u00b7 strip architecture/quant suffix \u00b7 unify . and - between digits); restorable in Settings with \u21ba default pipeline")
+			b.WriteString(" \u00b7 default: the shipped pipeline (lower \u00b7 strip vendor/ namespaces \u00b7 strip :tag \u00b7 strip serving decorations \u00b7 unify . and - between digits); restorable in Settings with \u21ba default pipeline")
 		}
 	case def != nil && f.Kind != KindProviders && f.Kind != KindAliases && f.Kind != KindStrings:
 		b.WriteString(" · default ")

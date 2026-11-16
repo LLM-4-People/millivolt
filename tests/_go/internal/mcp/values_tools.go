@@ -195,6 +195,51 @@ func TestValuesModelFoldsThroughTheProxysCanonicalization(t *testing.T) {
 	}
 }
 
+// TestValuesModelFoldsProviderDecorations is the observed-history regression:
+// one model served by several providers arrived as a nested vendor namespace,
+// a build stamp, a service tier and a quantization, and values(model) listed
+// the same weights as four different models. The default pipeline owns every
+// spelling difference, so the vocabulary returns one family and keeps a real
+// fine-tune apart.
+func TestValuesModelFoldsProviderDecorations(t *testing.T) {
+	rules, err := json.Marshal(map[string]any{"rules": config.DefaultModelRules()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, `{"seq":1,"feed_id":"f","counters":{},"storage":{"enabled":true},"records":[],`+
+		`"model_canon":`+string(rules)+`}`)
+	proxy.json(http.MethodGet, schemaPath, `[{"value":"deepseek-v4.1-flash-1017","requests":10},`+
+		`{"value":"deepseek-ai/deepseek-v4.1-flash-1017","requests":5},`+
+		`{"value":"deploy-ai/deepseek-ai/deepseek-v4.1-flash-1017","requests":2},`+
+		`{"value":"DeepSeek-V4.1-Flash-1017","requests":3},`+
+		`{"value":"deepseek-v4.1-flash-fast-fp4","requests":4},`+
+		`{"value":"deepseek-v4.1-flash-1017-abliterated","requests":1}]`)
+	service := newTestService(t, proxy, Limits{})
+
+	out, err := service.values(context.Background(), ValuesInput{Dim: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Returned != 2 {
+		t.Fatalf("the decorations collapse into one family and the fine-tune stays apart: %+v", out.Values)
+	}
+	for _, value := range out.Values {
+		switch value.Value {
+		case "deepseek-v4-1-flash":
+			if value.Requests != 24 {
+				t.Fatalf("the merged family count = %d, want 24", value.Requests)
+			}
+		case "deepseek-v4-1-flash-1017-abliterated":
+			if value.Requests != 1 {
+				t.Fatalf("the fine-tune count = %d, want 1", value.Requests)
+			}
+		default:
+			t.Fatalf("unexpected canonical model %q in %+v", value.Value, out.Values)
+		}
+	}
+}
+
 // TestValuesReportsTruncationExactly pins the one-extra-row signal: a value
 // beyond the cap is reported as withheld, and a result that fits is not.
 func TestValuesReportsTruncationExactly(t *testing.T) {

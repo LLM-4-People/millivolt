@@ -14,8 +14,8 @@ usage() {
   cat <<'EOF'
 usage: scripts/promote.sh [check|sync|gate|push]
 
-  check  verify that origin/main is an ancestor of the current testing tip
-  sync   fetch origin and merge origin/main into testing when it is behind
+  check  verify that origin/main is an ancestor of the current branch tip
+  sync   fetch origin and merge origin/main into the current branch
   gate   check, then run the local push gate (scripts/check.sh)
   push   gate, then push the current testing tip to origin/testing
 EOF
@@ -31,31 +31,34 @@ check() {
   fi
   local current
   current="$(branch)"
-  if [ "$current" != testing ]; then
-    echo "promote: not on testing (on ${current:-detached}); nothing to check" >&2
-    return 0
+  if [ "$current" = main ]; then
+    die "refusing to run the push gate on main; promote through a pull request"
   fi
+  # A feature branch is pushed to testing with HEAD:testing, so the branch name
+  # is not the promotion target. Every branch that can reach testing must carry
+  # current main, not just a branch literally named testing.
   git rev-parse --verify origin/main >/dev/null 2>&1 \
     || die "origin/main is not available; fetch it before running the push gate"
   git fetch -q origin main || die "cannot fetch origin/main"
   if ! git merge-base --is-ancestor origin/main HEAD; then
-    die "origin/main is not an ancestor of testing; run scripts/promote.sh sync before pushing"
+    die "origin/main is not an ancestor of ${current:-the detached HEAD}; run scripts/promote.sh sync before pushing"
   fi
 }
 
 sync() {
-  [ "$(branch)" = testing ] || die "sync runs on testing only"
+  [ "$(branch)" != main ] || die "sync does not run on main"
+  [ -n "$(branch)" ] || die "sync needs a branch, not a detached HEAD"
   [ -z "$(git status --porcelain --untracked-files=all)" ] \
     || die "commit or stash the working tree before syncing main"
   git fetch -q origin main || die "cannot fetch origin/main"
   if git merge-base --is-ancestor origin/main HEAD; then
-    echo "promote: testing already contains origin/main"
+    echo "promote: $(branch) already contains origin/main"
     return 0
   fi
   git merge --no-edit origin/main
   git merge-base --is-ancestor origin/main HEAD \
     || die "the merge did not make origin/main an ancestor"
-  echo "promote: testing now contains origin/main"
+  echo "promote: $(branch) now contains origin/main"
 }
 
 gate() {
@@ -65,7 +68,7 @@ gate() {
 
 push() {
   gate
-  [ "$(branch)" = testing ] || die "push runs on testing only"
+  [ "$(branch)" != main ] || die "push never runs on main"
   git push origin HEAD:testing
 }
 

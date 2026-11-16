@@ -9,6 +9,7 @@ observable contract.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -20,6 +21,7 @@ from urllib.parse import unquote, urlsplit
 
 from scripts.build_site import (DEFAULT_BASE_URL, README_ANCHORS, build_site, image_size,
                                 markdown_engine, performance_headline, render_fragment, toc_html)
+from scripts.perf_docs import check as performance_drift_errors
 from tests.repository_check import markdown_anchors
 from tests.support import (PALETTE_OWNER, ROOT, SITE_STYLESHEET, root_custom_properties,
                            site_palette_errors, token_drift_errors)
@@ -37,7 +39,16 @@ STALE_SOURCE_ASSETS = (
 )
 # Runtime-only assets may live in the published tree without a markup or
 # stylesheet reference. The list stays empty unless a genuine case appears.
-RUNTIME_ASSET_ALLOWLIST = frozenset()
+RUNTIME_ASSET_ALLOWLIST = frozenset({
+    # The pre-hash names. A document cached before the content-hashed deploy
+    # still asks for these; they carry the current bytes and disappear only
+    # after every client cache has turned over. No page links them.
+    "assets/tokens.css", "assets/site.css", "assets/site.js",
+})
+# The shell files at content-hashed URLs: each generation is served for a
+# document cached by an earlier deployment, so none of them has an in-repo
+# consumer. The current generation is asserted separately.
+SHELL_GENERATION = re.compile(r"assets/(?:tokens|site)\.[0-9a-f]{10}\.(?:css|js)$")
 
 
 class PageParser(HTMLParser):
@@ -119,7 +130,7 @@ def asset_reference_errors(site: Path, texts: list[str]) -> list[str]:
         if not asset.is_file():
             continue
         rel = asset.relative_to(site).as_posix()
-        if rel in RUNTIME_ASSET_ALLOWLIST:
+        if rel in RUNTIME_ASSET_ALLOWLIST or SHELL_GENERATION.fullmatch(rel):
             continue
         if rel not in corpus:
             errors.append(f"published asset {rel} is not referenced by generated HTML, "
@@ -163,13 +174,16 @@ def brand_image_errors() -> list[str]:
 
 
 PERFORMANCE_SECTIONS = (
-    "method",
     "artifact-and-idle-footprint",
+    "method",
     "fast-response-throughput",
+    "sustained-capacity",
     "streaming-concurrency",
+    "streaming-throughput",
     "durable-writer-and-overload",
     "storage-and-retained-projection",
     "query-and-metadata-paths",
+    "implementation-benchmarks",
     "reproduce",
     "limitations",
 )
@@ -187,12 +201,15 @@ def performance_page_errors(site: Path, page_texts: dict[Path, str]) -> list[str
     for section in PERFORMANCE_SECTIONS:
         if f'id="{section}"' not in text:
             errors.append(f"performance page is missing section #{section}")
-    if text.count("<table>") < 8:
-        errors.append(f"performance page has {text.count('<table>')} tables, want at least 8")
+    if text.count("<table>") < 12:
+        errors.append(f"performance page has {text.count('<table>')} tables, want at least 12")
     normalized = re.sub(r"\s+", " ", text)
-    for phrase in ("2026-10-20 UTC", "not deployment guarantees", "Reproduce"):
+    for phrase in ("not deployment guarantees", "generated from the result bundle", "Reproduce"):
         if phrase not in normalized:
             errors.append(f"performance page is missing {phrase!r}")
+    # The page is generated, not edited: a bundle or page change that is not
+    # rendered together fails here instead of publishing a stale number.
+    errors.extend(performance_drift_errors(ROOT))
     landing = page_texts.get(site / "index.html", "")
     try:
         headline = performance_headline()
@@ -217,6 +234,53 @@ def performance_page_errors(site: Path, page_texts: dict[Path, str]) -> list[str
     return errors
 
 
+def referenced_shell(site: Path, stem: str, extension: str) -> str:
+    """The content-hashed name every page must reference for this asset."""
+    text = (site / "index.html").read_text(encoding="utf-8")
+    match = re.search(rf"assets/({stem}\.[0-9a-f]{{10}}\.{extension})", text)
+    return match.group(1) if match else ""
+
+
+def shell_asset_errors(site: Path) -> list[str]:
+    """The three shell files load at content-hashed URLs.
+
+    A cached document and a new deployment must never pair a page with an
+    incompatible stylesheet or script: the URL names the bytes. The name is
+    verified against the file, the stable spelling must not appear in any page,
+    and the generations the build retained from history must be on disk so a
+    document still holding the previous hash keeps its styling.
+    """
+    import scripts.build_site as build_site
+
+    errors: list[str] = []
+    for stem, extension in (("tokens", "css"), ("site", "css"), ("site", "js")):
+        name = referenced_shell(site, stem, extension)
+        if not name:
+            errors.append(f"no page references a content-hashed {stem}.{extension}")
+            continue
+        path = site / "assets" / name
+        if not path.is_file():
+            errors.append(f"missing referenced asset: assets/{name}")
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()[:10]
+        if not name.startswith(f"{stem}.{digest}."):
+            errors.append(f"assets/{name} does not carry its content hash")
+    for page in sorted(site.rglob("*.html")):
+        text = page.read_text(encoding="utf-8")
+        for stable in ("assets/tokens.css", "assets/site.css", "assets/site.js"):
+            if stable in text:
+                errors.append(f"{page.relative_to(site)}: references the unhashed {stable}")
+    if (ROOT / ".git").exists():
+        retained = build_site.retained_shell_assets()
+        for key, generations in retained.items():
+            stem, extension, _stable = build_site.SHELL_ASSETS[key]
+            for content in generations:
+                name = build_site.asset_filename(stem, extension, content)
+                if not (site / "assets" / name).exists():
+                    errors.append(f"retained generation assets/{name} was not published")
+    return errors
+
+
 def not_found_base_errors() -> list[str]:
     """A nested 404 must use the absolute path of whatever base it deploys on."""
     errors: list[str] = []
@@ -228,8 +292,9 @@ def not_found_base_errors() -> list[str]:
             site = Path(temp) / "site"
             build_site(site, base_url=base_url)
             text = (site / "404.html").read_text(encoding="utf-8")
+            site_css = referenced_shell(site, "site", "css")
             for needle in (
-                f'href="{prefix}assets/site.css"',
+                f'href="{prefix}assets/{site_css}"',
                 f'href="{prefix}index.html"',
                 'name="robots" content="noindex,follow"',
                 f'property="og:url" content="{base_url}"',
@@ -320,41 +385,37 @@ def content_safety_errors() -> list[str]:
 
 
 def performance_headline_escape_errors() -> list[str]:
-    """The landing headline values are the one doc-derived sink outside the
-    sanitizer.
+    """The landing headline values are the one bundle-derived sink outside the
+    Markdown sanitizer.
 
-    The landing page is assembled from `site-src/templates/landing.html`, not
-    from `md.convert`, so `sanitize_content` never sees it. `perf_*` comes from
-    a table cell in `docs/performance.md`, which is author-controlled Markdown:
-    before the fix that cell was interpolated raw and a payload with an
-    `onerror` handler executed on the published landing page. Pin the escaping
-    by driving the real extractor over a poisoned canonical page.
+    The landing page is assembled from `site-src/templates/landing.html`, so
+    `sanitize_content` never sees it. The values come from
+    `perf/results.json`; a hand-edited or hostile bundle must reach the page as
+    literal text, never as markup. The date and revision are format-checked in
+    the reader, and every value is escaped at the sink.
     """
     import scripts.build_site as build_site
 
-    original = build_site.DOCS
-    errors = []
-    with tempfile.TemporaryDirectory(prefix="millivolt-perf-") as temp:
-        docs = Path(temp) / "docs"
-        docs.mkdir()
-        (docs / "performance.md").write_text(
-            "| Label | A | B | C |\n"
-            '| amd64 runtime image | 1 | <img src="https://e.test/x.png" '
-            'onerror="window.__pwned=1">PAWNED | note |\n'
-            "| Idle process, empty SQLite | 1 | 2 MiB | note |\n"
-            "| 128 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 114 MiB | note |\n"
-            "| 48 | 1 | 2 | 14166 | 4 |\n",
-            encoding="utf-8")
-        build_site.DOCS = docs
-        try:
-            headline = build_site.performance_headline()
-        finally:
-            build_site.DOCS = original
-    for key, value in headline.items():
-        if "<" in value or "onerror" in value.lower():
-            errors.append(f"site: {key} reaches the landing template as markup: {value!r}")
-    if "PAWNED" not in headline.get("perf_image", ""):
-        errors.append("site: the poisoned cell's text did not survive as escaped display text")
+    errors: list[str] = []
+    payload = '<img src="https://e.test/x.png" onerror="window.__pwned=1">PAWNED'
+    original = build_site.performance_headline
+    build_site.performance_headline = lambda: {
+        key: payload for key in ("perf_image", "perf_idle", "perf_loaded", "perf_rps",
+                                 "perf_sustained", "perf_date", "perf_revision",
+                                 "perf_revision_full", "perf_platform")
+    }
+    try:
+        page = build_site.render_landing(
+            version="0.0.0", base_url="https://example.test/", theme_color="#000000",
+            assets={"asset_tokens": "tokens.0000000000.css",
+                    "asset_site_css": "site.0000000000.css",
+                    "asset_site_js": "site.0000000000.js"})
+    finally:
+        build_site.performance_headline = original
+    if '<img src="https://e.test/x.png"' in page or 'onerror="window.__pwned=1"' in page:
+        errors.append("site: a performance value reaches the landing template as markup")
+    if "PAWNED" not in page:
+        errors.append("site: an escaped performance value lost its literal text")
     return errors
 
 
@@ -500,9 +561,12 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
             if not target or not target.exists():
                 errors.append(f"{rel}: missing stylesheet {href}")
         styles = [Path(urlsplit(href).path).name for href in parser.styles]
-        if ("tokens.css" in styles and "site.css" in styles
-                and styles.index("tokens.css") > styles.index("site.css")):
-            errors.append(f"{rel}: assets/tokens.css must load before assets/site.css")
+        tokens_index = next((index for index, name in enumerate(styles)
+                             if name.startswith("tokens.")), None)
+        site_index = next((index for index, name in enumerate(styles)
+                           if name.startswith("site.")), None)
+        if tokens_index is not None and site_index is not None and tokens_index > site_index:
+            errors.append(f"{rel}: the token stylesheet must load before the site stylesheet")
         text = page_texts[page]
         if "{{title}}" in text or "{{root}}" in text or "{{body}}" in text:
             errors.append(f"{rel}: unresolved base token")
@@ -530,15 +594,17 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
         errors.append("404.html must be noindex,follow")
     if 'rel="canonical"' in not_found:
         errors.append("404.html must not declare a canonical URL")
-    if f'href="{base_path}assets/site.css"' not in not_found:
+    if f'href="{base_path}assets/{referenced_shell(site, "site", "css")}"' not in not_found:
         errors.append("404.html must load site assets from the absolute site root")
 
     for name in ("docs/index.html", "docs/dashboard.html", "docs/operations.html",
                  "contributing.html", "security.html", "404.html", "search.json",
-                 "sitemap.xml", "robots.txt", "assets/tokens.css", "assets/site.css",
-                 "assets/site.js", "assets/og.png"):
+                 "sitemap.xml", "robots.txt", "assets/og.png"):
         if not (site / name).exists():
             errors.append(f"missing generated file: {name}")
+    for stem, extension in (("tokens", "css"), ("site", "css"), ("site", "js")):
+        if not referenced_shell(site, stem, extension):
+            errors.append(f"no page references a content-hashed {stem}.{extension}")
     # One published origin: the metadata a crawler reads names the base URL, so
     # a build cannot half-migrate to a custom domain or leak a fork's origin
     # into canonical, social or sitemap output. Ordinary outbound links to the
@@ -564,10 +630,15 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
         if found != published_host:
             errors.append(f"robots.txt: sitemap names {found} instead of the published host")
 
-    tokens_path = site / "assets/tokens.css"
+    tokens_name = referenced_shell(site, "tokens", "css")
+    tokens_path = site / "assets" / tokens_name
     if tokens_path.exists():
         errors.extend(token_drift_errors(
-            canonical_css, tokens_path.read_text(encoding="utf-8"), "assets/tokens.css"))
+            canonical_css, tokens_path.read_text(encoding="utf-8"), f"assets/{tokens_name}"))
+    else:
+        errors.append(f"missing referenced token stylesheet: assets/{tokens_name}")
+
+    errors.extend(shell_asset_errors(site))
 
     site_css_path = ROOT / SITE_STYLESHEET
     if not site_css_path.exists():

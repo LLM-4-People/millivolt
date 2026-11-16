@@ -180,9 +180,23 @@ out or the process restarts. Back up before an intentional history rename.
 
 `model_rules` instead controls display/grouping. The list is capped at 64 rules.
 Its ordered exact, pattern and lowercase steps keep stored model spellings
-unchanged; an empty rule list groups by those raw spellings. The Settings editor supports reordering, parking and
-previewing rules. Raw export/delete predicates do not silently expand to a
-display group. Debug's native-model normalization is separate from these rules.
+unchanged; an empty rule list groups by those raw spellings. The shipped
+pipeline folds case, strips one or more leading `vendor/` namespaces and
+trailing `:tag` deployments, strips a trailing run of serving decorations, and
+unifies `.` with `-` between digits. A decoration is what a provider adds
+around the same weights: a quantization or serving format (`-fp4`, `-nvfp4`,
+`-bf16`, `-int8`, `-q4_k_m`, `-gptq`, `-awq`, `-gguf`), a service tier
+(`-fast`, `-speed`, `-value`, `-free`), a release channel (`-preview`,
+`-latest`, `-beta`, `-alpha`, `-stable`, `-experimental`), a reasoning or
+effort word (`-thinking`, `-reasoning`, `-xhigh`, `-high`, `-medium`, `-low`,
+`-minimal`), or a build stamp (`-1017`, `-20250929`). Model tiers (`-flash`,
+`-pro`, `-mini`, `-ultra`, `-lite`, `-nano`, `-turbo`, `-max`), fine-tunes
+(`-abliterated`, `-rl`), specifications (`-coder`, `-base`, `-chat`, `-it`)
+and parameter counts stay distinct. Add an exact rule above the shipped
+pipeline to split a group, or one it cannot recognize to merge the spelling.
+The Settings editor supports reordering, parking and previewing rules. Raw
+export/delete predicates do not silently expand to a display group. Debug's
+native-model normalization is separate from these rules.
 
 ### Request overrides
 

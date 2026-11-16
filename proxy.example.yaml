@@ -856,20 +856,23 @@ dash_background_refresh: false
 # checklist, the Logs download and Settings delete-filter model optgroups, and the
 # request-log leaf’s displayed name). Each rule is one step: exact (whole-string merge
 # old → new), pattern (regex rewrite of all occurrences, $1 capture refs), lower (fold
-# case). Rules apply once in order; the shipped default folds case, strips a `vendor/`
-# namespace, strips a trailing `:tag`, strips a trailing architecture/quant suffix
-# (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies `.` with `-` between
-# digits. An explicitly empty list groups by the exact stored spelling. Stored values
-# remain unchanged; purge/export match them exactly and request details show the original.
-# Debug matching uses separate native base-model normalization, not these display rules.
-# Hot-reloads.
+# case). Rules apply once in order; the shipped default folds case, strips one or more
+# leading `vendor/` namespaces, strips trailing `:tag` deployments, strips a trailing run
+# of serving decorations (quantization or format such as `-fp4`, `-q4_k_m`, `-gptq`;
+# service tier such as `-fast`, `-speed`, `-value`; release channel such as `-preview`,
+# `-latest`; build stamp such as `-1017`), and unifies `.` with `-` between digits. Model
+# tiers such as `-flash` or `-pro`, fine-tunes such as `-abliterated` or `-rl`, and
+# parameter counts stay distinct. An explicitly empty list groups by the exact stored
+# spelling. Stored values remain unchanged; purge/export match them exactly and request
+# details show the original. Debug matching uses separate native base-model normalization,
+# not these display rules. Hot-reloads.
 # Hot-reload: yes.
-#   type: ordered list of {mode: exact|pattern|lower, from, to} rewrite rules · default: the shipped pipeline (lower · strip vendor/ · strip :tag · strip architecture/quant suffix · unify . and - between digits); restorable in Settings with ↺ default pipeline
+#   type: ordered list of {mode: exact|pattern|lower, from, to} rewrite rules · default: the shipped pipeline (lower · strip vendor/ namespaces · strip :tag · strip serving decorations · unify . and - between digits); restorable in Settings with ↺ default pipeline
 model_rules:
   - {mode: lower, from: "", to: ""}
-  - {mode: pattern, from: "^[a-z0-9][a-z0-9._-]*/", to: ""}
-  - {mode: pattern, from: ":[a-z0-9._-]+$", to: ""}
-  - {mode: pattern, from: "-(?:[a-z]{0,2}fp\\d+|bf\\d+|int\\d+|nf\\d+|[a-z]?q\\d+(?:_[0-9a-z]+)*)$", to: ""}
+  - {mode: pattern, from: "^(?:[a-z0-9][a-z0-9._-]*/)+", to: ""}
+  - {mode: pattern, from: "(?::[a-z0-9._-]+)+$", to: ""}
+  - {mode: pattern, from: "(?:-(?:[a-z]{0,2}fp\\d+|bf\\d+|int\\d+|nf\\d+|[a-z]?q\\d+(?:_[0-9a-z]+)*|gptq|awq|gguf|exl2|mlx|onnx|ggml|fast|speed|value|free|preview|latest|beta|alpha|stable|experimental|thinking|reasoning|xhigh|high|medium|low|minimal|(?:\\d{4}|\\d{8})))+$", to: ""}
   - {mode: pattern, from: "(\\d)\\.(\\d)", to: "$1-$2"}
 
 # ---- Providers ----

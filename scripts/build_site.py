@@ -11,12 +11,14 @@ files.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import textwrap
 from dataclasses import dataclass
@@ -43,6 +45,7 @@ GITHUB_TREE = f"{GITHUB_REPOSITORY}/tree/{GITHUB_BRANCH}/"
 GITHUB_EDIT = f"{GITHUB_REPOSITORY}/edit/{GITHUB_BRANCH}/"
 
 sys.path.insert(0, str(ROOT))
+from scripts.perf_docs import DataError, landing_metrics  # noqa: E402
 from tests.repository_check import heading_slug  # noqa: E402
 from tests.support import root_custom_properties  # noqa: E402
 
@@ -719,6 +722,7 @@ def base_values(
     active: str = "docs",
     root_override: str | None = None,
     include_canonical: bool = True,
+    assets: dict[str, str] | None = None,
 ) -> dict[str, str]:
     canonical_path = "" if output == "index.html" else output
     canonical = urljoin(base_url, canonical_path)
@@ -739,7 +743,7 @@ def base_values(
     if include_canonical:
         canonical_tag = f'<link rel="canonical" href="{attr_escape(canonical)}">'
     og_url = base_url if output == "404.html" else canonical
-    return {
+    values = {
         "title": html.escape(title),
         "description": attr_escape(description),
         "canonical": attr_escape(canonical),
@@ -757,6 +761,8 @@ def base_values(
         "nav_overview": ' aria-current="page"' if active == "overview" else "",
         "nav_docs": ' aria-current="page"' if active == "docs" else "",
     }
+    values.update(assets or {})
+    return values
 
 
 def render_base(values: dict[str, str]) -> str:
@@ -765,51 +771,19 @@ def render_base(values: dict[str, str]) -> str:
 
 
 def performance_headline() -> dict[str, str]:
-    """Read the landing's four headline values from the canonical measured page.
+    """The landing's four headline values, from the measured result bundle.
 
-    The performance page owns every published number. Parsing labelled table
-    rows keeps the landing cards from becoming a second source; a renamed or
-    removed row fails the build instead of silently drifting.
-
-    Each value is escaped here because these cells are the one doc-derived text
-    that does not travel through `sanitize_content`: the landing page is built
-    from the template, not from `md.convert`. A table cell is author-controlled
-    Markdown text, so it must never reach the template as markup.
+    perf/results.json is the only source of published performance numbers;
+    docs/performance.md is rendered from it by scripts/perf_docs.py. Reading the
+    bundle here keeps the landing from becoming a second parser of the page.
     """
-    page = DOCS / "performance.md"
-    if not page.is_file():
-        raise BuildError("missing canonical performance page: docs/performance.md")
-    rows = {}
-    for line in page.read_text(encoding="utf-8").splitlines():
-        if not line.startswith("| "):
-            continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if cells:
-            rows.setdefault(cells[0], cells)
-    def cells(label: str) -> list[str]:
-        if label not in rows:
-            raise BuildError(f"docs/performance.md has no table row labelled {label!r}")
-        return rows[label]
-    image = cells("amd64 runtime image")
-    idle = cells("Idle process, empty SQLite")
-    fast = cells("128")
-    sustained = cells("48")
-    if len(image) < 3 or len(idle) < 3 or len(fast) < 8 or len(sustained) < 4:
-        raise BuildError("docs/performance.md table rows are missing headline cells")
-    # Display text only: strip any inline Markdown/HTML the cell carries, then
-    # escape what remains.
-    def display(cell: str) -> str:
-        return html.escape(strip_html(cell))
-
-    return {
-        "perf_image": display(image[2]),
-        "perf_idle": display(idle[2]),
-        "perf_loaded": display(fast[7]),
-        "perf_rps": display(sustained[3]),
-    }
+    try:
+        return landing_metrics(ROOT)
+    except DataError as exc:
+        raise BuildError(f"cannot read the performance bundle: {exc}") from exc
 
 
-def render_landing(*, version: str, base_url: str, theme_color: str) -> str:
+def render_landing(*, version: str, base_url: str, theme_color: str, assets: dict[str, str]) -> str:
     body = (TEMPLATES / "landing.html").read_text(encoding="utf-8")
     perf = performance_headline()
     schema = {
@@ -850,12 +824,14 @@ def render_landing(*, version: str, base_url: str, theme_color: str) -> str:
         theme_color=theme_color,
         head_extra=head_extra,
         active="overview",
+        assets=assets,
     )
-    values.update(perf)
+    values.update({key: html.escape(value) for key, value in perf.items()})
     return render_base(values)
 
 
-def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, site_root: Path) -> tuple[str, dict]:
+def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, site_root: Path,
+               assets: dict[str, str]) -> tuple[str, dict]:
     assert page.source is not None
     title, description, content, tokens = render_markdown(page.source, page.output, site_root)
     title = page.title or title
@@ -938,6 +914,7 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
         body_class="docs",
         theme_color=theme_color,
         active="docs",
+        assets=assets,
     )
     return render_base(values), {
         "title": title,
@@ -956,7 +933,7 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
     }
 
 
-def render_not_found(*, version: str, base_url: str, theme_color: str) -> str:
+def render_not_found(*, version: str, base_url: str, theme_color: str, assets: dict[str, str]) -> str:
     # A custom 404 served from a nested path must not resolve assets relative
     # to that path. Use the site's absolute base path and keep the page out of
     # search results with no canonical URL.
@@ -986,6 +963,7 @@ def render_not_found(*, version: str, base_url: str, theme_color: str) -> str:
         root_override=site_root,
         include_canonical=False,
         head_extra='<meta name="robots" content="noindex,follow">',
+        assets=assets,
     )
     return render_base(values)
 
@@ -1019,7 +997,7 @@ def canonical_tokens() -> dict[str, str]:
     return root_custom_properties(DASHBOARD_CSS.read_text(encoding="utf-8"))
 
 
-def write_tokens_css(site_root: Path, tokens: dict[str, str]) -> None:
+def render_tokens_css(tokens: dict[str, str]) -> str:
     lines = [
         "/* Generated by scripts/build_site.py from the dashboard :root palette.",
         "   Do not edit: internal/web/static/css/dashboard.css is the owner. */",
@@ -1027,10 +1005,81 @@ def write_tokens_css(site_root: Path, tokens: dict[str, str]) -> None:
     ]
     lines.extend(f"  {name}: {value};" for name, value in tokens.items())
     lines.append("}")
-    (site_root / "assets" / "tokens.css").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n"
 
 
-def copy_assets(site_root: Path, tokens: dict[str, str]) -> None:
+# The three files every page loads before any content renders. They are served
+# at content-hashed URLs so a cached page and a new deployment can never pair a
+# document with an incompatible stylesheet or script; GitHub Pages sets its own
+# Cache-Control, and a unique URL is the part this repository controls.
+SHELL_ASSETS = {
+    "asset_tokens": ("tokens", "css", "tokens.css"),
+    "asset_site_css": ("site", "css", "site.css"),
+    "asset_site_js": ("site", "js", "site.js"),
+}
+# How many earlier source revisions to republish per asset. GitHub Pages caches
+# HTML for ten minutes, so the immediately previous generation is what a cached
+# document can still ask for; keeping a few more covers rapid redeploys.
+SHELL_RETENTION = 6
+
+
+def asset_filename(stem: str, extension: str, content: bytes) -> str:
+    """A stable name for these exact bytes: the document cache key is the URL."""
+    return f"{stem}.{hashlib.sha256(content).hexdigest()[:10]}.{extension}"
+
+
+def shell_sources(tokens: dict[str, str]) -> dict[str, bytes]:
+    return {
+        "asset_tokens": render_tokens_css(tokens).encode(),
+        "asset_site_css": (SITE_SRC / "assets" / "site.css").read_bytes(),
+        "asset_site_js": (SITE_SRC / "assets" / "site.js").read_bytes(),
+    }
+
+
+def git_show(revision: str, path: str) -> bytes | None:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"{revision}:{path}"],
+        capture_output=True, check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def git_history(path: str) -> list[str]:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "log", f"-n{SHELL_RETENTION}", "--format=%H", "--", path],
+        capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return []
+    return result.stdout.split()
+
+
+def retained_shell_assets() -> dict[str, list[bytes]]:
+    """Earlier published bytes, regenerated from the revisions that produced them.
+
+    A document cached before a deploy still references the previous hash. If
+    that file is absent the page loads with no styles or script, so the last few
+    generations stay in the published output. A checkout without history (a
+    source archive) simply has nothing to retain.
+    """
+    retained: dict[str, list[bytes]] = {
+        "asset_tokens": [], "asset_site_css": [], "asset_site_js": []}
+    tokens_path = "internal/web/static/css/dashboard.css"
+    for revision in git_history(tokens_path):
+        source = git_show(revision, tokens_path)
+        if source is not None:
+            retained["asset_tokens"].append(
+                render_tokens_css(root_custom_properties(source.decode())).encode())
+    for key, path in (("asset_site_css", "site-src/assets/site.css"),
+                      ("asset_site_js", "site-src/assets/site.js")):
+        for revision in git_history(path):
+            source = git_show(revision, path)
+            if source is not None:
+                retained[key].append(source)
+    return retained
+
+
+def copy_assets(site_root: Path, tokens: dict[str, str]) -> dict[str, str]:
     assets = site_root / "assets"
     assets.mkdir(parents=True, exist_ok=True)
     if (SITE_SRC / "assets").is_dir():
@@ -1049,8 +1098,24 @@ def copy_assets(site_root: Path, tokens: dict[str, str]) -> None:
             target = assets / "images" / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
-    write_tokens_css(site_root, tokens)
+    names: dict[str, str] = {}
+    sources = shell_sources(tokens)
+    for key, (stem, extension, stable) in SHELL_ASSETS.items():
+        content = sources[key]
+        names[key] = asset_filename(stem, extension, content)
+        (assets / names[key]).write_bytes(content)
+        # The pre-hash spelling stays published so a document cached before
+        # this scheme still finds a stylesheet. No page links it.
+        if not (assets / stable).exists() or key == "asset_tokens":
+            (assets / stable).write_bytes(content)
+    for key, generations in retained_shell_assets().items():
+        stem, extension, _stable = SHELL_ASSETS[key]
+        for content in generations:
+            name = asset_filename(stem, extension, content)
+            if name != names[key] and not (assets / name).exists():
+                (assets / name).write_bytes(content)
     (site_root / ".nojekyll").write_text("", encoding="utf-8")
+    return names
 
 
 def readme_image_errors() -> list[str]:
@@ -1085,7 +1150,7 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
     if output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True)
-    copy_assets(output, tokens)
+    assets = copy_assets(output, tokens)
 
     pages: list[Page] = []
     # Docs pages, in nav order, plus any unlisted docs file.
@@ -1115,7 +1180,7 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
             pages.append(page_for_source(source, kind="doc"))
 
     (output / "index.html").write_text(
-        render_landing(version=version, base_url=base_url, theme_color=theme_color),
+        render_landing(version=version, base_url=base_url, theme_color=theme_color, assets=assets),
         encoding="utf-8",
     )
     search_index: list[dict] = []
@@ -1126,13 +1191,14 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
             base_url=base_url,
             theme_color=theme_color,
             site_root=output,
+            assets=assets,
         )
         target = output / page.output
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
         search_index.append(search)
     (output / "404.html").write_text(
-        render_not_found(version=version, base_url=base_url, theme_color=theme_color),
+        render_not_found(version=version, base_url=base_url, theme_color=theme_color, assets=assets),
         encoding="utf-8",
     )
 

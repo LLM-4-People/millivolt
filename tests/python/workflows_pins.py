@@ -31,13 +31,16 @@ def check_actions(workflow: dict, path: Path, errors: list[str]) -> None:
 # a write scope, and only the Pages deploy job may publish.
 JOB_PERMISSIONS = {
     "check.yml": {
-        "unit": {},
+        # unit runs the code-scanning gate; the read scope is the alert list,
+        # never a write to the security state.
+        "unit": {"contents": "read", "security-events": "read"},
         "browser": {},
         "container": {},
         "escalation-proof": {"actions": "read", "checks": "read"},
         "required": {"contents": "read", "checks": "read", "actions": "read"},
         "publish": {"contents": "write", "packages": "write", "id-token": "write",
-                    "attestations": "write", "artifact-metadata": "write"},
+                    "attestations": "write", "artifact-metadata": "write",
+                    "security-events": "read"},
         "publish-testing": {"contents": "read", "packages": "write", "id-token": "write",
                             "attestations": "write", "artifact-metadata": "write"},
     },
