@@ -80,14 +80,21 @@ async def wait_ready(page: Page, dim: str, count: int, *, chart: bool = True,
         'history capture has pending work or storage loss')
 
 
-async def wait_scoped(page: Page) -> None:
-    """A filtered scope has its own count, so the total-record wait cannot run."""
-    await page.wait_for_function("""() => {
+async def wait_scoped(page: Page, total: int) -> None:
+    """Wait for a filtered scope, never the unfiltered total.
+
+    Before the click lands, the scope still matches every record and the
+    chart sum equals it; that state satisfies a naive "some scope" wait and
+    the capture then misses the chip. The total is what distinguishes the
+    two.
+    """
+    await page.wait_for_function("""total => {
         const n = explorerAgg?.scope?.matches;
-        return typeof n === 'number' && n > 0 &&
+        return typeof n === 'number' && n > 0 && n < total &&
+            document.querySelector('#xp-scope .chip-x[data-chip-dim]') &&
             chartAgg?.buckets.reduce((sum,b) => sum+b.req,0) === n &&
             lastData && !_renderQueued && !_renderDirty;
-    }""", timeout=READY_TIMEOUT)
+    }""", arg=total, timeout=READY_TIMEOUT)
     require(await page.evaluate("() => kpiInFlight() === 0 && storageState?.dropped === 0"),
             'scoped history capture has pending work or storage loss')
 
@@ -162,8 +169,8 @@ async def scene_scoped(page: Page, base: str, plate: Plate, count: int) -> None:
     cards = page.locator("#xp-gallery .xp-node[data-xp-key]")
     require(await cards.count() >= 2, "scoped explorer needs two values")
     await cards.first.click()
-    await wait_scoped(page)
-    require(await page.locator("#xp-scope [data-xp-clear]").count() == 1,
+    await wait_scoped(page, count)
+    require(await page.locator("#xp-scope .chip-x[data-chip-dim]").count() == 1,
             "scoped capture has no removable filter chip")
 
 
