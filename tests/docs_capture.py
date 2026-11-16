@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 from playwright.async_api import Page
 
-from scripts.gallery import GALLERY, Plate, compose, manifest
+from scripts.gallery import GALLERY, Plate, manifest
 from scripts.gallery.model import VIEWPORTS
 from .browser_check import require
 from .support import pick_chart_control
@@ -384,6 +384,10 @@ async def _capture(page: Page, base: str, plate: Plate, count: int, staging: Pat
         else:
             selector = plate.setup.get("selector") or SELECTORS[plate.kind]
             await capture_image(page, target, selector)
+
+    # Pillow is only needed by the documentation capture, not by the browser
+    # guard import that shares this module; keep it out of the module import.
+    from scripts.gallery import compose
 
     await apply_mode(page, compose.DARK_MODE)
     await shoot(dark)
