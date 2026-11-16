@@ -1,7 +1,8 @@
 # Documentation
 
-millivolt is one self-hosted service for routing OpenAI-compatible traffic,
-seeing what happened, and controlling the operator surface. Start with the path
+millivolt is one self-hosted service for routing model traffic across OpenAI
+Chat Completions, OpenAI Responses and Anthropic Messages, seeing what happened,
+and controlling the operator surface. Start with the path
 that matches what you need to do.
 
 ## First ten minutes

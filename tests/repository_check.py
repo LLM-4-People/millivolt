@@ -17,7 +17,7 @@ from .support import (ROOT,
 IGNORED_PATHS = (
     "AGENTS.md", "agents.md", "internal/AGENTS.md",
     "proxy.yaml", "proxy", "stress", "proxy.db", "proxy.db-wal", "proxy.db-shm",
-    "proxy.log", "node_modules/fixture/index.js", ".venv/bin/python",
+    "proxy.log", "node_modules/fixture/index.js", ".venv/bin/python", "containercheck",
     "tests/__pycache__/fixture.cpython-313.pyc", ".env", ".env.local",
     ".proxy.yaml-incomplete", "operator.local.yaml", "other.db-journal",
     "other.sqlite-wal", "other.sqlite3-shm", "credential.pem", "credential.key",

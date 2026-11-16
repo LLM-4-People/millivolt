@@ -47,3 +47,18 @@
 **/.DS_Store
 **/proxy.yaml
 **/.proxy.yaml-*
+# Dependencies, generated trees and local tool state. The allowlist above
+# already denies these, but they must stay denied if a future COPY widens it.
+**/containercheck
+**/node_modules/
+**/.venv/
+**/site/
+**/bin/
+**/dist/
+**/coverage/
+**/test-results/
+**/playwright-report/
+**/.impeccable/
+**/backups/
+**/captures/
+**/exports/

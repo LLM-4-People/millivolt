@@ -20,7 +20,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from scripts.build_site import (DEFAULT_BASE_URL, README_ANCHORS, build_site, image_size,
-                                markdown_engine, performance_headline, render_fragment, toc_html)
+                                markdown_engine, performance_headline, render_fragment,
+                                site_fonts, toc_html)
 from scripts.perf_docs import check as performance_drift_errors
 from tests.repository_check import markdown_anchors
 from tests.support import (PALETTE_OWNER, ROOT, SITE_STYLESHEET, root_custom_properties,
@@ -132,7 +133,11 @@ def asset_reference_errors(site: Path, texts: list[str]) -> list[str]:
         rel = asset.relative_to(site).as_posix()
         if rel in RUNTIME_ASSET_ALLOWLIST or SHELL_GENERATION.fullmatch(rel):
             continue
-        if rel not in corpus:
+        # A stylesheet inside assets/ names a sibling by its path under
+        # assets/ (for example url("fonts/instrument-sans.woff2")), while
+        # HTML names the published path. Either spelling is a real consumer.
+        local = rel.removeprefix("assets/")
+        if rel not in corpus and local not in corpus:
             errors.append(f"published asset {rel} is not referenced by generated HTML, "
                           "a template, JavaScript, or CSS")
     return errors
@@ -278,6 +283,52 @@ def shell_asset_errors(site: Path) -> list[str]:
                 name = build_site.asset_filename(stem, extension, content)
                 if not (site / "assets" / name).exists():
                     errors.append(f"retained generation assets/{name} was not published")
+    return errors
+
+
+def css_declarations(block: str) -> dict[str, str]:
+    declarations: dict[str, str] = {}
+    for piece in block.split(";"):
+        key, separator, value = piece.partition(":")
+        if separator:
+            declarations[key.strip()] = value.strip()
+    return declarations
+
+
+def docs_shell_layout_errors(site: Path) -> list[str]:
+    """Docs pages spend available width on the article, not on empty gutters.
+
+    Reference tables wrap cells when the article inherits the marketing
+    measure. The docs frame is wider than the marketing shell, every docs
+    header and footer shares it, and the article has no cap of its own. Prose
+    keeps its 70ch measure, so the extra width goes to tables and code.
+    """
+    name = referenced_shell(site, "site", "css")
+    if not name:
+        return ["no page references the site stylesheet"]
+    css = (site / "assets" / name).read_text(encoding="utf-8")
+    errors: list[str] = []
+    open_rule = re.findall(r"\.doc-main\s*\{([^}]*)\}", css)
+    if not open_rule:
+        errors.append("site stylesheet has no docs article rule")
+    for block in open_rule:
+        article = css_declarations(block)
+        if "max-width" in article:
+            errors.append(f"the docs article caps its width at {article['max-width']}")
+    shell_rule = re.search(r"(?m)^\.docs-shell\s*\{([^}]*)\}", css)
+    if not shell_rule:
+        errors.append("site stylesheet has no docs shell rule")
+    else:
+        shell = css_declarations(shell_rule.group(1))
+        if shell.get("width") != "var(--docs-width)":
+            errors.append("the docs shell does not use the shared docs frame width")
+    wrap_rule = re.search(r"body\.docs \.wrap\s*\{([^}]*)\}", css)
+    if not wrap_rule:
+        errors.append("the docs header and footer do not share the docs frame")
+    elif css_declarations(wrap_rule.group(1)).get("width") != "var(--docs-width)":
+        errors.append("the docs header and footer use a different width than the docs shell")
+    if not re.search(r"--docs-width:\s*min\(var\(--docs-max\),\s*calc\(100% - 48px\)\)", css):
+        errors.append("the docs frame width is not derived from --docs-max with the standard gutter")
     return errors
 
 
@@ -615,6 +666,11 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
             value = parsed[page].meta.get(key, "")
             if value and not value.startswith(base_url):
                 errors.append(f"{rel}: {key} {value!r} is not on the published base {base_url}")
+        if page == site / "index.html":
+            for key in ("og:image:alt", "twitter:image:alt"):
+                value = parsed[page].meta.get(key, "")
+                if "not a benchmark" not in value:
+                    errors.append(f"index.html: {key} must label the dashboard values as a sample")
         canonical = re.search(r'<link rel="canonical" href="([^"]+)"',
                               page_texts[page])
         if canonical and not html_unescape(canonical.group(1)).startswith(base_url):
@@ -639,6 +695,7 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
         errors.append(f"missing referenced token stylesheet: assets/{tokens_name}")
 
     errors.extend(shell_asset_errors(site))
+    errors.extend(docs_shell_layout_errors(site))
 
     site_css_path = ROOT / SITE_STYLESHEET
     if not site_css_path.exists():
@@ -709,6 +766,30 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
             errors.append(f"missing generated brand asset: {built_name}")
         elif built.read_bytes() != source.read_bytes():
             errors.append(f"generated {built_name} is not byte-identical to {source_name}")
+
+    for relative in site_fonts():
+        built = site / "assets" / relative
+        source = ROOT / "internal/web/static" / relative
+        if not source.is_file():
+            errors.append(f"missing canonical font: internal/web/static/{relative}")
+        elif not built.is_file():
+            errors.append(f"missing published font: assets/{relative}")
+        elif built.read_bytes()[:4] != b"wOF2":
+            errors.append(f"published font assets/{relative} is not a WOFF2 file")
+        elif built.read_bytes() != source.read_bytes():
+            errors.append(f"published font assets/{relative} is not byte-identical to its source")
+    if not site_fonts():
+        errors.append("site.css requests no self-hosted font")
+    tokens_css = (site / "assets" / referenced_shell(site, "tokens", "css")).read_text(encoding="utf-8")
+    for family in ('"Instrument Sans"', '"JetBrains Mono"'):
+        if family not in tokens_css:
+            errors.append(f"tokens.css does not carry the {family} family from dashboard.css")
+    site_css = (site / "assets" / referenced_shell(site, "site", "css")).read_text(encoding="utf-8")
+    for external in ("fonts.googleapis", "fonts.gstatic", "url(http"):
+        if external in site_css:
+            errors.append(f"site.css makes an external font or asset request: {external}")
+    if "var(--display)" not in site_css:
+        errors.append("site.css does not use the display face for titles")
 
     for name in STALE_SOURCE_ASSETS:
         if (ROOT / name).exists():

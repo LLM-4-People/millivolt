@@ -1,15 +1,15 @@
 # Upstream compatibility, adapters and token refresh
 
-The client-facing OpenAI-compatible interface is separate from the upstream
-protocol. Select an adapter with `X-Proxy-Format`; do not infer one from a
-provider label.
+The client-facing protocol is separate from the upstream protocol. Select an
+adapter with `X-Proxy-Format`; do not infer one from a provider label.
 See [protocol](protocol.md) for routing/auth headers and
 [operations](operations.md#known-limits) for current limitations.
 
 ## Client and upstream compatibility
 
-millivolt accepts three client wire families and translates between any of
-them and the supported upstream families. The client protocol is selected by
+millivolt accepts three client wire families (Chat Completions, Responses and
+Messages) plus the Cursor Connect bridge, and translates between them and the
+supported upstream families. The client protocol is selected by
 the request path, or explicitly by `X-Proxy-In-Format`; the upstream protocol
 is selected by `X-Proxy-Format`. Translation runs only when both are known and
 differ. An absent `X-Proxy-Format` never enters the IR, and an explicit format

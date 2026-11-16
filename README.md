@@ -3,17 +3,23 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/readme-cover-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/brand/readme-cover-light.png">
-  <img src="docs/images/brand/readme-cover-dark.png" alt="Diagram showing OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages clients routing through one proxy to any configured upstream, with SQLite metadata below" width="1600">
+  <img src="docs/images/brand/readme-cover-dark.png" alt="millivolt cover: the headline See every AI request. Keep your own routing. beside a static dashboard capture from redacted history showing request count, total cost, cache hit rate, and provider totals; sample values, not a benchmark" width="1600">
 </picture>
+
+<sub>Dashboard values are a sample from one redacted self-hosted history, not
+a benchmark or a capacity measurement. Published measurements live in
+[performance](docs/performance.md).</sub>
 
 <picture>
   <source media="(min-width: 761px)" srcset="docs/images/brand/readme-spec.svg">
-  <img src="docs/images/brand/readme-spec-mobile.svg" alt="Readout: three client protocols, one Go binary, 22 MCP tools, one operator plane" width="800">
+  <img src="docs/images/brand/readme-spec-mobile.svg" alt="Readout: four upstream formats, one Go binary, 22 MCP tools, one operator plane" width="800">
 </picture>
 
 **See every AI request. Keep your own routing.** millivolt is a patch bay for
-model traffic. OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages
-clients plug in on one side. The upstream you choose answers on the other. It
+model traffic. OpenAI Chat Completions, OpenAI Responses and Anthropic Messages
+clients plug in on one side; a chat request can target the Cursor agent bridge,
+and any other HTTP client can use the same relay path with routing headers. The
+upstream you choose answers on the other. It
 can translate when the two ends disagree, pass the request through untouched,
 and measure the crossing: timing, tokens, cost, retries, outcome. Body capture
 only when you ask.

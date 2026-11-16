@@ -60,6 +60,10 @@ BRAND_ASSETS = {
     "favicon.ico": BRAND_SOURCE / "favicon.ico",
     "apple-touch-icon.png": BRAND_SOURCE / "apple-touch-icon.png",
 }
+# A @font-face URL in the site stylesheet names a file the dashboard already
+# embeds. The build publishes exactly the faces the stylesheet requests, so the
+# two surfaces cannot ship different fonts and a typo cannot 404 silently.
+FONT_URL = re.compile(r'url\("(fonts/[^"]+)"\)')
 # README-only artwork stays in the repository for GitHub's renderer; no
 # generated site page references it.
 SITE_IMAGE_EXCLUDES = frozenset({
@@ -750,7 +754,7 @@ def base_values(
         "canonical_tag": canonical_tag,
         "og_url": attr_escape(og_url),
         "og_image": attr_escape(og_image),
-        "og_image_alt": attr_escape("millivolt: three client protocols in, any configured upstream out, every request recorded"),
+        "og_image_alt": attr_escape("millivolt: See every AI request. Keep your own routing. A static dashboard band shows request count, total cost, cache hit rate, throughput, latency and error rate from redacted history; sample values, not a benchmark."),
         "site_name": "millivolt",
         "root": root,
         "body": body,
@@ -814,8 +818,8 @@ def render_landing(*, version: str, base_url: str, theme_color: str, assets: dic
     }
     head_extra = '<script type="application/ld+json">' + json.dumps(schema, ensure_ascii=False) + "</script>"
     values = base_values(
-        title="millivolt: self-hosted OpenAI-compatible LLM proxy",
-        description="See every AI request. Keep your own routing with a self-hosted OpenAI-compatible proxy, live dashboard, and SQLite history.",
+        title="millivolt: self-hosted cross-protocol LLM proxy",
+        description="See every AI request. Keep your own routing with a self-hosted, cross-protocol inference proxy, live dashboard, and SQLite history. Previews use sample data, not benchmarks.",
         output="index.html",
         base_url=base_url,
         version=version,
@@ -1079,6 +1083,12 @@ def retained_shell_assets() -> dict[str, list[bytes]]:
     return retained
 
 
+def site_fonts() -> list[str]:
+    """Font files the site stylesheet asks for, relative to the assets root."""
+    stylesheet = (SITE_SRC / "assets" / "site.css").read_text(encoding="utf-8")
+    return sorted(set(FONT_URL.findall(stylesheet)))
+
+
 def copy_assets(site_root: Path, tokens: dict[str, str]) -> dict[str, str]:
     assets = site_root / "assets"
     assets.mkdir(parents=True, exist_ok=True)
@@ -1088,6 +1098,13 @@ def copy_assets(site_root: Path, tokens: dict[str, str]) -> dict[str, str]:
         if not source.is_file():
             raise BuildError(f"missing canonical brand asset: {source.relative_to(ROOT)}")
         shutil.copyfile(source, assets / name)
+    for relative in site_fonts():
+        source = BRAND_SOURCE / relative
+        if not source.is_file():
+            raise BuildError(f"missing canonical font: {source.relative_to(ROOT)}")
+        target = assets / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
     if DOC_IMAGES.is_dir():
         for source in sorted(DOC_IMAGES.rglob("*")):
             if not source.is_file():
@@ -1126,8 +1143,13 @@ def readme_image_errors() -> list[str]:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     errors = []
     images = re.findall(r"<img\b[^>]*>", readme)
-    if not any("readme-cover-dark.png" in tag for tag in images):
+    covers = [tag for tag in images if "readme-cover-dark.png" in tag]
+    if not covers:
         errors.append("README is missing the cover fallback image")
+    elif not any("sample values, not a benchmark" in tag for tag in covers):
+        errors.append("README cover alt must say the dashboard values are a sample, not a benchmark")
+    if "not a benchmark or a capacity measurement" not in " ".join(readme.split()):
+        errors.append("README must label the cover dashboard values as a sample")
     for tag in images:
         if not re.search(r"\bheight=", tag):
             continue

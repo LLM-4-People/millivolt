@@ -3,7 +3,7 @@
     <div class="hero-copy">
       <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>self-hosted · cross-protocol · MIT</p>
       <h1>See every AI request.<br>Keep your own routing.</h1>
-      <p class="lead">A self-hosted, cross-protocol inference proxy with a live dashboard, SQLite history, and controls to pause, limit, or debug traffic. OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages clients can target any configured upstream. Request metadata, timing, tokens, cost, and outcomes; body capture is opt-in.</p>
+      <p class="lead">A self-hosted, cross-protocol inference proxy with a live dashboard, SQLite history, and controls to pause, limit, or debug traffic. OpenAI Chat Completions, OpenAI Responses and Anthropic Messages clients can target any configured upstream, including the Cursor agent bridge; other HTTP clients use the same relay path. Request metadata, timing, tokens, cost, and outcomes; body capture is opt-in.</p>
       <div class="hero-actions">
         <a class="btn btn-primary" href="#quickstart">Run it locally</a>
         <a class="btn btn-ghost" href="docs/dashboard.html">Tour the dashboard</a>
@@ -290,6 +290,10 @@ docker compose up -d</code></pre>
         <div><strong>two storage modes</strong><span>SQLite history or an in-memory ring</span></div>
         <div><strong>MIT</strong><span>source available, no hosted dependency</span></div>
       </div>
+      <figure class="concept-plate">
+        <img src="assets/concept-one-wire.png" alt="A machined black instrument slab with three glowing signal strands converging into one port" width="1600" height="686" loading="lazy">
+        <figcaption>Illustrative brand artwork, not a capture. Client paths cross one relay; the diagram above is the exact topology.</figcaption>
+      </figure>
       <p class="section-foot"><a class="text-link" href="docs/architecture.html">Architecture and ownership</a> · <a class="text-link" href="docs/mcp.html">MCP server</a></p>
     </div>
   </section>

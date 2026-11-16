@@ -2,6 +2,8 @@
 /proxy
 /stress
 /mvctl
+# Compiled local check binary; scripts/check.sh builds it in a temp dir.
+/containercheck
 /bin/
 /dist/
 *.test
