@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="instrument" data-mode="black">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="{{theme_color}}">
-<meta name="color-scheme" content="dark">
+<meta name="theme-storage-key" content="millivolt.theme">
 <title>{{title}}</title>
 <meta name="description" content="{{description}}">
 {{canonical_tag}}
@@ -26,7 +26,12 @@
 <link rel="icon" href="{{root}}assets/favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="{{root}}assets/apple-touch-icon.png">
 <link rel="stylesheet" href="{{root}}assets/{{asset_tokens}}">
+<link rel="stylesheet" href="{{root}}assets/{{asset_themes}}">
 <link rel="stylesheet" href="{{root}}assets/{{asset_site_css}}">
+<!-- One blocking registry and pre-paint guard, then the shared state module. -->
+<script src="{{root}}assets/{{asset_theme_boot}}"></script>
+<script defer src="{{root}}assets/{{asset_theme_state}}"></script>
+<script defer src="{{root}}assets/{{asset_site_theme}}"></script>
 <script defer src="{{root}}assets/{{asset_site_js}}"></script>
 {{head_extra}}
 </head>
@@ -46,6 +51,26 @@
       <a href="{{root}}docs/index.html"{{nav_docs}}>Docs</a>
       <a href="https://github.com/LLM-4-People/millivolt" target="_blank" rel="noopener noreferrer">GitHub</a>
     </nav>
+    <div class="site-theme">
+      <button class="icon-btn" type="button" id="btn-theme" aria-haspopup="dialog" aria-controls="theme-menu" aria-expanded="false" aria-label="Theme" title="Theme">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a6.2 6.2 0 1 0 0 12.4c.8 0 1.3-.5 1.3-1.1 0-.4-.2-.7-.4-1-.2-.3-.4-.6-.4-1 0-.7.5-1.2 1.2-1.2h1.1A3.4 3.4 0 0 0 14 6.5C13.6 3.8 11.1 1.8 8 1.8Z"/><circle cx="5.2" cy="6" r=".9"/><circle cx="8" cy="4.4" r=".9"/><circle cx="10.8" cy="6" r=".9"/></svg>
+      </button>
+      <div class="theme-menu" id="theme-menu" role="dialog" aria-label="Theme" hidden>
+        <div class="theme-tray-hd"><span class="mono-label">theme</span><button class="theme-close" id="theme-close" type="button">Close</button></div>
+        <p class="theme-saved" id="theme-saved" role="status" aria-live="polite">Saved in this browser</p>
+        <div class="theme-panes" aria-hidden="true">
+          <div class="theme-pane" id="theme-current" data-theme="instrument" data-mode="black"><span class="tp-kicker">req</span><b>14.4K</b><span class="tp-sub">all time</span></div>
+          <div class="theme-pane" id="theme-preview" data-theme="instrument" data-mode="black"><span class="tp-kicker">req</span><b>14.4K</b><span class="tp-sub">all time</span></div>
+        </div>
+        <p class="theme-caption" id="theme-current-label">Current: Instrument / Black</p>
+        <p class="theme-caption theme-preview-caption" id="theme-preview-label">Preview: same</p>
+        <p class="theme-mode-label" id="theme-mode-label">Surface</p>
+        <div class="theme-mode" id="theme-mode" role="radiogroup" aria-labelledby="theme-mode-label"></div>
+        <p class="theme-list-label" id="theme-list-label">Palette</p>
+        <div class="theme-list" id="theme-list" role="radiogroup" aria-orientation="vertical" aria-labelledby="theme-list-label"></div>
+        <div class="theme-ft"><button class="theme-reset" id="theme-reset" type="button">Reset</button><span class="theme-hint" id="theme-hint">Instrument Black</span></div>
+      </div>
+    </div>
     <button class="icon-btn search-open" type="button" data-search-open aria-label="Search documentation" title="Search documentation">
       <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.4 10.4 3.1 3.1"/></svg>
     </button>

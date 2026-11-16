@@ -78,17 +78,17 @@ const selectionIsSingle = (group, expected) => {
     d.getElementById('theme-current-label')?.textContent === 'Current: Instrument / Black');
   check('the preview caption starts on the committed pair',
     d.getElementById('theme-preview-label')?.textContent === 'Preview: same');
-  check('the pre-paint guard lists exactly the registry ids', (() => {
-    // The guard is js/theme_boot.js (the document carries no inline script), so
-    // one owner still holds the id list it accepts.
-    const themeSource = fs.readFileSync(path.join(STATIC, 'js/theme.js'), 'utf8');
-    const registry = [...themeSource.matchAll(
+  check('the pre-paint guard owns exactly the registry ids', (() => {
+    // theme_boot.js is the one registry (the document carries no inline
+    // script), and theme.js consumes it instead of keeping a second list.
+    const bootSource = fs.readFileSync(path.join(STATIC, 'js/theme_boot.js'), 'utf8');
+    const registry = [...bootSource.matchAll(
       /\{ id: '([a-z-]+)', label: '[^']+', hint:/g)].map(match => match[1]);
-    const guardSource = fs.readFileSync(path.join(STATIC, 'js/theme_boot.js'), 'utf8');
-    const guard = /\/\^\(([^)]+)\)\$\/\.test\(saved\.theme\)/.exec(guardSource);
-    const ids = guard ? guard[1].split('|') : [];
-    return registry.length === 8 && ids.length === registry.length &&
-      registry.every(id => ids.includes(id)) && ids.every(id => registry.includes(id));
+    const themeSource = fs.readFileSync(path.join(STATIC, 'js/theme.js'), 'utf8');
+    return registry.length === 8 && new Set(registry).size === 8 &&
+      !/const THEMES = \[/.test(themeSource) &&
+      themeSource.includes('applyState') &&
+      bootSource.includes('THEME_REGISTRY.themes.some');
   })());
   for (const id of themes) {
     const registryBoot = boot({ theme: id, mode: 'black' });

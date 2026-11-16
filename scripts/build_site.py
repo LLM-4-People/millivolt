@@ -1012,12 +1012,17 @@ def render_tokens_css(tokens: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# The three files every page loads before any content renders. They are served
-# at content-hashed URLs so a cached page and a new deployment can never pair a
-# document with an incompatible stylesheet or script; GitHub Pages sets its own
-# Cache-Control, and a unique URL is the part this repository controls.
+# The shell every page loads before any content renders, plus the theme layer
+# the dashboard and site share. They are served at content-hashed URLs so a
+# cached page and a new deployment can never pair a document with an
+# incompatible stylesheet or script; GitHub Pages sets its own Cache-Control,
+# and a unique URL is the part this repository controls.
 SHELL_ASSETS = {
     "asset_tokens": ("tokens", "css", "tokens.css"),
+    "asset_themes": ("themes", "css", "themes.css"),
+    "asset_theme_boot": ("theme_boot", "js", "theme_boot.js"),
+    "asset_theme_state": ("theme_state", "js", "theme_state.js"),
+    "asset_site_theme": ("site_theme", "js", "site_theme.js"),
     "asset_site_css": ("site", "css", "site.css"),
     "asset_site_js": ("site", "js", "site.js"),
 }
@@ -1035,6 +1040,10 @@ def asset_filename(stem: str, extension: str, content: bytes) -> str:
 def shell_sources(tokens: dict[str, str]) -> dict[str, bytes]:
     return {
         "asset_tokens": render_tokens_css(tokens).encode(),
+        "asset_themes": (ROOT / "internal/web/static/css/themes.css").read_bytes(),
+        "asset_theme_boot": (ROOT / "internal/web/static/js/theme_boot.js").read_bytes(),
+        "asset_theme_state": (ROOT / "internal/web/static/js/theme_state.js").read_bytes(),
+        "asset_site_theme": (SITE_SRC / "assets" / "site_theme.js").read_bytes(),
         "asset_site_css": (SITE_SRC / "assets" / "site.css").read_bytes(),
         "asset_site_js": (SITE_SRC / "assets" / "site.js").read_bytes(),
     }
@@ -1066,16 +1075,20 @@ def retained_shell_assets() -> dict[str, list[bytes]]:
     generations stay in the published output. A checkout without history (a
     source archive) simply has nothing to retain.
     """
-    retained: dict[str, list[bytes]] = {
-        "asset_tokens": [], "asset_site_css": [], "asset_site_js": []}
+    retained: dict[str, list[bytes]] = {key: [] for key in SHELL_ASSETS}
     tokens_path = "internal/web/static/css/dashboard.css"
     for revision in git_history(tokens_path):
         source = git_show(revision, tokens_path)
         if source is not None:
             retained["asset_tokens"].append(
                 render_tokens_css(root_custom_properties(source.decode())).encode())
-    for key, path in (("asset_site_css", "site-src/assets/site.css"),
-                      ("asset_site_js", "site-src/assets/site.js")):
+    for key, path in (
+            ("asset_themes", "internal/web/static/css/themes.css"),
+            ("asset_theme_boot", "internal/web/static/js/theme_boot.js"),
+            ("asset_theme_state", "internal/web/static/js/theme_state.js"),
+            ("asset_site_theme", "site-src/assets/site_theme.js"),
+            ("asset_site_css", "site-src/assets/site.css"),
+            ("asset_site_js", "site-src/assets/site.js")):
         for revision in git_history(path):
             source = git_show(revision, path)
             if source is not None:

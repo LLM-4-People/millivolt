@@ -44,12 +44,14 @@ RUNTIME_ASSET_ALLOWLIST = frozenset({
     # The pre-hash names. A document cached before the content-hashed deploy
     # still asks for these; they carry the current bytes and disappear only
     # after every client cache has turned over. No page links them.
-    "assets/tokens.css", "assets/site.css", "assets/site.js",
+    "assets/tokens.css", "assets/themes.css", "assets/theme_boot.js",
+    "assets/theme_state.js", "assets/site_theme.js", "assets/site.css", "assets/site.js",
 })
 # The shell files at content-hashed URLs: each generation is served for a
 # document cached by an earlier deployment, so none of them has an in-repo
 # consumer. The current generation is asserted separately.
-SHELL_GENERATION = re.compile(r"assets/(?:tokens|site)\.[0-9a-f]{10}\.(?:css|js)$")
+SHELL_GENERATION = re.compile(
+    r"assets/(?:tokens|themes|theme_boot|theme_state|site_theme|site)\.[0-9a-f]{10}\.(?:css|js)$")
 
 
 class PageParser(HTMLParser):
@@ -247,18 +249,19 @@ def referenced_shell(site: Path, stem: str, extension: str) -> str:
 
 
 def shell_asset_errors(site: Path) -> list[str]:
-    """The three shell files load at content-hashed URLs.
+    """The shell files load at content-hashed URLs.
 
     A cached document and a new deployment must never pair a page with an
-    incompatible stylesheet or script: the URL names the bytes. The name is
-    verified against the file, the stable spelling must not appear in any page,
-    and the generations the build retained from history must be on disk so a
-    document still holding the previous hash keeps its styling.
+    incompatible stylesheet or script: the URL names the bytes. The set and
+    stable spellings come from the build owner, so a new shared asset cannot be
+    hashed without its cache fallback or test. The name is verified against the
+    file, no page may reference the stable spelling, and the generations the
+    build retained from history must be on disk.
     """
     import scripts.build_site as build_site
 
     errors: list[str] = []
-    for stem, extension in (("tokens", "css"), ("site", "css"), ("site", "js")):
+    for key, (stem, extension, stable) in build_site.SHELL_ASSETS.items():
         name = referenced_shell(site, stem, extension)
         if not name:
             errors.append(f"no page references a content-hashed {stem}.{extension}")
@@ -272,9 +275,9 @@ def shell_asset_errors(site: Path) -> list[str]:
             errors.append(f"assets/{name} does not carry its content hash")
     for page in sorted(site.rglob("*.html")):
         text = page.read_text(encoding="utf-8")
-        for stable in ("assets/tokens.css", "assets/site.css", "assets/site.js"):
-            if stable in text:
-                errors.append(f"{page.relative_to(site)}: references the unhashed {stable}")
+        for key, (_stem, _extension, stable) in build_site.SHELL_ASSETS.items():
+            if f"assets/{stable}" in text:
+                errors.append(f"{page.relative_to(site)}: references the unhashed assets/{stable}")
     if (ROOT / ".git").exists():
         retained = build_site.retained_shell_assets()
         for key, generations in retained.items():
@@ -283,6 +286,46 @@ def shell_asset_errors(site: Path) -> list[str]:
                 name = build_site.asset_filename(stem, extension, content)
                 if not (site / "assets" / name).exists():
                     errors.append(f"retained generation assets/{name} was not published")
+    return errors
+
+
+def theme_asset_errors(site: Path) -> list[str]:
+    """The site publishes the dashboard's palette owner and shared state verbatim.
+
+    A site-local copy of a palette value or a registry label would let the two
+    surfaces drift. The theme stylesheet and the pre-paint registry are the
+    canonical bytes; the shell loads them before the site stylesheet and
+    applies the default pair in the document, so no frame paints unstyled.
+    """
+    errors: list[str] = []
+    themes_name = referenced_shell(site, "themes", "css")
+    canonical = ROOT / "internal/web/static/css/themes.css"
+    if not themes_name:
+        errors.append("no page references a content-hashed themes.css")
+    elif canonical.is_file() and (site / "assets" / themes_name).read_bytes() != canonical.read_bytes():
+        errors.append("published themes.css is not byte-identical to the dashboard owner")
+    boot_name = referenced_shell(site, "theme_boot", "js")
+    if not boot_name:
+        errors.append("no page references a content-hashed theme_boot.js")
+    elif canonical.is_file():
+        boot = (site / "assets" / boot_name).read_text(encoding="utf-8")
+        ids = sorted(set(re.findall(r'\[data-theme="([a-z-]+)"\]\[data-mode=', canonical.read_text(encoding="utf-8"))))
+        missing = [theme for theme in ids if f"id: '{theme}'" not in boot]
+        if missing:
+            errors.append("theme_boot.js does not register: " + ", ".join(missing))
+    for stem, extension in (("theme_state", "js"), ("site_theme", "js")):
+        if not referenced_shell(site, stem, extension):
+            errors.append(f"no page references a content-hashed {stem}.{extension}")
+    base = (ROOT / "site-src/templates/base.html").read_text(encoding="utf-8")
+    for needle in ('data-theme="instrument" data-mode="black"',
+                   'name="theme-storage-key"',
+                   "{{asset_themes}}", "{{asset_theme_boot}}",
+                   "{{asset_theme_state}}", "{{asset_site_theme}}",
+                   'id="btn-theme"', 'id="theme-menu"'):
+        if needle not in base:
+            errors.append(f"base.html is missing the theme contract: {needle}")
+    if "prefers-color-scheme" in base or 'name="color-scheme"' in base:
+        errors.append("base.html pins color-scheme instead of letting the theme layer own it")
     return errors
 
 
@@ -459,6 +502,10 @@ def performance_headline_escape_errors() -> list[str]:
         page = build_site.render_landing(
             version="0.0.0", base_url="https://example.test/", theme_color="#000000",
             assets={"asset_tokens": "tokens.0000000000.css",
+                    "asset_themes": "themes.0000000000.css",
+                    "asset_theme_boot": "theme_boot.0000000000.js",
+                    "asset_theme_state": "theme_state.0000000000.js",
+                    "asset_site_theme": "site_theme.0000000000.js",
                     "asset_site_css": "site.0000000000.css",
                     "asset_site_js": "site.0000000000.js"})
     finally:
@@ -653,7 +700,8 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
                  "sitemap.xml", "robots.txt", "assets/og.png"):
         if not (site / name).exists():
             errors.append(f"missing generated file: {name}")
-    for stem, extension in (("tokens", "css"), ("site", "css"), ("site", "js")):
+    import scripts.build_site as build_site
+    for stem, extension, _stable in build_site.SHELL_ASSETS.values():
         if not referenced_shell(site, stem, extension):
             errors.append(f"no page references a content-hashed {stem}.{extension}")
     # One published origin: the metadata a crawler reads names the base URL, so
@@ -695,6 +743,7 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
         errors.append(f"missing referenced token stylesheet: assets/{tokens_name}")
 
     errors.extend(shell_asset_errors(site))
+    errors.extend(theme_asset_errors(site))
     errors.extend(docs_shell_layout_errors(site))
 
     site_css_path = ROOT / SITE_STYLESHEET
