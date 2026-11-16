@@ -66,7 +66,7 @@ func TestDataVersionTracksAllCommittedWriters(t *testing.T) {
 	if got := version(); got != before {
 		t.Fatalf("read-only query changed revision: %d -> %d", before, got)
 	}
-	if _, err := s.Clear(t.Context(), &PurgeFilter{Provider: "new.example"}, nil); err != nil {
+	if _, err := s.Clear(t.Context(), &PurgeFilter{Provider: "new.example"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	changed()
@@ -152,7 +152,7 @@ func TestPurgeRebuildNeverLosesConcurrentCommits(t *testing.T) {
 		}
 		close(done)
 	}()
-	if _, err := s.Clear(context.Background(), nil, nil); err != nil {
+	if _, err := s.Clear(context.Background(), nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	<-done

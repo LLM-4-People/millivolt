@@ -146,6 +146,98 @@ func TestConfigDocumentSizeBound(t *testing.T) {
 // order, so the error always names the alphabetically-first failing label -
 // asserted across many loads, because map order varies per iteration and a
 // single run could get lucky.
+// TestValidateNeverEchoesCredentialValues pins the invariant that keeps
+// /admin/config safe to serve verbatim: validation errors name the field and the
+// rule, never the value. The dashboard returns provider headers unredacted so
+// the settings sheet can round-trip them, and the MCP projection redacts
+// defensively, but any validator that quoted a rejected value would put a
+// credential into last_reload.error, which both surfaces render. A rejected
+// secret must therefore be absent from the error text at every site that
+// inspects one.
+func TestValidateNeverEchoesCredentialValues(t *testing.T) {
+	const secret = "sk-live-9f2c4a7e1b6d"
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"provider header value", func(c *Config) {
+			c.Providers = map[string]ProviderOverride{
+				"alpha.example": {Headers: map[string]string{"Authorization": "Bearer " + secret + "\n"}},
+			}
+		}},
+		{"provider base url userinfo", func(c *Config) {
+			c.AllowedBaseURLs = []string{"https://user:" + secret + "@alpha.example/v1"}
+		}},
+		{"provider base url query", func(c *Config) {
+			c.AllowedBaseURLs = []string{"https://alpha.example/v1?key=" + secret}
+		}},
+		{"override header value", func(c *Config) {
+			c.RequestOverrides = []RequestOverride{{
+				Provider: "alpha.example",
+				Headers:  map[string]string{"X-Api-Key": secret + "\x00"},
+			}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Default()
+			tc.mutate(c)
+			err := c.Validate()
+			if err == nil {
+				t.Fatal("Validate accepted a value it must reject")
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("validation error echoes the credential: %q", err.Error())
+			}
+			// A redaction marker is only needed where a value is echoed; this
+			// asserts the stronger property that nothing is echoed at all.
+			if strings.Contains(err.Error(), "sk-live") {
+				t.Fatalf("validation error leaks a credential prefix: %q", err.Error())
+			}
+		})
+	}
+}
+
+// TestMaxRetriesIsBounded pins the one retry budget that had no ceiling. Each
+// retry is a billed upstream send for a single client request, and the sibling
+// knobs (quality, thinking, storm) are all bounded, so an unbounded max_retries
+// turned a typo into a million upstream calls.
+func TestMaxRetriesIsBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value int
+		ok    bool
+	}{
+		{"zero disables retries", 0, true},
+		{"the default", Default().MaxRetries, true},
+		{"the ceiling", MaxRetriesMax, true},
+		{"one above the ceiling", MaxRetriesMax + 1, false},
+		{"negative", -1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Default()
+			c.MaxRetries = tc.value
+			err := c.Validate()
+			if tc.ok && err != nil {
+				t.Fatalf("max_retries = %d rejected: %v", tc.value, err)
+			}
+			if !tc.ok {
+				if err == nil {
+					t.Fatalf("max_retries = %d accepted, want a rejection", tc.value)
+				}
+				if !strings.Contains(err.Error(), "max_retries") {
+					t.Fatalf("rejection %q does not name max_retries", err.Error())
+				}
+			}
+		})
+	}
+	// The schema publishes the same band, so the Settings input clamps.
+	f := FieldByKey("max_retries")
+	if f == nil || f.Max == nil || int(*f.Max) != MaxRetriesMax {
+		t.Fatalf("max_retries schema max = %v, want %d", f, MaxRetriesMax)
+	}
+}
+
 func TestValidateProvidersErrorDeterministic(t *testing.T) {
 	yaml := `providers:
   zeta.example:

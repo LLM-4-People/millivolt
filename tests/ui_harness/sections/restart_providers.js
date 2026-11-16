@@ -4,47 +4,82 @@ module.exports = async function restartProviders(H) {
   const {DEF_RULES, cfgDoc, check, d, fire, mkRec, rows, settleUntil, sleep, w} = H;
   const state = H.state;
 
-  // ---- test 12: restart menu + rebuild-and-restart poll ----
-  const rmenu = d.getElementById('restart-menu');
-  check('restart menu starts hidden', rmenu && rmenu.hidden);
-  w.toggleRestartMenu({ stopPropagation() {} });
-  check('restart menu opens', rmenu && !rmenu.hidden);
-  check('restart open sets aria-expanded', d.getElementById('btn-restart').getAttribute('aria-expanded') === 'true');
-  check('restart action wears the accent primary', d.getElementById('btn-restart-now').classList.contains('btn-accent'));
-  const restartAction = d.getElementById('btn-restart-now');
-  const restartDescription = d.getElementById('restart-description');
+  // ---- test 12: the console's system section owns restart ----
+  const systemShell = d.getElementById('operator-console');
+  w.closeOperatorConsole();
+  w.openOperatorConsole('system');
+  const restartAction = () => d.getElementById('btn-restart-now');
+  const restartDescription = () => d.getElementById('restart-description');
+  check('the system section is the one restart surface',
+    !systemShell.hidden && d.getElementById('oc-pane').dataset.section === 'system' &&
+    !!restartAction() && restartAction().hasAttribute('data-oc-restart') &&
+    restartAction().classList.contains('btn-accent'));
   check('restart description explains streams, saved metrics, and queued requests',
-    restartDescription && /in-flight streams/.test(restartDescription.textContent) &&
-    /metrics/.test(restartDescription.textContent) && /queue/.test(restartDescription.textContent) &&
-    restartAction.getAttribute('aria-describedby') === restartDescription.id);
-  await sleep(0); // settle the menu's initial GET before holding the preflight
+    restartDescription() && /in-flight streams/.test(restartDescription().textContent) &&
+    /metrics/.test(restartDescription().textContent) && /queue/.test(restartDescription().textContent));
+  await sleep(0); // settle the section's initial GET before holding the preflight
+  check('the restart status poll seeds the system section',
+    await settleUntil(() => w.eval('restartServerState.phase') === 'idle'));
+
+  // Confirm before any POST: cancel is the default and must not reach the
+  // server or start the busy lock.
+  {
+    const savedConfirm = w.ocConfirm;
+    let asked = null;
+    w.ocConfirm = opts => { asked = opts; return Promise.resolve(false); };
+    try {
+      const before = state.restartState.postCount;
+      await w.restartProxy();
+      check('restart asks for confirmation before posting',
+        asked && asked.title === 'Rebuild and restart?' &&
+        /in-flight streams/.test(asked.body) && /queue/.test(asked.body) &&
+        state.restartState.postCount === before && !w.eval('restartBusy'));
+    } finally { w.ocConfirm = savedConfirm; }
+  }
+
   let releaseRestartStatus, releaseRestartPost;
+  state.restartState.postCount = 0;
+  state.restartState.restarted = false;
+  state.restartState.status = {};
   state.restartState.statusGate = new Promise(resolve => { releaseRestartStatus = resolve; });
   state.restartState.postGate = new Promise(resolve => { releaseRestartPost = resolve; });
-  const restartPending = w.restartProxy();
-  check('restart action disables immediately while its status check is pending', restartAction.disabled);
+  const savedConfirm = w.ocConfirm;
+  w.ocConfirm = () => Promise.resolve(true);
+  let restartPending;
+  try {
+    restartPending = w.restartProxy();
+  } finally { w.ocConfirm = savedConfirm; }
+  check('restart action disables immediately while its status check is pending',
+    await settleUntil(() => restartAction()?.disabled &&
+      d.getElementById('op-readout').dataset.state === 'busy'));
   await w.restartProxy(); // a rapid second call must not issue another POST
   releaseRestartStatus();
   state.restartState.statusGate = null;
   check('only one restart POST is issued and the pending request stays disabled',
-    await settleUntil(() => state.restartState.postCount === 1 && restartAction.disabled &&
-      restartAction.textContent.includes('Restarting')));
+    await settleUntil(() => state.restartState.postCount === 1 && restartAction()?.disabled &&
+      restartAction()?.textContent.includes('restarting')));
+  check('the readout keeps the restart visible while busy',
+    d.getElementById('op-readout-state').textContent.startsWith('restarting') &&
+    d.getElementById('op-readout').dataset.state === 'busy');
   await w.fetchRestartStatus();
-  check('an idle status refresh cannot re-enable a locally pending restart', restartAction.disabled);
-  check('the header indicates busy while keeping progress accessible',
-    d.getElementById('btn-restart').hasAttribute('data-busy') && !d.getElementById('btn-restart').disabled);
+  check('an idle status refresh cannot re-enable a locally pending restart', restartAction()?.disabled);
   releaseRestartPost();
   state.restartState.postGate = null;
   await restartPending;
   check('restart POST hit the endpoint', state.restartState.restarted);
-  check('restart poll detects the fresh process via started_at', d.getElementById('restart-count').textContent.includes('restarted'));
-  check('completed restart restores the action and clears the busy header',
-    !restartAction.disabled && restartAction.textContent === 'Restart now' && !d.getElementById('btn-restart').hasAttribute('data-busy'));
+  check('restart poll detects the fresh process via started_at',
+    d.getElementById('restart-count')?.textContent.includes('restarted'));
+  check('a successful restart records the ledger phrase and leaves the console open',
+    d.getElementById('oc-change').textContent === 'restarted the proxy' &&
+    !systemShell.hidden && w.menuIsOpen(systemShell));
+  check('completed restart restores the action',
+    restartAction()?.disabled === false && restartAction()?.textContent === 'restart now');
   {
     // The step tracker: the POST's status seeds it; completion marks every
     // step done. Drain renders its live window; a failure turns the step red.
     const steps = [...d.querySelectorAll('#restart-steps .rs-step')];
-    check('restart step list rendered the full choreography, all done', steps.length === 4 && steps.every(s => s.classList.contains('done')));
+    check('restart step list rendered the full choreography, all done',
+      steps.length === 4 && steps.every(s => s.classList.contains('done')));
     w.renderRestartSteps({ rank: 1, phase: 'draining', error: '', drain_timeout_ms: 600000, drain_elapsed_ms: 5000 });
     check('drain step shows the live drain window',
       [...d.querySelectorAll('#restart-steps .rs-step')][1].classList.contains('active') &&
@@ -63,51 +98,114 @@ module.exports = async function restartProviders(H) {
       ![...d.querySelectorAll('#restart-steps .rs-step')].some(s => s.querySelector('.rs-sub')));
     w.renderRestartSteps({ rank: 0, phase: 'idle', error: 'build failed: boom' });
     check('a failed run marks its step red', !!d.querySelector('#restart-steps .rs-step.failed'));
+    // Colour is not a state a screen reader or a colour-blind operator can
+    // read. Each step carries its state in text, and the running one is marked
+    // aria-current; the failed word must be distinguishable from the done word.
+    {
+      const at = () => [...d.querySelectorAll('#restart-steps .rs-step')];
+      w.renderRestartSteps({ rank: 0, phase: 'building', error: 'build failed: boom' });
+      const failed = at();
+      check('a failed step states its failure in text, not only in colour',
+        failed[0].getAttribute('aria-current') === null &&
+        failed[0].textContent.includes('failed') &&
+        !failed[0].textContent.includes('now'));
+      w.renderRestartSteps({ rank: 1, phase: 'draining', error: '', drain_timeout_ms: 0 });
+      const running = at();
+      check('the running step is marked aria-current and worded as now',
+        running[1].getAttribute('aria-current') === 'step' &&
+        running[1].textContent.includes(' - now') &&
+        running[0].textContent.includes(' - done') &&
+        running[2].textContent.includes(' - pending') &&
+        running.filter(s => s.hasAttribute('aria-current')).length === 1);
+      // The announcement is one line, not the whole list: the list is
+      // rewritten on every 750ms poll, so a live region there re-read all four
+      // steps continuously.
+      check('the step list is not itself a live region',
+        !d.getElementById('restart-steps').hasAttribute('aria-live'));
+      const announce = d.getElementById('restart-announce');
+      w.renderRestartSteps({ rank: 2, phase: 'flushing', error: '' });
+      const second = announce.textContent;
+      w.renderRestartSteps({ rank: 2, phase: 'flushing', error: '' });
+      check('the restart announcement names one transition and does not repeat it',
+        second === 'restart step: ' + w.eval('RESTART_STEPS[2].label') &&
+        announce.textContent === second && announce.getAttribute('aria-live') === 'polite');
+      w.renderRestartSteps(null);
+      check('an idle tracker announces nothing', !d.getElementById('restart-steps').hidden === false);
+    }
     w.renderRestartSteps(null);
     check('the step list hides when idle', d.getElementById('restart-steps').hidden);
   }
   for (const [rank, phase] of ['building', 'draining', 'flushing', 'handoff'].entries()) {
     state.restartState.status = { phase, rank };
     await w.fetchRestartStatus();
-    check(`server-reported ${phase} disables the restart action`, restartAction.disabled);
+    check(`server-reported ${phase} disables the restart action`, restartAction()?.disabled);
+    check(`server-reported ${phase} names its step in the readout`,
+      d.getElementById('op-readout-state').textContent.startsWith('restarting · step ' + (rank + 1)));
   }
   state.restartState.status = { phase: 'idle', error: 'build failed', rank: 0 };
   await w.fetchRestartStatus();
   check('failed restart restores the action and reports the error',
-    !restartAction.disabled && d.getElementById('restart-count').textContent.includes('build failed'));
+    restartAction()?.disabled === false && d.getElementById('restart-count')?.textContent.includes('build failed') &&
+    d.getElementById('restart-count')?.dataset.err === '1');
+  // A restart already running is a refusal, not a no-op. The reachable case
+  // is a stale tab: this page still believes the proxy is idle while another
+  // one started a restart, so the top guard passes, the operator confirms, and
+  // the fresh preflight is the first news of it. Returning silently there made
+  // a real refusal look like a missed click.
+  {
+    state.restartState.status = { phase: 'draining', rank: 1 };
+    // Stale local state: the phase the top guard reads.
+    w.eval("restartServerState = {phase: 'idle', rank: -1, available: true}");
+    w.syncRestartControls();
+    const savedConfirm2 = w.ocConfirm;
+    w.ocConfirm = () => Promise.resolve(true);
+    const postsBefore = state.restartState.postCount;
+    try {
+      await w.restartProxy();
+    } finally { w.ocConfirm = savedConfirm2; }
+    check('a restart another tab started refuses out loud and sends nothing',
+      state.restartState.postCount === postsBefore &&
+      d.getElementById('restart-count')?.textContent === 'a restart is already running' &&
+      d.getElementById('restart-count')?.dataset.err === '1');
+    state.restartState.status = {};
+    w.eval('restartServerState = {}');
+    w.syncRestartControls();
+  }
+
   state.restartState.status = { available: false, reason: 'source unavailable' };
   await w.fetchRestartStatus();
-  check('unavailable restart stays disabled', restartAction.disabled);
-  // A binary that can never restart is not OFFERED at all: the control and its
-  // menu leave the header row (an empty wrap would hold the row's gap open),
-  // and the server's own diagnosis is the status line an attempt would read.
-  const restartWrap = d.getElementById('restart-wrap');
-  check('an ineligible restart is not offered in the header, and its reason is what the menu would say',
-    restartWrap && restartWrap.hidden &&
-    d.getElementById('restart-count').textContent === 'source unavailable' &&
-    d.getElementById('restart-count').dataset.err === '1');
-  // A run in progress keeps the control reachable, so its progress can be
-  // reopened; the verdict only withholds the OFFER.
-  w.applyRestartEvent({ phase: 'draining', rank: 1, available: false, reason: 'source unavailable' });
-  check('a restart in progress keeps the control reachable for its progress',
-    !restartWrap.hidden && d.getElementById('btn-restart').hasAttribute('data-busy') && restartAction.disabled);
-  w.applyRestartEvent({ phase: 'idle', rank: -1, available: false, reason: 'source unavailable', error: '' });
-  check('an idle ineligible restart withholds the control again', restartWrap.hidden);
-  // The boot payload is the only pre-menu signal. An absent or unusable
-  // section changes nothing: the control stays exactly as the last verdict
-  // left it, so a build that never reports eligibility is never worse off
-  // than today.
+  check('unavailable restart stays disabled and names the reason',
+    restartAction()?.disabled && d.getElementById('restart-count')?.textContent === 'source unavailable' &&
+    d.getElementById('restart-count')?.dataset.err === '1');
+  // A binary that can never restart is not OFFERED: the system section says
+  // why in place (.oc-warning) and disables the action.
+  w.operatorConsoleSync('system');
+  check('an ineligible build shows the system warning and a disabled action',
+    !!d.querySelector('#oc-pane .oc-warning') &&
+    d.querySelector('#oc-pane .oc-warning')?.textContent.includes('source unavailable') &&
+    restartAction()?.disabled);
+  // The boot payload is the only pre-console signal. An absent or unusable
+  // section changes nothing; an explicit verdict folds into restartServerState
+  // and the system warning.
   w.applyRestartState({ available: true, reason: '' });
   w.applyRestartState(null);
   w.applyRestartState({ reason: 'no verdict here' });
-  check('a bootstrap without a verdict keeps the control', !restartWrap.hidden);
+  check('a bootstrap without a verdict keeps the last availability',
+    w.eval('restartServerState.available') === true && restartAction()?.disabled === false);
   w.applyRestartState({ available: false, reason: 'built with -trimpath, so the binary cannot locate its own source; self-restart is unavailable (restart via your process manager)' });
-  check('the bootstrap fold withholds the control for an ineligible binary', restartWrap.hidden);
+  check('the bootstrap fold lands in restartServerState.available',
+    w.eval('restartServerState.available') === false && restartAction()?.disabled);
+  w.operatorConsoleSync('system');
+  check('the bootstrap verdict reaches the open system warning',
+    !!d.querySelector('#oc-pane .oc-warning') && restartAction()?.disabled);
   w.applyRestartState({ available: true, reason: '' });
-  check('the bootstrap fold offers the control for an eligible binary', !restartWrap.hidden);
+  w.operatorConsoleSync('system');
+  check('the bootstrap fold offers the action for an eligible binary',
+    w.eval('restartServerState.available') === true && restartAction()?.disabled === false &&
+    !d.querySelector('#oc-pane .oc-warning'));
   state.restartState.status = {};
   await w.fetchRestartStatus();
-  check('an available status offers the control again', !restartWrap.hidden);
+  check('an available status offers the action again', restartAction()?.disabled === false);
   // The refusal path through operatorErrorBody: a non-2xx whose body is not
   // JSON-with-an-error (a plain-text operator denial, an HTML 502) must
   // reject with the restart site's designed fallback text, marked as a
@@ -116,15 +214,19 @@ module.exports = async function restartProviders(H) {
   // could be dropped silently).
   state.restartState.postFail = { status: 502 };
   const refusalPostCount = state.restartState.postCount;
-  await w.restartProxy();
+  {
+    const restoreConfirm = w.ocConfirm;
+    w.ocConfirm = () => Promise.resolve(true);
+    try { await w.restartProxy(); } finally { w.ocConfirm = restoreConfirm; }
+  }
   const restartStatusLine = d.getElementById('restart-count');
   check('a non-JSON 502 restart refusal shows the designed fallback, never an empty error',
     state.restartState.postCount === refusalPostCount + 1 &&
-    restartStatusLine.textContent === 'restart failed (502)' &&
-    restartStatusLine.dataset.err === '1');
+    restartStatusLine?.textContent === 'restart failed (502)' &&
+    restartStatusLine?.dataset.err === '1');
   state.restartState.postFail = null;
-  w.toggleRestartMenu({ stopPropagation() {} });
-  check('restart menu closes on second toggle', rmenu.hidden);
+  w.closeOperatorConsole();
+  check('restart section closes with the console', systemShell.hidden);
 
   // ---- test 13: restart sweep + weekday clock ----
   // A feed_id change is the page's "new process" signal: the snapshot resets
@@ -154,12 +256,24 @@ module.exports = async function restartProviders(H) {
   // edits drive the dirty tracking and collect() round-trips the map.
   w.toggleSettings();
   await settleUntil(() => !d.getElementById('settings-sheet').hidden);
+  // openModal seats focus on the sheet's first control in its own animation
+  // frame. Drain that frame before opening a picker, or its late focus call
+  // steals the picker's roving focus away mid-test.
+  await new Promise(resolve => w.requestAnimationFrame(() => resolve()));
   w.eval('settingsCat = "providers"; showSettingsCat()');
   await settleUntil(() => d.querySelector('.st-row[data-key="providers"] .st-prov'));
-  const provRow = d.querySelector('.st-row[data-key="providers"]');
-  const card = provRow && provRow.querySelector('.st-prov');
+  // The card is captured in the tick that proves it painted, so a later repaint
+  // cannot hand the assertions a null, and the row is proven to hold it.
+  let provRow = null;
+  let card = null;
+  await settleUntil(() => {
+    provRow = d.querySelector('.st-row[data-key="providers"]');
+    card = provRow && provRow.querySelector('.st-prov');
+    return !!card;
+  });
   check('providers field renders the card editor', !!card);
-  check('provider card shows label + cost chip + usage row', card.querySelector('.sp-label').value === 'epsilon.example' &&
+  check('provider card shows label + cost chip + usage row',
+    card.querySelector('.sp-label').value === 'epsilon.example' &&
     card.querySelector('.prov-chip').dataset.cost === 'x_billing_pricing.cost' &&
     card.querySelector('.prov-urow .sp-ufield').value === 'input_tokens');
   check('canonical dropdown is the server-owned field list', card.querySelectorAll('.prov-urow .sp-ufield option').length === 6);
@@ -180,6 +294,11 @@ module.exports = async function restartProviders(H) {
   check('usage mapping added via the canonical dropdown', [...card.querySelectorAll('.prov-urow .sp-ufield')].some(s => s.value === 'output_tokens'));
   // Add provider: a "+ add provider" button in the title row (top right),
   // opening a dropdown that only offers seen providers NOT already mapped.
+  // The seen vocabulary is the pause document's, which the live poll serves from
+  // the page's own state, so seed it instead of relying on a canned poll copy.
+  w.applyPauseState({ok: true, paused: false, holds: [], clients: [], providers: [],
+    known_clients: [], known_providers: ['epsilon.example', 'p'], until: null, queued: 0,
+    default_max_queued: 0});
   const prow = card.closest('.st-row');
   const topBtn = prow.querySelector('.st-name [data-prov-menu-toggle]');
   const menu = prow.querySelector('.prov-menu');
@@ -237,13 +356,13 @@ module.exports = async function restartProviders(H) {
   topBtn.click();
   check('reopening the picker moves it onto the sheet again',
     !menu.hidden && menu.parentElement === d.getElementById('settings-sheet'));
-  // Both provider-icon emitters carry the entity color through --ent, so
-  // the icon and its glow ride the entity palette instead of a hardcoded
-  // hex in the stylesheet.
+  // Both provider-icon emitters carry the entity pair through --ent and
+  // --ent-ink, so the icon and its glow ride the entity palette (and its
+  // light-mode ink) instead of a hardcoded hex in the stylesheet.
   check('the card icon keys its color to the provider entity token',
-    card.querySelector('.prov-hd .prov-ic').getAttribute('style') === '--ent:#0072B2');
+    card.querySelector('.prov-hd .prov-ic').getAttribute('style') === '--ent:#0072B2;--ent-ink:#005f96');
   check('the picker icon keys its color to the provider entity token',
-    menu.querySelector('.prov-menu-item .prov-ic').getAttribute('style') === '--ent:#0072B2');
+    menu.querySelector('.prov-menu-item .prov-ic').getAttribute('style') === '--ent:#0072B2;--ent-ink:#005f96');
   menu.querySelector('.prov-new-label').value = 'gamma.example';
   menu.querySelector('[data-prov-add]').click();
   check('new provider card collects with empty maps', JSON.stringify(w.collectSettingsValues().providers['gamma.example']) === JSON.stringify({ cost_keys: [], usage_keys: {}, models_path: '', models_keys: {}, ensure_tools: [], headers: {} }));

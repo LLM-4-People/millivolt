@@ -5,18 +5,20 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/atomicfile"
 )
 
 // WriteFile atomically replaces path with a complete, schema-commented YAML
 // snapshot of c. Every Schema() key is written; LoadFile's mergeOverlay copies
 // a field when its key is present, so an explicit 0 / "" / false survives.
-// Default() remains the only place defaults are defined.
+// Default() remains the only place defaults are defined. A symlinked path is
+// followed to its final target, so the link stays in place and the target
+// receives the new document.
 func WriteFile(path string, c *Config) error {
 	if path == "" {
 		return fmt.Errorf("config path is empty")
@@ -25,28 +27,9 @@ func WriteFile(path string, c *Config) error {
 	if err := WriteYAML(&buf, c); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
-	if err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-	defer os.Remove(tmp.Name())
-	defer tmp.Close()
-	// Preserve an existing config's access restrictions. A new file keeps
-	// CreateTemp's private mode; provider header values may contain secrets.
-	if info, err := os.Stat(path); err == nil {
-		if err := tmp.Chmod(info.Mode().Perm()); err != nil {
-			return fmt.Errorf("write config: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("write config: %w", err)
-	}
-	if _, err := tmp.Write(buf.Bytes()); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
+	// A new config keeps the helper's private mode; provider header values may
+	// contain secrets. An existing file keeps its own restrictions.
+	if err := atomicfile.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 	return nil

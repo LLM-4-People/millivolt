@@ -5,10 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
@@ -43,7 +43,7 @@ func newMCPHandler(gate *operatorGate, dispatch http.Handler, limits mcp.Limits)
 			// The wrapper validated the same credential this constructor
 			// validates, so a failure here is an internal inconsistency; the
 			// SDK answers 400 for the nil server rather than panicking.
-			log.Printf("mcp: build request service: %v", err)
+			logging.Printf("", "mcp: build request service: %v", err)
 			return nil
 		}
 		return service

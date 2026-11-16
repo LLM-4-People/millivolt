@@ -159,7 +159,7 @@ module.exports = async function regressionsB(H) {
         const series = el.closest('.leg-item[data-series]')?.dataset.series;
         return series == null ? null : `[data-series="${w.CSS.escape(series)}"]`;
       }) : null;
-      const other = d.getElementById('btn-pause');
+      const other = d.getElementById('btn-controls');
       other.focus();
       const restored = typeof w.restoreFocus === 'function' ? w.restoreFocus(token) : false;
       check('the shared focus restore never steals focus from a moved operator',

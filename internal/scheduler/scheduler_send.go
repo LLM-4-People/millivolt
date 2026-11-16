@@ -161,7 +161,7 @@ func (s *Scheduler) WaitSend(ctx context.Context, key string, hooks WaiterHooks,
 		sendKick := g.sendKickC()
 
 		if honorHold {
-			if h := s.matchingHold(hooks.Client, hooks.Provider); h != nil {
+			if h := s.matchingHold(hooks.PolicyTarget()); h != nil {
 				if !holding {
 					if hooks.OnWait != nil {
 						hooks.OnWait()
@@ -171,7 +171,7 @@ func (s *Scheduler) WaitSend(ctx context.Context, key string, hooks WaiterHooks,
 					}
 					// A slow client write may outlive the hold. Do not publish
 					// a stale paused edge after the operator resumed it.
-					if s.matchingHold(hooks.Client, hooks.Provider) == nil {
+					if s.matchingHold(hooks.PolicyTarget()) == nil {
 						continue
 					}
 					holding = true

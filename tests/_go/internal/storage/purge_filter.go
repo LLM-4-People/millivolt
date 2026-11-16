@@ -25,7 +25,7 @@ func TestPurgeEmptiesStore(t *testing.T) {
 	if len(before) != 3 {
 		t.Fatalf("before purge: %d records, want 3", len(before))
 	}
-	if _, err := s2.Clear(t.Context(), nil, nil); err != nil {
+	if _, err := s2.Clear(t.Context(), nil, nil, nil); err != nil {
 		t.Fatalf("purge: %v", err)
 	}
 	after, _ := s2.LoadRecent(t.Context(), 100)
@@ -128,7 +128,7 @@ func TestClearEmptyFilterRejected(t *testing.T) {
 	defer s.Close()
 	seedPurgeStore(t, s)
 
-	if _, err := s.Clear(t.Context(), &PurgeFilter{}, nil); err == nil {
+	if _, err := s.Clear(t.Context(), &PurgeFilter{}, nil, nil); err == nil {
 		t.Fatal("Clear(empty filter) = nil error, want rejection")
 	}
 	n, err := s.CountWhere(t.Context(), PurgeFilter{})
@@ -196,7 +196,7 @@ func TestClearFiltersRows(t *testing.T) {
 			defer s.Close()
 			seedPurgeStore(t, s)
 
-			result, err := s.Clear(t.Context(), &tc.filter, nil)
+			result, err := s.Clear(t.Context(), &tc.filter, nil, nil)
 			if err != nil {
 				t.Fatalf("filtered Clear: %v", err)
 			}

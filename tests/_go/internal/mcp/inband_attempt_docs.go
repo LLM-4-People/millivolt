@@ -30,8 +30,8 @@ func TestInBandAttemptContractDocs(t *testing.T) {
 	protocol := repoText(t, "docs/protocol.md")
 	for _, want := range []string{
 		"Every retried or final attempt stores the same upstream-response information",
-		"An in-band 429 is the one exception",
-		"It carries no retry or error detail",
+		"An in-band 429 is the one attempt entry",
+		"carries no retry or error detail",
 		"excluded from retry disclosures and error enumerations",
 		"A final, retried or in-band 429 is a separate affected-request signal",
 	} {
@@ -40,7 +40,7 @@ func TestInBandAttemptContractDocs(t *testing.T) {
 		}
 	}
 
-	operations := repoText(t, "docs/operations.md")
+	operations := repoText(t, "docs/routes.md")
 	for _, want := range []string{
 		"Rate limits count requests that saw a rate-limit class on the final, a retried or an in-band attempt",
 		"AND COALESCE(json_extract(j.value,'$.in_band'),0)=0",
@@ -48,7 +48,7 @@ func TestInBandAttemptContractDocs(t *testing.T) {
 		"that entry is health evidence, not a retry",
 	} {
 		if !strings.Contains(operations, want) {
-			t.Errorf("docs/operations.md is missing the in-band attempt contract %q", want)
+			t.Errorf("docs/routes.md is missing the in-band attempt contract %q", want)
 		}
 	}
 
@@ -99,20 +99,20 @@ func TestInBandAttemptContractDocs(t *testing.T) {
 // not appear as an absorbed retry row.
 func TestRetryQueryExcludesInBandAttempts(t *testing.T) {
 	const marker = "**What retried before the client saw a response?**"
-	doc := repoText(t, "docs/operations.md")
+	doc := repoText(t, "docs/routes.md")
 	at := strings.Index(doc, marker)
 	if at < 0 {
-		t.Fatal("docs/operations.md lost the retry query marker")
+		t.Fatal("docs/routes.md lost the retry query marker")
 	}
 	rest := doc[at:]
 	open := strings.Index(rest, "```sql")
 	if open < 0 {
-		t.Fatal("docs/operations.md retry query has no sql fence")
+		t.Fatal("docs/routes.md retry query has no sql fence")
 	}
 	body := rest[open+len("```sql"):]
 	closeAt := strings.Index(body, "```")
 	if closeAt < 0 {
-		t.Fatal("docs/operations.md retry query fence is unterminated")
+		t.Fatal("docs/routes.md retry query fence is unterminated")
 	}
 	query := strings.TrimSpace(body[:closeAt])
 	if !strings.Contains(query, "in_band") {

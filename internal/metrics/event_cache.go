@@ -21,7 +21,8 @@ import (
 // one-subscriber publications keep the direct encode path without allocating
 // a cache.
 type eventCache struct {
-	once sync.Once
+	mu   sync.Mutex
+	done bool
 	data []byte
 	err  error
 }
@@ -36,12 +37,19 @@ func sharedEventCache(subscribers int) *eventCache {
 }
 
 // encode invokes marshal at most once and retains both its bytes and its
-// error. sync.Once publishes the retained result to concurrent consumers.
+// error, publishing the retained result to concurrent consumers. The
+// completion flag is set only after marshal returns: a panic unwinds through
+// the deferred unlock leaving the entry open, so the next subscriber re-encodes
+// instead of inheriting a nil payload with a nil error.
 func (c *eventCache) encode(marshal func() ([]byte, error)) ([]byte, error) {
-	c.once.Do(func() {
-		c.data, c.err = marshal()
-	})
-	return c.data, c.err
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.done {
+		return c.data, c.err
+	}
+	data, err := marshal()
+	c.data, c.err, c.done = data, err, true
+	return data, err
 }
 
 // encodeRingEvent is the one encoder for the "record" SSE payload. A shared

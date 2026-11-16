@@ -4,8 +4,79 @@
 // The renderers and editors live in the earlier SETTINGS_MODULES entries;
 // this module is last so every function it names at wiring time exists.
 
+// SETTINGS_SAVE_GATES is the one table of structured editors that refuse to
+// save an invalid draft. Each row names the editor's data-kind, its validator,
+// the sentence the status line states when it refuses, and the inputs to try,
+// in priority order, inside the first bad card. The save path had spelled the
+// same eight-step sequence three times, so a new editor meant copying it and a
+// wording change reached one editor at a time.
+//
+// `focus` is an ordered list rather than one comma selector because the two
+// readings differ: a comma selector returns whichever matches first in the
+// document, while the editor's own priority puts the header field before the
+// client field even when the client field is painted earlier.
+const SETTINGS_SAVE_GATES = [
+  {
+    kind: 'model_rules',
+    validate: wrap => validateModelRulesDraft(wrap),
+    message: 'model rules - fix the highlighted rule first',
+    focus: ['.mr-from'],
+  },
+  {
+    kind: 'request_overrides',
+    validate: wrap => validateRequestOverridesDraft(wrap),
+    message: 'request overrides - fix the highlighted rule first',
+    focus: ['.prov-bad', '.ro-client'],
+  },
+  {
+    kind: 'sub_conversations',
+    validate: wrap => validateSubConversationsDraft(wrap),
+    message: 'sub-conversations - fix the highlighted entry first',
+    focus: ['.prov-bad', '.sc-client'],
+  },
+];
+
+// settingsGateFocus resolves that ordered list to the one input to reveal. It
+// is the same precedence the three hand-written gates had, stated once.
+function settingsGateFocus(card, selectors) {
+  for (const selector of selectors) {
+    const hit = card.querySelector(selector);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// provFieldReason is the provider editor's inline reason slot. A rejected
+// field used to carry its reason in `title` alone, which a keyboard operator
+// only meets by hovering: the reason gets a real element under the row, wired
+// as the field's description, and the element is dropped again when the field
+// validates. It is created on demand because the rows are rebuilt wholesale.
+// The request-overrides cards own the descriptions inside themselves, so this
+// slot stays out of that editor.
+let provFieldSeq = 0;
+function provFieldReason(input, reason) {
+  if (input.closest('.ro-wrap')) return;
+  let err = input._provReason;
+  if (!reason) {
+    if (err) { err.remove(); input._provReason = null; }
+    input.removeAttribute('aria-describedby');
+    return;
+  }
+  if (!err) {
+    if (!input.id) input.id = 'prov-field-' + (++provFieldSeq);
+    err = document.createElement('div');
+    err.className = 'st-error prov-reason';
+    err.id = input.id + '-reason';
+    err.setAttribute('aria-live', 'polite');
+    input._provReason = err;
+    input.after(err);
+  }
+  setText(err, reason);
+  input.setAttribute('aria-describedby', err.id);
+}
+
 function wireSettingsDelegation() {
-  const box = $('settings-fields');
+  const box = settingsFields();
   if (!box || box.dataset.provWired) return;
   box.dataset.provWired = '1';
   const dirty = e => {
@@ -68,8 +139,15 @@ function wireSettingsDelegation() {
         else if (e.target.classList.contains('sp-hname')) { bad = !PROV_HEADER_RE.test(v); reason = 'use a valid HTTP header name'; }
       }
       e.target.classList.toggle('prov-bad', bad);
-      if (bad) { e.target.title = reason; e.target.setAttribute('aria-invalid', 'true'); }
-      else { e.target.removeAttribute('title'); e.target.removeAttribute('aria-invalid'); }
+      if (bad) {
+        e.target.title = reason;
+        e.target.setAttribute('aria-invalid', 'true');
+        provFieldReason(e.target, reason);
+      } else {
+        e.target.removeAttribute('title');
+        e.target.removeAttribute('aria-invalid');
+        provFieldReason(e.target, '');
+      }
     }
     const mrMode = e.target.classList && e.target.classList.contains('mr-mode') ? e.target.closest('.mr-row') : null;
     if (mrMode) {
@@ -238,7 +316,7 @@ function collectSettingsFieldValue(el, validate = false) {
 
 function collectSettingsValues(validate = false) {
   const out = Object.create(null);
-  const box = $('settings-fields');
+  const box = settingsFields();
   if (!box) return out;
   box.querySelectorAll('[data-key]').forEach(el => {
     if (el.disabled) return;
@@ -375,7 +453,7 @@ function settingsCacheHaystacks(box) {
 }
 
 function showSettingsCat() {
-  const box = $('settings-fields');
+  const box = settingsFields();
   const hd = $('settings-pane-hd');
   const rail = $('settings-rail');
   if (!box) return;
@@ -456,7 +534,7 @@ function applySettings() {
   let values;
   try { values = collectSettingsValues(true); }
   catch (err) {
-    settingsStatus(String(err.message || err));
+    settingsStatus(String(err.message || err), 'error');
     if (err.input) {
       const wrap = err.input.closest && err.input.closest('.ro-wrap');
       const gate = wrap ? validateRequestOverridesDraft(wrap) : null;
@@ -470,44 +548,23 @@ function applySettings() {
   btn.dataset.busy = '1';
   settingsStatus('saving');
   updateSettingsActions();
-  // Model-rules save gate: nothing invalid reaches the POST (the row is
-  // already marked red inline - focus + flash the first offender).
-  const mrW = $('settings-fields') && $('settings-fields').querySelector('[data-kind="model_rules"]');
-  if (mrW) {
-    const gate = validateModelRulesDraft(mrW);
-    if (!gate.ok) {
-      delete btn.dataset.busy;
-      updateSettingsActions();
-      settingsStatus('model rules - fix the highlighted rule first');
-      revealSettingsOffender(gate.firstBad, gate.firstBad.querySelector('.mr-from'));
-      return;
-    }
-  }
-  // Request-overrides save gate: the same discipline - the offending rule
-  // card is already marked red inline; focus its first bad input.
-  const roW = $('settings-fields') && $('settings-fields').querySelector('[data-kind="request_overrides"]');
-  if (roW) {
-    const gate = validateRequestOverridesDraft(roW);
-    if (!gate.ok) {
-      delete btn.dataset.busy;
-      updateSettingsActions();
-      settingsStatus('request overrides - fix the highlighted rule first');
-      revealSettingsOffender(gate.firstBad, gate.firstBad.querySelector('.prov-bad') || gate.firstBad.querySelector('.ro-client'));
-      return;
-    }
-  }
-  // Sub-conversations save gate: the same discipline - the offending
-  // entry card is already marked red inline; focus its first bad input.
-  const scW = $('settings-fields') && $('settings-fields').querySelector('[data-kind="sub_conversations"]');
-  if (scW) {
-    const gate = validateSubConversationsDraft(scW);
-    if (!gate.ok) {
-      delete btn.dataset.busy;
-      updateSettingsActions();
-      settingsStatus('sub-conversations - fix the highlighted entry first');
-      revealSettingsOffender(gate.firstBad, gate.firstBad.querySelector('.prov-bad') || gate.firstBad.querySelector('.sc-client'));
-      return;
-    }
+  // Nothing invalid reaches the POST. Each structured editor gates the save on
+  // its own validator, and the three had grown the same eight-step sequence by
+  // hand: find the wrapper by kind, run the validator, release the busy flag,
+  // refresh the action state, state which editor refused, then reveal and
+  // focus the first offender. SETTINGS_SAVE_GATES owns each editor's kind, its
+  // validator, the sentence it states and the input to focus inside the first
+  // bad card, so the three cannot drift apart and a fourth editor is one row.
+  for (const gateSpec of SETTINGS_SAVE_GATES) {
+    const wrap = settingsFields()?.querySelector(`[data-kind="${gateSpec.kind}"]`);
+    if (!wrap) continue;
+    const gate = gateSpec.validate(wrap);
+    if (gate.ok) continue;
+    delete btn.dataset.busy;
+    updateSettingsActions();
+    settingsStatus(gateSpec.message);
+    revealSettingsOffender(gate.firstBad, settingsGateFocus(gate.firstBad, gateSpec.focus) || gate.firstBad);
+    return;
   }
   ++settingsReq;
   return operatorFetch('/admin/config', {
@@ -531,7 +588,7 @@ function applySettings() {
         // unsaved count names exactly the keys that changed after the
         // submission rather than every key changed since the last fill.
         settingsCacheSnapshots(values);
-        settingsKeyEls = settingsKeyElementMap($('settings-fields'));
+        settingsKeyEls = settingsKeyElementMap(settingsFields());
         settingsResyncChangedKeys();
       }
     }
@@ -557,7 +614,7 @@ function revertSettings() {
   });
 }
 
-document.getElementById('settings-rail')?.addEventListener('click', e => {
+$('settings-rail')?.addEventListener('click', e => {
   const b = e.target.closest('.st-rail-item[data-st-cat]');
   if (!b) return;
   settingsCat = b.dataset.stCat;
@@ -565,7 +622,7 @@ document.getElementById('settings-rail')?.addEventListener('click', e => {
   const q = $('settings-q');
   if (q) q.value = '';
   showSettingsCat();
-  const fields = $('settings-fields');
+  const fields = settingsFields();
   if (fields) fields.scrollTop = 0;
 });
 
@@ -583,7 +640,9 @@ async function deleteMatching() {
   if (!preview) return updateDelCount();
   if (!confirm(`Delete ${recPhrase(preview.count)} matching the selected filter?\n\nThis cannot be undone.`)) return;
   settingsStatus('deleting');
-  if (await purgeMetrics(preview.filter)) settingsStatus(recPhrase(preview.count) + ' deleted', 'ok');
+  // The rendered count travels with the delete: the proxy recounts it inside
+  // the delete transaction and refuses the call when the row set moved.
+  if (await purgeMetrics({filter: preview.filter, reviewed_count: preview.count})) settingsStatus(recPhrase(preview.count) + ' deleted', 'ok');
 }
 
 async function purgeAll() {
@@ -593,11 +652,13 @@ async function purgeAll() {
   if (await purgeMetrics(null)) settingsStatus('all metrics history deleted', 'ok');
 }
 
-// Confirmed success is the only path that clears UI state. The same gate
-// handles full/filtered deletion from either action, disables repeat
-// submits, and reports failures to the settings status line - the one
-// surface both actions live on.
-async function purgeMetrics(filter) {
+// Confirmed success is the only path that clears UI state. body is the purge
+// document ({filter, reviewed_count}) or null for the bodyless full delete. The
+// same gate handles full/filtered deletion from either action, disables repeat
+// submits, and reports failures to the settings status line - the one surface
+// both actions live on. A refused count is a distinct message: the server saw
+// a different row set than the preview and nothing was deleted.
+async function purgeMetrics(body) {
   const fail = 'could not delete records';
   if (_purgeBusy) return;
   _purgeBusy = true;
@@ -608,11 +669,10 @@ async function purgeMetrics(filter) {
   document.querySelectorAll('#settings-fields [data-purge="matching"] select').forEach(el => { el.disabled = true; });
   try {
     const options = {method: 'POST'};
-    if (filter) { options.headers = JSON_HEADERS; options.body = JSON.stringify(filter); }
+    if (body) { options.headers = JSON_HEADERS; options.body = JSON.stringify(body); }
     const result = await operatorJsonBody('/admin/purge', options, fail);
-    if (result.ok !== true) throw new Error(result.error || fail);
+    if (!isCount(result.deleted)) throw new Error(result.error || fail);
     _filterPreviews.clear();
-    $('btn-logs-filtered').disabled = true;
     // The scoped block's preview text describes records that just ceased
     // to exist; the next sheet fill rebuilds it empty either way.
     const delPreview = $('del-count');
@@ -629,7 +689,14 @@ async function purgeMetrics(filter) {
     await Promise.all([bootstrap, aggregates]);
     return true;
   } catch (err) {
-    settingsStatus(String(err.message || fail));
+    settingsStatus(String(err.message || fail), 'error');
+    // A refused count means the previewed set moved under the operator: drop
+    // the stale preview and count again, so the sheet offers the new set
+    // instead of repeating the same 409 on the next click.
+    if (err.status === 409) {
+      _filterPreviews.delete('del');
+      updateDelCount();
+    }
     return false;
   } finally {
     _purgeBusy = false;

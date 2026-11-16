@@ -46,7 +46,7 @@ func throttleGenerations(p *Server) (persistGen, persistedGen uint64) {
 
 func assertThrottleDocumentMatchesPolicy(t *testing.T, raw []byte, p *Server) []persistedThrottle {
 	t.Helper()
-	items := decodeThrottles(raw)
+	items, _ := decodeThrottles(raw)
 	want := p.latestThrottleSnap()
 	gotJSON, err := json.Marshal(persistedThrottleDoc{Throttles: items})
 	if err != nil {
@@ -153,34 +153,48 @@ func TestThrottleHeaderPersistenceCoalescesBurst(t *testing.T) {
 // through a rapid burst and bounds both its write count and total bytes. This
 // is the request-path decoupling proof: no flush is needed for the writer to
 // land the latest policy.
+//
+// The burst runs in virtual time (like the pause-timer checks). A real 25ms
+// debounce window made the assertion a function of machine speed: under load
+// the window expired mid-burst, so 512 changes produced many more writes and a
+// fixed count ceiling failed on a correct writer. Here the whole burst lands
+// while the writer is still waiting for quiet, which is the case the contract
+// is about, and one quiet window then collapses it into one document.
 func TestThrottleHeaderWriterCoalescesWithoutFlush(t *testing.T) {
-	p := New(config.Default(), metrics.Noop{})
-	store := &countingThrottlePersist{}
-	p.attachThrottlePersist(store)
-	p.throttle.debounce = 25 * time.Millisecond
-	t.Cleanup(func() { _ = p.CloseThrottlePersist(context.Background()) })
+	synctest.Test(t, func(t *testing.T) {
+		p := New(config.Default(), metrics.Noop{})
+		store := &countingThrottlePersist{}
+		p.attachThrottlePersist(store)
+		p.throttle.debounce = 25 * time.Millisecond
+		t.Cleanup(func() { _ = p.CloseThrottlePersist(context.Background()) })
 
-	const gates = 512
-	for i := 0; i < gates; i++ {
-		applyThrottleHeader(t, p, throttleTestProvider(i), hdrLimitConcurrency, "1")
-	}
-	if !waitFor(t, func() bool { return store.saveCount() != 0 }) {
-		t.Fatal("background writer never persisted the burst")
-	}
-	if err := p.FlushThrottles(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	saves, raw, bytes, _ := store.stats()
-	if saves > 16 {
-		t.Fatalf("background writer made %d writes for one burst", saves)
-	}
-	if bytes > int64(saves)*int64(len(raw)) {
-		t.Fatalf("persisted bytes = %d, bound %d", bytes, int64(saves)*int64(len(raw)))
-	}
-	items := assertThrottleDocumentMatchesPolicy(t, raw, p)
-	if len(items) != gates {
-		t.Fatalf("persisted gates = %d, want %d", len(items), gates)
-	}
+		const gates = 512
+		for i := 0; i < gates; i++ {
+			applyThrottleHeader(t, p, throttleTestProvider(i), hdrLimitConcurrency, "1")
+		}
+		// Let virtual time cross exactly one debounce window: the burst above is
+		// one wake, so the whole 512-change run must land as a single document.
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if saves := store.saveCount(); saves != 1 {
+			t.Fatalf("background writer made %d writes for one burst, want 1 (a burst is one wake)", saves)
+		}
+		if err := p.FlushThrottles(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		saves, raw, bytes, _ := store.stats()
+		// The flush is the barrier write; nothing may follow it for this burst.
+		if saves > 2 {
+			t.Fatalf("background writer made %d writes for one burst plus its flush, want at most 2", saves)
+		}
+		if bytes > int64(saves)*int64(len(raw)) {
+			t.Fatalf("persisted bytes = %d, bound %d", bytes, int64(saves)*int64(len(raw)))
+		}
+		items := assertThrottleDocumentMatchesPolicy(t, raw, p)
+		if len(items) != gates {
+			t.Fatalf("persisted gates = %d, want %d", len(items), gates)
+		}
+	})
 }
 
 // TestThrottleHeaderSinkFailureDoesNotFailInference drives the real HTTP path
@@ -310,13 +324,13 @@ func TestThrottleStaleWriteRewritesLatest(t *testing.T) {
 
 	firstDone := make(chan error, 1)
 	go func() {
-		firstDone <- p.applyThrottle(scheduler.Throttle{
-			Provider: "provider.example", Limit: scheduler.Limit{Concurrency: 1},
+		firstDone <- applyTestThrottle(p, scheduler.Throttle{
+			Scope: scheduler.LimitScope{Providers: []string{"provider.example"}}, Limit: scheduler.Limit{Concurrency: 1},
 		})
 	}()
 	<-entered
-	if err := p.applyThrottle(scheduler.Throttle{
-		Provider: "provider.example", Limit: scheduler.Limit{Concurrency: 2},
+	if err := applyTestThrottle(p, scheduler.Throttle{
+		Scope: scheduler.LimitScope{Providers: []string{"provider.example"}}, Limit: scheduler.Limit{Concurrency: 2},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +346,7 @@ func TestThrottleStaleWriteRewritesLatest(t *testing.T) {
 	if count != 3 {
 		t.Fatalf("writes = %d, want stale write plus latest rewrite", count)
 	}
-	items := decodeThrottles(got)
+	items, _ := decodeThrottles(got)
 	if len(items) != 1 || items[0].Provider != "provider.example" || items[0].Concurrency != 2 {
 		t.Fatalf("final durable policy = %+v, want the latest concurrency 2", items)
 	}
@@ -522,7 +536,7 @@ func TestThrottleHeaderPersistenceRetriesAfterFailure(t *testing.T) {
 	if calls < 2 {
 		t.Fatalf("persistence calls = %d, want a retry after the first failure", calls)
 	}
-	items := decodeThrottles(raw)
+	items, _ := decodeThrottles(raw)
 	if len(items) != 1 || items[0].Provider != "provider.example" || items[0].Concurrency != 2 {
 		t.Fatalf("retried document = %+v", items)
 	}
@@ -545,7 +559,7 @@ func TestThrottleHeaderPersistenceFlushRecoversAfterFailure(t *testing.T) {
 		t.Fatalf("flush after the sink recovered: %v", err)
 	}
 	_, raw := sink.stats()
-	items := decodeThrottles(raw)
+	items, _ := decodeThrottles(raw)
 	if len(items) != 1 || items[0].Concurrency != 3 {
 		t.Fatalf("recovered flush document = %+v", items)
 	}
@@ -629,7 +643,7 @@ func TestThrottlePersisterCloseIdempotent(t *testing.T) {
 	if saves != 1 {
 		t.Fatalf("concurrent closes wrote %d documents, want 1", saves)
 	}
-	items := decodeThrottles(raw)
+	items, _ := decodeThrottles(raw)
 	if len(items) != 1 || items[0].Concurrency != 4 {
 		t.Fatalf("closed policy = %+v", items)
 	}
@@ -657,7 +671,7 @@ func TestThrottleProviderLabelBound(t *testing.T) {
 	if err := p.applyThrottleHeaders(r, overlong, "client"); err == nil {
 		t.Fatal("overlong header provider label was accepted")
 	}
-	if err := p.applyThrottle(scheduler.Throttle{Provider: overlong, Limit: scheduler.Limit{Concurrency: 1}}); err == nil {
+	if err := applyTestThrottle(p, scheduler.Throttle{Scope: scheduler.LimitScope{Providers: []string{overlong}}, Limit: scheduler.Limit{Concurrency: 1}}); err == nil {
 		t.Fatal("overlong operator provider label was accepted")
 	}
 	rr := postThrottle(t, p, `{"provider":"`+overlong+`","concurrency":1}`)
@@ -671,8 +685,22 @@ func TestThrottleProviderLabelBound(t *testing.T) {
 	if max > operatorPersistDocMaxBytes {
 		t.Fatalf("persisted document exceeded cap: %d", max)
 	}
-	items := decodeThrottles(raw)
+	items, _ := decodeThrottles(raw)
 	if len(items) != 1 || items[0].Provider != normal {
 		t.Fatalf("overlong label changed the persisted document: %+v", items)
 	}
+}
+
+// applyTestThrottle installs a complete policy through the same scheduler and
+// persistence owners the operator path uses, without going through HTTP. Tests
+// that need a seeded policy call it instead of reaching into scheduler state.
+func applyTestThrottle(p *Server, th scheduler.Throttle) error {
+	if err := validateThrottleScope(th.Scope); err != nil {
+		return err
+	}
+	if !p.scheduler.SetPolicy(th) {
+		return nil
+	}
+	p.notePolicyScope(th)
+	return p.persistThrottleSync()
 }

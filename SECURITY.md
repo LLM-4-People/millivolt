@@ -5,12 +5,12 @@
 millivolt is a trusted-operator tool, not a multi-user security boundary. It
 has no authorization roles or tenant isolation. The whole dashboard is gated
 by the shared `MILLIVOLT_OPERATOR_TOKEN` environment credential and denied
-while it is unset (see [operator access](docs/operations.md#operator-access)):
+while it is unset (see [operator access](docs/routes.md#operator-access)):
 there is one operator identity, no per-user accounts and no audit trail of
-who acted. Only the `GET /healthz` liveness probe, the `POST /session` login
-handshake, origin-root brand/PWA assets and transparent inference stay open at
-the application gate; the canonical open-path list is
-[operator access](docs/operations.md#operator-access). The upstream API key is
+who acted. Only the `GET /healthz` liveness and `GET /readyz` readiness probes,
+the `POST /session` login handshake, origin-root brand/PWA assets and transparent
+inference stay open at the application gate; the canonical open-path list is
+[operator access](docs/routes.md#operator-access). The upstream API key is
 forwarded for inference; it does not secure the dashboard or administration.
 
 The supplied listen address binds all interfaces. Prefer an explicit loopback
@@ -67,11 +67,23 @@ including the "new clients" comparison, and the Cursor parked-run scope. The
 recorded client, and therefore dashboard grouping and the `client` filter, also
 follow the claim.
 
-The recorded client address (`client_ip`) is likewise a hint. `X-Forwarded-For`
-is honored as sent, so a directly reachable caller can claim any address in
-it; only the operator gate's brute-force limiter keys on the real socket
-address. Do not treat `client_ip` as a verified source for rate limiting,
-allowlisting or attribution outside the proxy.
+The recorded client address is likewise a hint. `client_ip` records the first
+`X-Forwarded-For` element when that header is present and the socket peer
+otherwise; the value is diagnostic, never verified, and a directly reachable
+caller can set it. Do not treat `client_ip` as a verified source for
+rate limiting, allowlisting or attribution outside the proxy. The operator
+gate's brute-force limiter is a separate key: it reads the address the
+immediate hop appended (the last `X-Forwarded-For` element) and falls back to
+the socket address, so it distinguishes clients behind a correct ingress but a
+directly reachable caller can still pick its own bundle.
+
+The example ingress trusts exactly one loopback hop (`set_real_ip_from
+127.0.0.1`, [deploy/nginx.conf](deploy/nginx.conf)) and its `allow` lists
+evaluate that rewritten address. A caller that can already reach the loopback
+listener therefore chooses the address the lists see: they separate remote
+networks from each other and from local callers, not local callers from each
+other. Treat a location allowlist as reachability control for a network, not as
+identity.
 
 Treat client scoping as a way to separate your own tools and traffic, not as a
 security boundary between mutually untrusted parties. A proxy reachable by
@@ -121,10 +133,11 @@ trust-boundary evidence:
 - JSON, SSE and gzip response writers. The operator surfaces behind the gate
   encode the proxy's own output, and framing and compression state are bounded
   by the response-size guard. Two writers are intentionally reachable without
-  the operator gate: the `/healthz` liveness JSON and the transparent inference
-  SSE relay, which streams the upstream response to a client that supplied its
-  own provider credentials. Neither exposes operator data, so this category is
-  not an authentication bypass.
+  the operator gate: the `/healthz` and `/readyz` probe JSON and the transparent
+  inference SSE relay, which streams the upstream response to a client that
+  supplied its own provider credentials. Neither exposes operator data (the
+  readiness reason names queue depth and flush failures only), so this category
+  is not an authentication bypass.
 - Bounded allocations (`cmd/proxy/mcp.go`, `internal/sse/frames.go`). The MCP
   recorder cap is the fixed `mcp.MaxResponseBytes` read budget (64 MiB) plus one
   byte, not a configurable limit. The SSE frame's requested size is the

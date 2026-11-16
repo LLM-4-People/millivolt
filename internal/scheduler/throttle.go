@@ -65,9 +65,13 @@ func (l Limit) normalized() Limit {
 	return l
 }
 
-// Throttle is one provider's persisted cap, plus who last wrote it.
+// Throttle is one operator limit policy: a selector, an optional schedule, a
+// set of caps, and who last wrote it. ID is the canonical digest of Scope and
+// Schedule; callers never supply or persist an identity of their own.
 type Throttle struct {
-	Provider  string
+	ID        string
+	Scope     LimitScope
+	Schedule  LimitSchedule
 	Limit     Limit
 	Source    string // ThrottleSourceUI or ThrottleSourceHeader
 	UpdatedBy string // client label (header) or "dashboard" (UI)
@@ -85,6 +89,61 @@ type ThrottleInfo struct {
 	TokRemaining float64 `json:"tokens_remaining"`
 	ReqCapacity  float64 `json:"requests_capacity"`
 	TokCapacity  float64 `json:"tokens_capacity"`
+	// Scheduled reports whether the policy's schedule is open right now. A
+	// policy outside its window is installed but enforces nothing, and the
+	// server owns that verdict: a client that re-derived it from start and end
+	// minutes would disagree with admission across time zones and midnight
+	// wraps.
+	Scheduled bool `json:"scheduled"`
+}
+
+// PolicyTarget is the request identity matched against every active policy.
+// It is built at admission from the resolved record, so a policy can select on
+// any fact the proxy already owns without re-reading the request.
+type PolicyTarget struct {
+	Provider     string
+	Model        string
+	Client       string
+	KeyHash      string
+	Conversation string
+}
+
+// policyGate is the live limiter for one policy. The selector and its counters
+// live together so install and admission share one mutex. The policy map is
+// the single owner of operator limits.
+type policyGate struct {
+	mu       sync.Mutex
+	throttle Throttle
+	inFlight int
+	reserved int64 // sum of in-flight token reservations (stats only)
+	req      strictWindow
+	tok      bucket
+	tokEpoch uint64 // increments when the token dimension is enabled/disabled
+	wake     wakeTimer
+}
+
+// admission is the immutable ownership proof captured while one or more gates
+// grant. A request that matches several policies holds a lease in each, so
+// every policy's occupancy and token debt settle exactly once.
+type admission struct {
+	leases []gateLease
+}
+
+type gateLease struct {
+	gate     *policyGate
+	reserved int64
+	tokEpoch uint64
+}
+
+// active reports whether the policy applies to now. A schedule outside its
+// window parks the policy without changing its counters: the request window
+// prunes stale admits and the token bucket refills, so the next open window
+// starts from observed traffic rather than an invented reset.
+//
+// The caller must hold the gate lock. An edit replaces throttle wholesale under
+// that lock, so an unlocked read here races every policy update.
+func (p *policyGate) active(now time.Time) bool {
+	return p.throttle.Schedule.Active(now)
 }
 
 // maxWindowSlots bounds the memory a strictWindow may hold for its admitted
@@ -343,30 +402,7 @@ func (b *bucket) waitFor(n float64) time.Duration {
 	return d
 }
 
-// providerGate is the live limiter for one provider. The cap policy
-// (Throttle) and occupancy (inFlight, buckets) live together so SetThrottle
-// and tryAdmit share one mutex. The map of gates is the single owner of
-// provider limits.
-type providerGate struct {
-	mu       sync.Mutex
-	throttle Throttle
-	inFlight int
-	reserved int64 // sum of in-flight token reservations (stats only)
-	req      strictWindow
-	tok      bucket
-	tokEpoch uint64 // increments when the token dimension is enabled/disabled
-	wake     wakeTimer
-}
-
-// admission is the immutable ownership proof captured while a gate grants.
-// The gate owns concurrency; the token epoch identifies the bucket incarnation.
-type admission struct {
-	gate     *providerGate
-	reserved int64
-	tokEpoch uint64
-}
-
-func (g *providerGate) resetBuckets(l Limit, now time.Time) {
+func (g *policyGate) resetBuckets(l Limit, now time.Time) {
 	if g.tok.enabled != (l.Tokens > 0 && l.TokWindow > 0) {
 		g.tokEpoch++
 	}
@@ -374,13 +410,12 @@ func (g *providerGate) resetBuckets(l Limit, now time.Time) {
 	g.tok.reset(l.Tokens, l.TokWindow, now)
 }
 
-// blocked reports whether this gate refuses a request estimated at est
+// blockedLocked reports whether this gate refuses a request estimated at est
 // tokens right now, and how long until the blocking dimension could admit
-// (0 when the concurrency cap blocks: that waits for a release, not a
-// timer). The caller must hold g.mu: the window prune and the token bucket
-// refill it performs are the same mutations an admitting caller then relies
-// on. tryAdmit applies its reservation only after this returns false.
-func (g *providerGate) blocked(est int64) (bool, time.Duration) {
+// (0 when the concurrency cap blocks: that waits for a release, not a timer).
+// The caller must hold g.mu: the window prune and the token bucket refill it
+// performs are the same mutations an admitting caller then relies on.
+func (g *policyGate) blockedLocked(est int64) (bool, time.Duration) {
 	if !g.throttle.Limit.Active() {
 		return false, 0
 	}
@@ -415,21 +450,10 @@ func (g *providerGate) blocked(est int64) (bool, time.Duration) {
 	return false, 0
 }
 
-func (g *providerGate) tryAdmit(est int64) (ok bool, lease admission, wait time.Duration) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	// An inactive limit admits with NO gate bookkeeping at all (nil lease,
-	// no occupancy) - distinct from active-and-admitted below, so this fork
-	// cannot fold into blocked.
-	if !g.throttle.Limit.Active() {
-		return true, admission{}, 0
-	}
-	if blocked, wait := g.blocked(est); blocked {
-		return false, admission{}, wait
-	}
-	// Admitted with a positive estimate: reserve it. The token switch above
-	// already let an oversize request out of debt - it exhausts the bucket
-	// here. A zero estimate reserves nothing (settle debits actual usage).
+// admitLocked commits one admission after blockedLocked returned false. The
+// caller holds g.mu and owns the matching check, so an inactive or
+// out-of-schedule policy is never charged.
+func (g *policyGate) admitLocked(est int64) gateLease {
 	var reserved int64
 	if g.tok.enabled && est > 0 {
 		reserved = est
@@ -440,15 +464,18 @@ func (g *providerGate) tryAdmit(est int64) (ok bool, lease admission, wait time.
 		g.tok.tokens -= float64(reserved)
 		g.reserved += reserved
 	}
-	return true, admission{gate: g, reserved: reserved, tokEpoch: g.tokEpoch}, 0
+	return gateLease{gate: g, reserved: reserved, tokEpoch: g.tokEpoch}
 }
 
-func (g *providerGate) snapshot(queued int) ThrottleInfo {
+func (g *policyGate) snapshot(queued int) ThrottleInfo {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := time.Now()
 	g.tok.refill(now)
-	info := ThrottleInfo{Throttle: g.throttle, InFlight: g.inFlight, Queued: queued}
+	info := ThrottleInfo{
+		Throttle: g.throttle, InFlight: g.inFlight, Queued: queued,
+		Scheduled: g.throttle.Schedule.Active(now),
+	}
 	info.ReqRemaining = g.req.remaining(now)
 	info.ReqCapacity = g.req.capacity()
 	if g.tok.enabled {
@@ -458,38 +485,72 @@ func (g *providerGate) snapshot(queued int) ThrottleInfo {
 	return info
 }
 
-// SetThrottle replaces a provider cap, reporting whether its effective Limit
-// changed. Source, UpdatedBy and UpdatedAt describe the last policy change,
-// not the last request that repeated the same cap. Explicit installation
-// timestamps are preserved; absent timestamps are filled only on a change.
-func (s *Scheduler) SetThrottle(t Throttle) bool {
-	return s.UpdateThrottle(t.Provider, func(Throttle) Throttle { return t })
+// SetPolicy installs one complete policy and reports whether anything changed.
+// It is the write path used by restore and by a caller that already owns the
+// full document. Id is derived from the scope and schedule.
+func (s *Scheduler) SetPolicy(t Throttle) bool {
+	id := PolicyID(t.Scope, t.Schedule)
+	changed, _ := s.UpdatePolicy(id, func(Throttle) Throttle { return t })
+	return changed
 }
 
-// UpdateThrottle atomically reads, merges and installs a provider policy.
-// update runs under the policy lock and must not block or call the scheduler.
-// An inactive Limit clears the provider. Equal effective limits are a true
-// no-op: no bucket reset, metadata update, timer cancellation or global kick.
-func (s *Scheduler) UpdateThrottle(provider string, update func(Throttle) Throttle) bool {
-	if provider == "" {
-		return false
-	}
+// UpdatePolicy atomically reads, merges and installs one policy. update runs
+// under the policy lock and must not block or call the scheduler. The returned
+// policy carries the final scope and schedule, so the update function may
+// narrow, widen or re-schedule the selector. A changed identity replaces the
+// old policy rather than carrying its counters under a new name, unless the new
+// identity already belongs to another policy: that is a conflict, reported
+// without mutating either policy, so an edit can never silently delete a
+// neighbour. An inactive Limit removes the policy. Equal effective policies are
+// a true no-op: no bucket reset, metadata update, timer cancellation or global
+// kick.
+func (s *Scheduler) UpdatePolicy(id string, update func(Throttle) Throttle) (changed bool, conflict bool) {
 	s.throttleMu.Lock()
-	g := s.gates[provider]
+	var old *policyGate
+	if id != "" {
+		old = s.gates[id]
+	}
 	var cur Throttle
-	if g != nil {
-		g.mu.Lock()
-		cur = g.throttle
+	if old != nil {
+		old.mu.Lock()
+		cur = old.throttle
 	}
 	t := update(cur)
-	t.Provider = provider
+	t.Scope = NormalizeLimitScope(t.Scope)
+	t.Schedule = NormalizeLimitSchedule(t.Schedule)
 	t.Limit = t.Limit.normalized()
-	if cur.Limit == t.Limit || g == nil && !t.Limit.Active() {
-		if g != nil {
-			g.mu.Unlock()
+	t.ID = PolicyID(t.Scope, t.Schedule)
+	if !t.Limit.Active() || t.ID == "" {
+		if old == nil {
+			s.throttleMu.Unlock()
+			return false, false
 		}
+		old.wake.stop()
+		old.throttle = Throttle{}
+		old.mu.Unlock()
+		delete(s.gates, id)
+		s.publishPolicyLocked()
 		s.throttleMu.Unlock()
-		return false
+		s.resetAllRamps()
+		s.kickThrottles()
+		return true, false
+	}
+	if old != nil && cur.Limit == t.Limit && cur.ID == t.ID {
+		old.mu.Unlock()
+		s.throttleMu.Unlock()
+		return false, false
+	}
+	// An edit that resolves to another policy's identity would replace that
+	// policy and lose its counters and metadata. Refuse it instead: the caller
+	// must remove or re-scope the other rule explicitly.
+	if t.ID != id {
+		if existing := s.gates[t.ID]; existing != nil && existing != old {
+			if old != nil {
+				old.mu.Unlock()
+			}
+			s.throttleMu.Unlock()
+			return false, true
+		}
 	}
 	// A ramp shape change invalidates every group's epoch: the target and the
 	// slope are different, so an old epoch would grant the wrong allowance.
@@ -497,57 +558,78 @@ func (s *Scheduler) UpdateThrottle(provider string, update func(Throttle) Thrott
 	rampChanged := cur.Limit.Concurrency != t.Limit.Concurrency ||
 		cur.Limit.AntiBurst != t.Limit.AntiBurst ||
 		cur.Limit.RampDuration != t.Limit.RampDuration
-	if g != nil {
-		g.wake.stop()
-	}
-	if !t.Limit.Active() {
-		g.throttle = Throttle{}
-		g.mu.Unlock()
-		delete(s.gates, provider)
-		s.publishGatesLocked()
-		s.throttleMu.Unlock()
-		if rampChanged {
-			s.resetProviderRamps(provider)
-		}
-		s.kickThrottles()
-		return true
+	identityChanged := old != nil && cur.ID != t.ID
+	if old != nil {
+		old.wake.stop()
 	}
 	if t.UpdatedAt.IsZero() {
 		t.UpdatedAt = time.Now()
 	}
-	if g == nil {
-		if len(s.gates) >= maxProviderGates {
-			// Header-driven limits are client-controlled. Beyond the cap a new
-			// provider name is ignored instead of growing the gate map forever.
-			s.throttleMu.Unlock()
-			return false
+	if old != nil && !identityChanged {
+		old.throttle = t
+		old.resetBuckets(t.Limit, time.Now())
+		old.mu.Unlock()
+		s.publishPolicyLocked()
+		s.throttleMu.Unlock()
+		if rampChanged {
+			s.resetAllRamps()
 		}
-		g = s.newProviderGate(provider)
-		g.mu.Lock()
-		if s.gates == nil {
-			s.gates = make(map[string]*providerGate)
-		}
-		s.gates[provider] = g
-		s.publishGatesLocked()
+		s.kickThrottles()
+		return true, false
 	}
+	if len(s.gates) >= maxProviderGates {
+		// Header-driven limits are client-controlled. Beyond the cap a new
+		// selector is ignored instead of growing the policy map forever.
+		if old != nil {
+			old.mu.Unlock()
+		}
+		s.throttleMu.Unlock()
+		return false, false
+	}
+	if old != nil {
+		old.throttle = Throttle{}
+		old.mu.Unlock()
+		delete(s.gates, id)
+	}
+	g := s.newPolicyGate(t)
 	g.throttle = t
-	now := time.Now()
-	g.resetBuckets(t.Limit, now)
-	g.mu.Unlock()
-	s.throttleMu.Unlock()
-	if rampChanged {
-		s.resetProviderRamps(provider)
+	g.resetBuckets(t.Limit, time.Now())
+	if s.gates == nil {
+		s.gates = make(map[string]*policyGate)
 	}
+	s.gates[t.ID] = g
+	s.publishPolicyLocked()
+	s.throttleMu.Unlock()
+	s.resetAllRamps()
 	s.kickThrottles()
-	return true
+	return true, false
 }
 
-// ThrottlePolicies returns every active provider cap, sorted by provider,
-// without live occupancy. Durable persistence stores only policy, so it must
-// not pay ListThrottles' scan of every group and queued waiter. Every gate
-// policy write holds throttleMu, so reading g.throttle under that lock is
-// race-free and never takes a group mutex. Throttle has only value fields, so
-// the returned copies cannot alias later gate updates.
+// RemovePolicy deletes one policy by id.
+func (s *Scheduler) RemovePolicy(id string) bool {
+	changed, _ := s.UpdatePolicy(id, func(Throttle) Throttle { return Throttle{} })
+	return changed
+}
+
+// PolicyByID returns one policy's current definition.
+func (s *Scheduler) PolicyByID(id string) (Throttle, bool) {
+	s.throttleMu.Lock()
+	defer s.throttleMu.Unlock()
+	g := s.gates[id]
+	if g == nil {
+		return Throttle{}, false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.throttle, true
+}
+
+// ThrottlePolicies returns every active policy without live occupancy, sorted
+// by identity. Durable persistence stores only policy, so it must not pay
+// ListThrottles' scan of every group and queued waiter. Every policy write
+// holds throttleMu, so reading g.throttle under that lock is race-free and
+// never takes a group mutex. Throttle has only value fields, so the returned
+// copies cannot alias later gate updates.
 func (s *Scheduler) ThrottlePolicies() []Throttle {
 	s.throttleMu.Lock()
 	out := make([]Throttle, 0, len(s.gates))
@@ -555,40 +637,52 @@ func (s *Scheduler) ThrottlePolicies() []Throttle {
 		out = append(out, g.throttle)
 	}
 	s.throttleMu.Unlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].Provider < out[j].Provider })
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
-// ListThrottles returns every active provider cap, sorted by provider,
-// with live occupancy. The dashboard GET is this list. Persistence uses the
-// policy-only ThrottlePolicies instead.
+// ListThrottles returns every active policy with live occupancy. The dashboard
+// GET is this list. Persistence uses the policy-only ThrottlePolicies instead.
 func (s *Scheduler) ListThrottles() []ThrottleInfo {
-	queued := s.throttleQueued()
+	queued := s.policyQueued()
 	s.throttleMu.Lock()
 	out := make([]ThrottleInfo, 0, len(s.gates))
-	for p, g := range s.gates {
-		out = append(out, g.snapshot(queued[p]))
+	for id, g := range s.gates {
+		out = append(out, g.snapshot(queued[id]))
 	}
 	s.throttleMu.Unlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].Provider < out[j].Provider })
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
-// throttleQueued counts, per provider, every request the scheduler parks for
-// that provider: admission waiters plus send-gate waiters. A 429 pacing
-// window parks both populations, so "queued" in the limits menu means work
-// waiting on the provider, not only work waiting on a configured cap.
-func (s *Scheduler) throttleQueued() map[string]int {
+// policyQueued counts every parked request a policy covers: admission waiters
+// plus send-gate waiters. A waiter can be covered by several policies, so each
+// matching policy reports it; the console labels the number as the policy's
+// own queue, not a partition of the scheduler's total.
+func (s *Scheduler) policyQueued() map[string]int {
 	out := map[string]int{}
+	snap := s.policySnap.Load()
+	if snap == nil || len(snap.all) == 0 && len(snap.byProvider) == 0 {
+		return out
+	}
 	for _, g := range s.snapshotGroups() {
 		g.mu.Lock()
+		count := func(provider, model, client, keyHash, conversation string) {
+			snap.each(provider, func(entry *policyEntry) {
+				if entry.matches(provider, model, client, keyHash, conversation) {
+					out[entry.id]++
+				}
+			})
+		}
 		g.queue.forEach(func(w *waiter) {
-			if w.provider != "" {
-				out[w.provider]++
-			}
+			count(w.provider, w.model, w.client, w.keyHash, w.conversation)
 		})
-		if g.provider != "" {
-			out[g.provider] += g.sendWaiters
+		if g.provider != "" && g.sendWaiters > 0 {
+			// Send-gate waiters are not enumerated here; attribute the count to
+			// every policy that can select the group's provider.
+			snap.each(g.provider, func(entry *policyEntry) {
+				out[entry.id] += g.sendWaiters
+			})
 		}
 		g.mu.Unlock()
 	}
@@ -604,43 +698,32 @@ func (s *Scheduler) RestoreThrottles(ts []Throttle) {
 	for _, g := range s.gates {
 		g.wake.stop()
 	}
-	s.gates = make(map[string]*providerGate, len(ts))
+	s.gates = make(map[string]*policyGate, len(ts))
 	now := time.Now()
 	for _, t := range ts {
+		t.Scope = NormalizeLimitScope(t.Scope)
+		t.Schedule = NormalizeLimitSchedule(t.Schedule)
 		t.Limit = t.Limit.normalized()
-		if t.Provider == "" || !t.Limit.Active() {
+		if !t.Limit.Active() {
 			continue
 		}
+		t.ID = PolicyID(t.Scope, t.Schedule)
 		if t.UpdatedAt.IsZero() {
 			t.UpdatedAt = now
 		}
-		g := s.newProviderGate(t.Provider)
+		g := s.newPolicyGate(t)
 		g.throttle = t
 		g.resetBuckets(t.Limit, now)
-		s.gates[t.Provider] = g
+		s.gates[t.ID] = g
 	}
-	s.publishGatesLocked()
+	s.publishPolicyLocked()
 	s.throttleMu.Unlock()
 	s.resetAllRamps()
 }
 
-// resetProviderRamps clears the ramp epoch of every group attributed to
-// provider. It runs after the policy lock is released and before the caller
-// kicks the throttles, so no group mutex is taken under throttleMu or a gate
-// mutex. The index pointer stays valid after the scheduler lock is released;
-// eviction unlinks groups but never frees the index while it is in use.
-func (s *Scheduler) resetProviderRamps(provider string) {
-	s.mu.Lock()
-	idx := s.providerGroups[provider]
-	s.mu.Unlock()
-	if idx == nil {
-		return
-	}
-	resetRamps(idx.snapshotAll())
-}
-
 // resetAllRamps clears every attributed group's ramp epoch. RestoreThrottles
-// replaces the entire policy set, so no installed epoch survives it.
+// replaces the entire policy set and a shaped edit can change which groups a
+// selector covers, so no installed epoch survives either.
 func (s *Scheduler) resetAllRamps() {
 	s.mu.Lock()
 	idxs := make([]*providerIndex, 0, len(s.providerGroups))
@@ -661,113 +744,271 @@ func resetRamps(groups []*group) {
 	}
 }
 
-// maxProviderGates bounds header-driven provider caps. Configured providers
-// are restored explicitly and are not subject to the header-creation path.
+// maxProviderGates bounds header-driven policies. Restored policies are
+// loaded explicitly and are not subject to the header-creation path.
 const maxProviderGates = 4096
 
-func (s *Scheduler) newProviderGate(provider string) *providerGate {
-	g := &providerGate{}
-	g.wake.fn = func() { s.drainProviderWake(provider) }
+// newPolicyGate binds the shared provider wake to the policy's selector. A
+// policy that names providers wakes only those providers' fair sets; a global
+// policy wakes every group because it can block any of them.
+func (s *Scheduler) newPolicyGate(t Throttle) *policyGate {
+	g := &policyGate{}
+	providers := append([]string(nil), t.Scope.Providers...)
+	g.wake.fn = func() {
+		if len(providers) == 0 {
+			s.drainAll()
+			return
+		}
+		for _, provider := range providers {
+			s.drainProviderWake(provider)
+		}
+	}
 	return g
 }
 
-func (s *Scheduler) gate(provider string) *providerGate {
-	if provider == "" {
-		return nil
-	}
-	snap := s.gateSnap.Load()
-	if snap == nil {
-		return nil
-	}
-	return (*snap)[provider]
+// policyIndex is the immutable read view of the policy map: a list for
+// provider-independent policies and one list per named provider. Matching a
+// request is a map lookup plus a short scan, never a scan of every policy.
+//
+// Each entry carries the selector and schedule it was published with. Those
+// two are immutable between publications, while the gate's throttle document
+// is replaced under its own lock on every edit, so a reader that tested
+// g.throttle.Scope here would race every policy update.
+type policyIndex struct {
+	all        []*policyEntry
+	byProvider map[string][]*policyEntry
 }
 
-// publishGatesLocked replaces the immutable read view. Callers hold
+// policyEntry is one published policy: the gate plus the selector and
+// schedule that decide whether it applies. Published entries are never
+// mutated; an edit builds a new index.
+type policyEntry struct {
+	gate     *policyGate
+	id       string
+	scope    LimitScope
+	schedule LimitSchedule
+}
+
+// matches reports whether this published selector covers a request. It reads
+// only immutable snapshot fields.
+func (e *policyEntry) matches(provider, model, client, keyHash, conversation string) bool {
+	return e.scope.Matches(provider, model, client, keyHash, conversation)
+}
+
+// providerOnly reports whether the policy names only providers, with no other
+// constraint and no schedule. It reads only immutable snapshot fields.
+func (e *policyEntry) providerOnly() bool {
+	return e.scope.ProviderOnly() && e.schedule.Empty()
+}
+
+// activeFor reports whether the published schedule is open at now.
+func (e *policyEntry) activeFor(now time.Time) bool {
+	return e.schedule.Active(now)
+}
+
+// each calls fn for every policy that can select provider.
+func (idx *policyIndex) each(provider string, fn func(*policyEntry)) {
+	if idx == nil {
+		return
+	}
+	for _, entry := range idx.all {
+		fn(entry)
+	}
+	if provider == "" {
+		return
+	}
+	for _, entry := range idx.byProvider[provider] {
+		fn(entry)
+	}
+}
+
+// publishPolicyLocked replaces the immutable read view. Callers hold
 // throttleMu; readers only load the pointer, so a hot-path admission never
 // waits for a policy writer.
-func (s *Scheduler) publishGatesLocked() {
-	snap := make(map[string]*providerGate, len(s.gates))
-	for p, g := range s.gates {
-		snap[p] = g
+func (s *Scheduler) publishPolicyLocked() {
+	idx := &policyIndex{byProvider: make(map[string][]*policyEntry)}
+	ids := make([]string, 0, len(s.gates))
+	for id := range s.gates {
+		ids = append(ids, id)
 	}
-	s.gateSnap.Store(&snap)
+	sort.Strings(ids)
+	for _, id := range ids {
+		g := s.gates[id]
+		entry := &policyEntry{
+			gate: g, id: g.throttle.ID,
+			scope: g.throttle.Scope, schedule: g.throttle.Schedule,
+		}
+		if len(entry.scope.Providers) == 0 {
+			idx.all = append(idx.all, entry)
+			continue
+		}
+		for _, provider := range entry.scope.Providers {
+			idx.byProvider[provider] = append(idx.byProvider[provider], entry)
+		}
+	}
+	s.policySnap.Store(idx)
 }
 
-func (s *Scheduler) tryAdmit(provider string, est int64) (ok bool, lease admission, wait time.Duration) {
-	g := s.gate(provider)
-	if g == nil {
+// tryAdmit evaluates every policy that covers target. All matching policies
+// must admit: the request takes one lease in each, so every cap is charged and
+// settled exactly once. Gates are locked in identity order, and no other path
+// holds two policy locks, so the set lock cannot deadlock. A refusal releases
+// every lock without charging anything; wait is the earliest timer that could
+// reopen a refusing dimension (0 when only a release can).
+func (s *Scheduler) tryAdmit(target PolicyTarget, est int64) (ok bool, lease admission, wait time.Duration) {
+	idx := s.policySnap.Load()
+	if idx == nil {
 		return true, admission{}, 0
 	}
-	return g.tryAdmit(est)
+	var entries []*policyEntry
+	idx.each(target.Provider, func(entry *policyEntry) {
+		if entry.matches(target.Provider, target.Model, target.Client, target.KeyHash, target.Conversation) {
+			entries = append(entries, entry)
+		}
+	})
+	if len(entries) == 0 {
+		return true, admission{}, 0
+	}
+	// Lock in published identity order. The ids come from the immutable
+	// snapshot, so the sort never reads a gate's mutable document.
+	if len(entries) > 1 {
+		sort.Slice(entries, func(i, j int) bool { return entries[i].id < entries[j].id })
+	}
+	gates := make([]*policyGate, 0, len(entries))
+	for _, entry := range entries {
+		gates = append(gates, entry.gate)
+	}
+	now := time.Now()
+	for _, g := range gates {
+		g.mu.Lock()
+	}
+	// A policy outside its schedule is skipped entirely: it neither blocks nor
+	// charges, and its counters resume from real traffic when the window opens.
+	active := make([]*policyGate, 0, len(gates))
+	for _, entry := range entries {
+		if entry.activeFor(now) && entry.gate.throttle.Limit.Active() {
+			active = append(active, entry.gate)
+		}
+	}
+	if len(active) == 0 {
+		for _, g := range gates {
+			g.mu.Unlock()
+		}
+		return true, admission{}, 0
+	}
+	blocked := false
+	minWait := time.Duration(0)
+	for _, g := range active {
+		if isBlocked, gateWait := g.blockedLocked(est); isBlocked {
+			blocked = true
+			if gateWait > 0 && (minWait <= 0 || gateWait < minWait) {
+				minWait = gateWait
+			}
+		}
+	}
+	if blocked {
+		for _, g := range gates {
+			g.mu.Unlock()
+		}
+		return false, admission{}, minWait
+	}
+	leases := make([]gateLease, 0, len(active))
+	for _, g := range active {
+		leases = append(leases, g.admitLocked(est))
+	}
+	for _, g := range gates {
+		g.mu.Unlock()
+	}
+	return true, admission{leases: leases}, 0
 }
 
-// providerConcurrencyFull reports whether provider's gate has no free
-// concurrency slot left. It reads occupancy under the gate lock only: a drain
-// that cannot admit anyone must not walk its fair set, and a bucket refill (the
-// one gate mutation an occupancy read could trigger) belongs to admission, not
-// to a capacity query. A nil gate, or a limit without a concurrency dimension,
-// has no cap to saturate.
+// providerConcurrencyFull reports whether a provider-wide policy has no free
+// concurrency slot left. Only a policy with no model, client, key or
+// conversation constraint can prove that no request to this provider can be
+// admitted; a scoped policy never suppresses the drain, which then re-checks
+// the full selector set. The read takes one gate lock at a time and never
+// mutates a bucket.
 func (s *Scheduler) providerConcurrencyFull(provider string) bool {
-	g := s.gate(provider)
-	if g == nil {
+	idx := s.policySnap.Load()
+	if idx == nil {
 		return false
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	limit := g.throttle.Limit
-	return limit.Concurrency > 0 && g.inFlight >= limit.Concurrency
+	now := time.Now()
+	full := false
+	idx.each(provider, func(entry *policyEntry) {
+		if full || !entry.providerOnly() || !entry.activeFor(now) {
+			return
+		}
+		// Only occupancy and the cap belong to the gate; the selector and the
+		// schedule came from the immutable snapshot.
+		entry.gate.mu.Lock()
+		limit := entry.gate.throttle.Limit
+		full = limit.Concurrency > 0 && entry.gate.inFlight >= limit.Concurrency
+		entry.gate.mu.Unlock()
+	})
+	return full
 }
 
-// settle reconciles the gate captured at admission, never a fresh
-// provider-name lookup, and does not drain: the caller owns exactly one drain
-// after it has also released the group's slot. Settling first keeps reserved
-// tokens, the token bucket and gate in-flight occupancy authoritative before a
-// queued waiter can consume the freed capacity. A cleared/reinstalled limit has
-// a different owner; traffic admitted without a gate cannot charge a
+// settle reconciles every lease captured at admission, never a fresh policy
+// lookup, and does not drain: the caller owns exactly one drain after it has
+// also released the group's slot. Settling first keeps reserved tokens, the
+// token bucket and gate in-flight occupancy authoritative before a queued
+// waiter can consume the freed capacity. A cleared/reinstalled policy has a
+// different owner; traffic admitted without a gate cannot charge a
 // subsequently installed cap. Token enable/disable starts a new epoch even when
-// concurrency keeps the gate; old reservations cannot debit/refund that new
+// concurrency keeps the policy; old reservations cannot debit/refund that new
 // bucket. Enabled resizes retain their epoch so outstanding usage still
-// reconciles against the same debt. A nil gate is a no-op and the caller still
-// drains the group once.
+// reconciles against the same debt. An empty lease set is a no-op and the
+// caller still drains the group once.
 func (a admission) settle(actual int64) {
-	g := a.gate
-	if g == nil {
-		return
-	}
-	g.mu.Lock()
-	if a.reserved != 0 {
-		g.reserved -= a.reserved
-		if g.reserved < 0 {
-			g.reserved = 0
+	for _, lease := range a.leases {
+		g := lease.gate
+		if g == nil {
+			continue
 		}
-	}
-	if g.tok.enabled && g.tokEpoch == a.tokEpoch {
-		g.tok.refill(time.Now())
-		// Negative counts are unavailable, including an invalid caller value.
-		// The original reservation remains charged without a debit or refund.
-		if actual >= 0 {
-			g.tok.tokens -= float64(actual - a.reserved)
+		g.mu.Lock()
+		if lease.reserved != 0 {
+			g.reserved -= lease.reserved
+			if g.reserved < 0 {
+				g.reserved = 0
+			}
 		}
+		if g.tok.enabled && g.tokEpoch == lease.tokEpoch {
+			g.tok.refill(time.Now())
+			// Negative counts are unavailable, including an invalid caller value.
+			// The original reservation remains charged without a debit or refund.
+			if actual >= 0 {
+				g.tok.tokens -= float64(actual - lease.reserved)
+			}
+		}
+		if g.inFlight > 0 {
+			g.inFlight--
+		}
+		g.mu.Unlock()
 	}
-	if g.inFlight > 0 {
-		g.inFlight--
-	}
-	g.mu.Unlock()
 }
 
+// armThrottleDrain arms every policy that can select provider. A request
+// admitted to this provider may be blocked by any matching selector, so every
+// such policy owns a timer wake. Arming an earlier deadline than a particular
+// policy needs is harmless: the wake re-runs the provider's fair drain, which
+// re-checks the full selector set.
 func (s *Scheduler) armThrottleDrain(provider string, d time.Duration) {
-	g := s.gate(provider)
-	if g == nil {
-		return
-	}
 	if d < time.Millisecond {
 		d = time.Millisecond
 	}
-	g.mu.Lock()
-	if g.throttle.Limit.Active() {
-		g.wake.arm(time.Now().Add(d), true)
+	idx := s.policySnap.Load()
+	if idx == nil {
+		return
 	}
-	g.mu.Unlock()
+	at := time.Now().Add(d)
+	idx.each(provider, func(entry *policyEntry) {
+		entry.gate.mu.Lock()
+		if entry.gate.throttle.Limit.Active() {
+			entry.gate.wake.arm(at, true)
+		}
+		entry.gate.mu.Unlock()
+	})
 }
 
 // drainProvider wakes only the groups that wait on provider's shared gate. It
@@ -923,18 +1164,25 @@ func (s *Scheduler) markQueuedProviderGroups(provider string) {
 	}
 }
 
-// providerRamps reports whether provider currently has an active anti-burst
-// ramp, the only timer wake that can unblock a group deliberately left out of
-// the fair set. The gate comes from the atomic policy snapshot, so this never
-// takes throttleMu.
+// providerRamps reports whether any policy selecting provider has an active
+// anti-burst ramp, the only timer wake that can unblock a group deliberately
+// left out of the fair set. The gates come from the atomic policy snapshot, so
+// this never takes throttleMu.
 func (s *Scheduler) providerRamps(provider string) bool {
-	gate := s.gate(provider)
-	if gate == nil {
+	idx := s.policySnap.Load()
+	if idx == nil {
 		return false
 	}
-	gate.mu.Lock()
-	defer gate.mu.Unlock()
-	return gate.throttle.Limit.rampActive()
+	ramped := false
+	idx.each(provider, func(entry *policyEntry) {
+		if ramped {
+			return
+		}
+		entry.gate.mu.Lock()
+		ramped = entry.gate.throttle.Limit.rampActive()
+		entry.gate.mu.Unlock()
+	})
+	return ramped
 }
 
 func (s *Scheduler) kickThrottles() {

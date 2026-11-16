@@ -9,16 +9,16 @@ documents the canonical model and its loss policy. No endpoint/API-key registry
 is required. Read
 [Security](../SECURITY.md): routing credentials do not authorize operator access,
 and the whole dashboard plane is gated by `MILLIVOLT_OPERATOR_TOKEN`
-([operator access](operations.md#operator-access)); only `/healthz`,
-`/favicon.ico` (and the other origin-root brand/PWA files), the `/session`
-login handshake and the relay stay open.
+([operator access](routes.md#operator-access)); only `/healthz` and
+`/readyz`, `/favicon.ico` (and the other origin-root brand/PWA files), the
+`/session` login handshake and the relay stay open.
 
 ## Endpoint behavior
 
-The dashboard, embedded assets, `/admin/*` actions, `/healthz`, the `/session`
-login handshake, the `/mcp` MCP endpoint and registered `/metrics/*`
+The dashboard, embedded assets, `/admin/*` actions, `/healthz`, `/readyz`, the
+`/session` login handshake, the `/mcp` MCP endpoint and registered `/metrics/*`
 routes belong to millivolt. Their methods and meanings are listed in
-[operations](operations.md#operator-and-data-routes). `GET /v1/models` and
+[routes and debugging](routes.md#operator-and-data-routes). `GET /v1/models` and
 `GET /models` use the discovery path described below. `POST /v1/chat/completions`,
 `POST /v1/responses` and `POST /v1/messages` select the client wire protocol.
 Other paths reach the relay catch-all and require valid routing headers; the
@@ -30,7 +30,7 @@ does an explicit format equal to the client protocol. Without a configured
 request rewrite, a passthrough request's body bytes are relayed unchanged;
 configured request overrides, a sub-conversation strip or ensured tools can
 still rewrite the upstream body (see
-[request overrides](operations.md#request-overrides)). `X-Proxy-In-Format`
+[request overrides](configuration.md#request-overrides)). `X-Proxy-In-Format`
 overrides the protocol named by the path, so an
 otherwise unknown path is translated when that header names the inbound wire;
 without the override, paths outside the three known endpoints are never
@@ -66,18 +66,18 @@ Routing validation and request construction live in
 | --- | --- |
 | `X-Proxy-Base-URL` | Absolute HTTP(S) upstream base; no userinfo, query or fragment, including a bare trailing `?` or `#` (a percent-encoded `%23` remains path data). |
 | `X-Proxy-Key` | Upstream key; takes precedence over `Authorization`. Without it, a Bearer credential or the supplied Authorization value is used. No credential is also allowed. |
-| `X-Proxy-Auth-Header` | Key's upstream header; defaults to `Authorization`. |
+| `X-Proxy-Auth-Header` | Key's upstream header; defaults to `Authorization`. The chosen name joins the credential class for that request even when its own spelling looks harmless (`X-My-Gate`): it is redacted from retained headers and skipped by request overrides like a real credential. |
 | `X-Proxy-Auth-Prefix` | Prefix before the key; defaults to `Bearer `. A present empty header selects no prefix. |
-| `X-Proxy-Path` | HTTP relay: replace the incoming path before joining it to the base URL. Cursor uses its [native path rule](adapters.md#cursor-connect-bridge); model discovery ignores this header. |
-| `X-Proxy-Query` | HTTP relay: nonempty query override; otherwise preserve the incoming query. Cursor and model discovery ignore both. |
-| `X-Proxy-Headers` | HTTP-relay header overrides as a JSON object of string arrays, e.g. `{"x-example-version":["2026-01"]}`. `accept-encoding` and `range` are proxy-owned and rejected with 400. A JSON `null` member is treated as an omitted header. Not applied to model discovery or the Cursor bridge. |
+| `X-Proxy-Path` | HTTP relay: replace the incoming path before joining it to the base URL. Cursor uses its [native path rule](adapters.md#cursor-connect-bridge); model discovery replaces its default models endpoint. |
+| `X-Proxy-Query` | HTTP relay: nonempty query override; otherwise preserve the incoming query. Model discovery uses it for the upstream discovery call; Cursor ignores it. |
+| `X-Proxy-Headers` | HTTP-relay header overrides as a JSON object of string arrays, e.g. `{"x-example-version":["2026-01"]}`. `accept-encoding` and `range` are proxy-owned and rejected with 400. A JSON `null` member is treated as an omitted header. Values are JSON-decoded, so a raw obs-text byte (0x80..0xFF) that is not valid UTF-8 reaches the wire as U+FFFD instead of its original byte; send the UTF-8 spelling if the byte matters. Not applied to model discovery or the Cursor bridge. |
 | `X-Proxy-Timeout-Ms` | Positive milliseconds. HTTP relay: a fresh headers-and-body deadline per attempt, excluding queue/hold/backoff waits. Cursor applies it only to send header waits; model discovery uses its separate configured budget. |
 | `X-Proxy-Format` | Upstream format: `openai` (Chat Completions), `openai-responses` (Responses), `anthropic` (Messages), or `cursor` (agent.v1). Absent means passthrough; configured request rewrites can still change the body. See [supported combinations](adapters.md#client-and-upstream-compatibility). |
 | `X-Proxy-In-Format` | Optional client-protocol override: `openai`, `openai-chat` or `chat` (Chat Completions), `openai-responses` or `responses` (Responses), or `anthropic` (Messages). Aliases normalize to the canonical wire. Normally unnecessary because the request path selects the protocol. |
 | `X-Proxy-Client` | Observability/client label; one that only repeats the user agent's product name records the fuller user-agent identity instead. Otherwise inferred from client SDK/User-Agent metadata. |
 | `X-Proxy-Session` | Explicit conversation ID; otherwise a configured tracked body param or automatic grouping applies. |
 | `X-Proxy-Parent-Session` | Direct declared parent; requires an explicit own session on the same request. |
-| `X-Proxy-Max-Concurrency` | Positive provider-plus-key scheduler-group cap. Each admission updates the shared group's policy; later admissions, including headerless ones using config defaults, can replace it. Not the persistent provider-wide control, and not applied to model discovery, which returns before inference admission. |
+| `X-Proxy-Max-Concurrency` | Positive provider-plus-key scheduler-group cap. Each admission updates the shared group's policy; later admissions, including headerless ones using config defaults, can replace it. Not the persistent operator limit policy, and not applied to model discovery, which returns before inference admission. |
 | `X-Proxy-Limit-Concurrency` | Sticky provider-wide in-flight cap. |
 | `X-Proxy-Limit-Requests` | Sticky provider-wide request rate as `COUNT/WINDOW`. |
 | `X-Proxy-Limit-Tokens` | Sticky provider-wide token rate as `COUNT/WINDOW`. |
@@ -88,10 +88,45 @@ semantics: when a request carries the header more than once, the first value is
 authoritative and later values are ignored. The rule is deterministic across
 the whole control prefix, including `X-Proxy-Query` and `X-Proxy-Headers`.
 
+### Upstream allowlist matching
+
+`allowed_base_urls` is empty (allow any target) or a list of entry spellings;
+each entry admits exactly one authority plus that entry's path and its children.
+Both sides are compared as written, with one normalization: the scheme's
+default port is filled in when either side has no port. Entries are validated
+at load into the only spellings that can ever match, and those spellings are
+the contract:
+
+- the scheme must be literally lowercase `http://` or `https://`;
+- the host must be lowercase ASCII as written, with an optional numeric port in
+  1..65535 after a hostname;
+- no userinfo, query, fragment or trailing slash;
+- a port-less entry admits only the scheme's default port, never every port on
+  that host.
+
+What the byte comparison does not do: lowercase the request's own host, strip a
+trailing dot (`example.com.` and `example.com` differ), normalize a leading-zero
+port (`:080` differs from `:80`), or apply IDNA folding (the punycode or Unicode
+bytes must be spelled the same on both sides). A path prefix is compared on the
+escaped path, so percent-encoding that decodes the same is still different
+bytes.
+
+The joined upstream path is not cleaned either. `.` and `..` segments from
+`X-Proxy-Path` or the incoming path travel verbatim, and an upstream that
+normalizes request paths resolves them after the proxy has already allowed the
+base. `X-Proxy-Path: /../../admin` under an entry for `http://host/v1` is sent
+as `/v1/../../admin` and reaches `/admin` at such an upstream, outside the
+allowlisted path prefix. The authority stays allowlisted either way; only the
+path prefix can be left.
+
+
 Client identity labels are retention-bounded before the record enters the live
 ring, analytics or durable store: classified client and language 256 bytes,
-user agent 1024 bytes, and the first forwarded address 128 bytes. Longer values
+user agent 1024 bytes, and `client_ip` 128 bytes. Longer values
 are cut on a UTF-8 boundary and end with `…`; normal labels are unchanged.
+`client_ip` records the first `X-Forwarded-For` element when that header is
+present and the socket peer otherwise; the value is diagnostic, never verified,
+and a directly reachable caller can set it.
 
 Finalized and pending record text is retention-bounded at the record boundary
 before it enters the live ring, pending view or durable store: path 1024 bytes,
@@ -120,11 +155,13 @@ dashboard and MCP), not header-driven; a header update changes only the three
 caps and preserves the stored pair. The ramp is inert unless `anti_burst` is
 true, the concurrency target is at least 2 and `ramp_duration` is above 0, and
 its duration uses that same window grammar. Malformed limit values reject the
-request without applying any of its limit headers. The Limits menu shows the
-policy and its source. Request rates are strict sliding windows over the
+request without applying any of its limit headers. A header update edits only
+that provider's single-provider, unscheduled rule; operator rules scoped by
+model, client, key hash, conversation or schedule are untouched. The operator
+console shows every policy, its schedule and its source. Request rates are strict sliding windows over the
 configured length, so no window ever admits more than the configured count;
 token rates remain continuously refilled budgets. See
-[Pause and Limits](operations.md#pause-and-limits) for charging and window
+[Pause and Limits](routes.md#pause-and-limits) for charging and window
 behavior.
 
 Supported proxy-control headers never forward upstream. Injected names must be
@@ -143,6 +180,13 @@ The provider label is server-derived from the base host's registrable domain;
 IPs retain their authority/port, and nonregistrable hostnames remain hostnames.
 Optional provider aliases apply afterward. There is no supported
 `X-Proxy-Provider` override.
+
+`Host` is the one name with a different mechanism rather than a different
+precedence: it is accepted in a provider `headers` map and written to the
+request's host field, not its header map, because `net/http` sends the former
+and ignores the latter. A configured host, port included, is the authority the
+upstream sees on both paths above. The explicit `X-Proxy-Headers` map and an
+`X-Proxy-Auth-Header` still refuse `Host`, and no request override may set it.
 
 ## URL and auth examples
 
@@ -270,8 +314,13 @@ One classifier owns every error decision: the retry ladder, the storm
 observer, the health counts and the client-facing class all read the same
 canonical class (`rate_limit`, `quota`, `unavailable`, `unreachable`,
 `timeout`, `content`, `client_error`, `proxy`, `canceled`, `upstream`),
-computed from the status AND the provider's own structured type/code - never
-message text. A rate limit announced by a non-429 status (a gateway
+computed from the status, the provider's own structured type/code, and - for
+a transport failure with no response at all - the transport kind, which is
+`unreachable` or, for a timed out send, the narrower `timeout`. Transport
+evidence outranks the proxy-minted arm, so a failure with no provider answer
+is never filed as a proxy fault and never advised against a retry. Message
+text plays no part except for that transport timeout narrowing. A rate limit
+announced by a non-429 status (a gateway
 answering `tier_limit_exceeded` or `resource_exhausted` with a 400) is
 therefore retried, counted in the rate-limit series (and, because the request
 still failed, in the error rate), and labeled `rate_limit` instead of
@@ -280,7 +329,23 @@ still failed, in the error rate), and labeled `rate_limit` instead of
 carries `X-Proxy-Error-Class: <class>` and a class-derived
 `X-Should-Retry: true|false` before the status line commits (the body is
 never rewritten; relayed errors stay verbatim), while
-`suppress_client_retries` still wins with a flat `false`. Two settings extend
+`suppress_client_retries` still wins with a flat `false`. The directive is the
+class's own retry verdict, not a re-reading of the status:
+
+| Class | `X-Should-Retry` | Why |
+| --- | --- | --- |
+| `rate_limit` | `true` | transient flow control at any status |
+| `unavailable` | `true` | transient capacity or server failure |
+| `unreachable` | `true` | transport failed with no usable response, including a fresh send whose peer closed the socket |
+| `timeout` | `true` | the send or read deadline fired |
+| `content` | `false` | a 2xx with nothing usable; retried on the quality/thinking budgets instead |
+| `quota` | `false` | waiting does not clear it; `quota_pause_mode` owns the reaction |
+| `client_error` | `false` | the caller's own fault |
+| `proxy` | `false` | millivolt's own failure |
+| `canceled` | `false` | the local client left |
+| `upstream` | `false` | unclassified upstream failure, final by default |
+
+Two settings extend
 the built-in vocabularies with gateway-specific spellings, additively:
 `rate_limit_error_classes` and `quota_error_classes` (plus the existing
 `retryable_error_classes` for in-band transient errors). Entries are matched
@@ -292,10 +357,44 @@ documented override for a gateway that mislabels transient failures). Reload
 applies to new classifications, and the published predicates render per call,
 so they re-read stored history through the same effective vocabulary.
 
+A failed response's reason is read from the provider's own body, in two layers.
+The OpenAI/Anthropic envelope (`{"error":{"message","type","code"}}`,
+`{"type":"error","error":{…}}`, or a plain-string `"error"`) always wins and
+supplies type, code and message. When the body carries no such envelope, the
+failure path still recovers a human-readable reason from the members gateways
+commonly use: a top-level `detail`, `message`, `msg`, `reason` or
+`error_description` string, a FastAPI validation `detail` array (the first
+item's `msg`), or Cloudflare's `errors` array (`message`, with its numeric
+`code`). Nested lookups are depth-bounded, a wrong-typed member is ignored
+rather than stringified, and every reason is truncated to the same record bound
+as an envelope message. A body that is valid JSON but carries no extractable
+reason stays classified as `provider_error` with no message, and an empty body
+stays unclassified - only the status remains. This recovery runs only where the
+response is already known to have failed; the success paths keep treating
+those same bodies as non-errors, so a 2xx completion carrying a top-level
+`message` is never mistaken for a failure.
+
+An error body that cannot be read at all does not erase what the status already
+decided. A `429` keeps both its status and the rate-limit series, because the
+status alone is flow control; other statuses fail closed to a `502`, and a
+provider-decided type survives a later body-read or translation failure instead
+of being replaced by the proxy's `stream_read_error`.
+
 SSE pacing may insert comment keepalives. A known queue/hold wait may commit HTTP
 200 before the final upstream outcome, so a subsequent failure must be signaled
 in-band. Bounded terminal/quality handling can replace a degenerate completion
-with an error. Non-streaming quality retries may make another upstream request;
+with an error. Relay framing follows SSE's own join rule: the data lines of one
+event are joined with a newline, so a multi-line (pretty-printed) payload stays
+one event and a synthetic blank separator is inserted only when the event's
+joined data is already one complete JSON document, or before the `[DONE]`
+sentinel. The completeness check is incremental, so one long event costs linear
+time in its bytes rather than quadratic in its line count; a bare scalar counts
+only when it is exactly `true`, `false`, `null` or one well-formed number, so a
+prose line that merely starts with one of those bytes (`the cat`, `3 apples`)
+stays open for its continuation lines. Two single-line
+events a provider sent without a separator therefore
+stay two events instead of merging into an unparseable payload.
+Non-streaming quality retries may make another upstream request;
 the adopted attempt's response is spooled under the fixed 1 MiB quality buffer
 before the client status line commits, so the retry is delivered as one
 ordinary response with no post-commit keepalive gap or partial payload. A
@@ -370,7 +469,7 @@ rather than a universal rejection.
 Neither transparency nor exactly-once upstream execution is unconditional.
 
 Before relay or translation, the upstream request is subject to the configured
-`request_overrides` (see [request overrides](operations.md#request-overrides)):
+`request_overrides` (see [request overrides](configuration.md#request-overrides)):
 matching rules set, replace or remove upstream headers as the last header
 stage, and their body fields set `max_tokens` / `max_completion_tokens` on
 Chat Completions or Anthropic client bodies before translation, whatever the
@@ -382,11 +481,13 @@ changes; the client-visible contract is unchanged.
 ### Scheduling and timing
 
 The provider-plus-key group controls simultaneous upstream sends and its waiting
-queue. The separate provider-wide Limits policy combines all keys and clients.
-Queue capacity and wait limits can reject work locally; the configured
-`queue_retry_after` duration (for example `2s`, never a bare integer) supplies
-the caller's retry hint. Operator-hold time is
-excluded from the ordinary queue-wait limit. A hold's own queue cap still applies.
+queue. A separate limit policy can apply to the whole provider or narrow to
+models, clients, key hashes and conversations, with an optional recurring
+server-local schedule; a provider-only rule combines all keys and clients.
+Queue capacity and wait limits can reject work locally;
+the configured `queue_retry_after` duration (for example `2s`, never a bare
+integer) supplies the caller's retry hint. Operator-hold time is excluded from
+the ordinary queue-wait limit. A hold's own queue cap still applies.
 
 For the HTTP relay, `upstream_timeout` limits waiting for response headers,
 not the streaming body.
@@ -423,18 +524,26 @@ rate-limit state and the redacted response headers. A provider-side request id
 therefore matches to the exact upstream attempt that produced it, including
 failures the client never saw. Transport failures have no HTTP response, so
 their attempt entries leave those fields empty. An in-band 429 is the one
-exception: when a keepalive already committed the client's success 200, the
-upstream status cannot replace it, so the record keeps
-`{status_code:429,at,in_band:true}` to preserve the distinct rate-limit signal.
-It carries no retry or error detail, is not counted as a retry, and is excluded
-from retry disclosures and error enumerations. Recovered upstream failures can
+attempt entry that carries the in-band flag: when a keepalive already committed
+the client's success 200, the upstream status cannot replace it, so the record
+describes the committed 200 and keeps
+`{status_code:429,at,in_band:true}` to preserve the distinct rate-limit
+signal. The record likewise keeps the committed 200 for every other in-band
+failure, including a failed retry re-send whose wire status never reached the
+client. Only a 429 mints one; any other in-band provider error stamps the
+record's own type and status instead, and a failed body read behind the commit
+keeps the provider-decided type rather than replacing it. The entry carries no
+retry or error detail, is not counted as a retry, and is excluded from retry
+disclosures and error enumerations. Recovered upstream failures can
 count as errors even when the final status succeeds. A final, retried or
 in-band 429 is a separate affected-request signal.
 A client that disconnects before a final outcome is recorded as status 499
 with `client_disconnected`; a plain 499 is a flow event, but one carrying a
-structured error (the provider's in-band stream failure the client aborted
-around) counts as the upstream error it observed.
-See [metric interpretation](operations.md#dashboard-data-and-request-inspection)
+structured error counts as the upstream error it observed. That is the
+provider's in-band stream failure the client aborted around, or a truncated
+stream whose completion marker never arrived - an abort must be classified by
+its outcome, never by which relay write happened to fail.
+See [metric interpretation](routes.md#dashboard-data-and-request-inspection)
 for duration, first-token latency and throughput.
 
 ### Error storm protection
@@ -493,12 +602,13 @@ it. Manual-mode holds persist like every operator pause.
 
 The ordinary HTTP retry budget remains `max_retries`. Selected failures during
 an active storm may use up to `storm_max_retries` additional attempts across the
-logical request, including quality re-asks. Cursor retains its single-handshake
-behavior when protection is off and uses only the additional storm budget for
-failed fresh handshakes. Exhaustion returns the final upstream failure. Retrying
-inference can repeat upstream execution or billing even when no output arrived;
-this feature does not provide exactly-once processing. See the
-[HTTP retry constraints](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2).
+logical request, including quality re-asks. Cursor runs the same verdict: its
+fresh handshakes take the ordinary `max_retries` budget and, with protection
+armed, the additional storm budget, and a retried success leaves the group at
+one probe exactly like the generic ladder. Exhaustion returns the final upstream
+failure. Retrying inference can repeat upstream execution or billing even when
+no output arrived; this feature does not provide exactly-once processing. See
+the [HTTP retry constraints](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2).
 
 `storm_max_queue` bounds callers waiting at storm gates across the process;
 ordinary scheduler queues have their own limits. `storm_max_wait` bounds each
@@ -527,9 +637,12 @@ budget cannot hold its metadata source. The rendered list is bounded by
 so literal `<`, `>`, and `&` keep their wire size. A rendered list past that
 derived bound fails closed before any response bytes are written.
 
-Discovery ignores `X-Proxy-Path`, `X-Proxy-Query` and the incoming query. HTTP
-discovery constructs `/v1/models` using the shared base join; Anthropic pagination
-constructs its own query. Cursor uses its native unary model service. A primary
+Discovery addresses the format's own models endpoint regardless of translation:
+`/v1/models` on the shared base join, Anthropic's pagination query, or Cursor's
+native unary model service. The translator's inference path is not reused
+because both inference endpoints are POST-only upstream. An explicit
+`X-Proxy-Path` or `X-Proxy-Query` still replaces the endpoint and query, while
+the incoming request query is not forwarded. A primary
 upstream non-200 response, including a redirect, becomes a 502 discovery error.
 Discovery authenticates with the resolved target auth header and prefix, the
 same construction as a relayed request, and has no protocol-specific fallback:
@@ -582,7 +695,7 @@ fields accept it. An absent or dropped identity is never a client
 error. A tracked identity never declares a parent: `X-Proxy-Parent-Session`
 still requires its explicit session pair, and the session wins identity. The
 identity rules, name grammar, caps and the settings surface live in
-[operations](operations.md#sub-conversation-tracking).
+[configuration](configuration.md#sub-conversation-tracking).
 
 ### Declaring a parent
 

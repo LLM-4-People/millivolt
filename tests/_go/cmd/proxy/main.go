@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -25,10 +28,10 @@ import (
 )
 
 // TestOperatorPlaneBoundary is the deny-by-default regression for the whole
-// dashboard gate: only /healthz, brand/PWA files and the inference catch-all
-// pass without the credential, every dashboard/metrics/admin route needs it
-// (Bearer or the session cookie the gate mints), the unauthenticated HTML
-// entrypoint gets the login page, same-origin mutation checks stay armed
+// dashboard gate: only /healthz, /readyz, brand/PWA files and the inference
+// catch-all pass without the credential, every dashboard/metrics/admin route
+// needs it (Bearer or the session cookie the gate mints), the unauthenticated
+// HTML entrypoint gets the login page, same-origin mutation checks stay armed
 // behind the credential, and an unconfigured credential denies the whole plane.
 func TestOperatorPlaneBoundary(t *testing.T) {
 	const token = "operator-fixture-credential"
@@ -38,6 +41,7 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		h := protectOperatorRequests(next, newOperatorGate(token))
 		requests := []*http.Request{
 			httptest.NewRequest(http.MethodGet, "http://proxy.example/healthz", nil),
+			httptest.NewRequest(http.MethodGet, "http://proxy.example/readyz", nil),
 			httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", nil),
 			httptest.NewRequest(http.MethodGet, "http://proxy.example/v1/models", nil),
 			httptest.NewRequest(http.MethodPost, "http://proxy.example/anything/else/for/upstream", nil),
@@ -225,10 +229,10 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 				t.Errorf("%s %s while disabled: status=%d want=403", r.Method, r.URL.Path, w.Code)
 			}
 		}
-		// The liveness probe and the inference catch-all stay open while the
+		// The probe routes and the inference catch-all stay open while the
 		// plane is disabled; the session handshake hands off to its own
 		// handler, which denies an unarmed plane (asserted below).
-		for _, target := range []string{"/healthz", "/favicon.ico", "/v1/chat/completions", "/session"} {
+		for _, target := range []string{"/healthz", "/readyz", "/favicon.ico", "/v1/chat/completions", "/session"} {
 			r := httptest.NewRequest(http.MethodPost, "http://proxy.example"+target, nil)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
@@ -386,6 +390,41 @@ func TestOperatorLockout(t *testing.T) {
 	retryAfter, err := strconv.Atoi(w.Header().Get("Retry-After"))
 	if w.Code != http.StatusTooManyRequests || err != nil || retryAfter < 1 || retryAfter > int(authLockoutMax.Seconds()) {
 		t.Fatalf("locked wrong guess: status=%d retry-after=%q", w.Code, w.Header().Get("Retry-After"))
+	}
+	// The sign-in form survives its own lockout: the JSON 429 hid the only
+	// route back to a credential. GET / is served as the read-only page, with
+	// the form intact, the same Retry-After, and the lockout named in its
+	// notice slot. Every other operator route keeps the JSON body.
+	page := httptest.NewRecorder()
+	pr := httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil)
+	pr.RemoteAddr = "192.0.2.10:4444"
+	h.ServeHTTP(page, pr)
+	if page.Code != http.StatusTooManyRequests ||
+		!strings.Contains(page.Body.String(), `action="/session"`) ||
+		!strings.Contains(page.Body.String(), "Too many rejected tokens") {
+		t.Fatalf("locked sign-in page: status=%d body=%s", page.Code, page.Body.String())
+	}
+	if got := page.Header().Get("Retry-After"); got != strconv.Itoa(retryAfter) {
+		t.Fatalf("locked sign-in page Retry-After = %q, want the same %d as the denial", got, retryAfter)
+	}
+	jsonDenial := asSource("192.0.2.10:4444", "")
+	if jsonDenial.Code != http.StatusTooManyRequests ||
+		!strings.Contains(jsonDenial.Body.String(), `"error"`) ||
+		strings.Contains(jsonDenial.Body.String(), `action="/session"`) {
+		t.Fatalf("locked non-page route: status=%d body=%s, want the flat JSON 429, not the page",
+			jsonDenial.Code, jsonDenial.Body.String())
+	}
+	// The handshake itself is still reachable through the gate: POST /session
+	// is exempt by path whatever the lockout says, and only its own handler
+	// (which runs the same lockout check after checking the credential) may
+	// refuse it.
+	form := httptest.NewRequest(http.MethodPost, "http://proxy.example/session", strings.NewReader("token="+token))
+	form.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	form.RemoteAddr = "192.0.2.10:4444"
+	signedIn := httptest.NewRecorder()
+	h.ServeHTTP(signedIn, form)
+	if signedIn.Code != http.StatusNoContent {
+		t.Fatalf("locked session handshake: status=%d, want the gate to hand it to the session handler", signedIn.Code)
 	}
 	// A verified credential during the lockout is admission, not a guess.
 	w = asSource("192.0.2.10:4444", token)
@@ -1001,8 +1040,9 @@ func TestApplySnapshotLimitGatedOnDurableStore(t *testing.T) {
 // went unnoticed. The tie is asserted behaviorally: the context the server
 // hands its listeners IS the caller's srvCtx, so cancelling it is observable
 // by every connection the server accepted. The delivery wrapper is asserted
-// through the constructor too: Handler must be deadlineHandler, not the raw
-// handler, and a request must still reach the wrapped handler.
+// through the constructor too: Handler must be the transport-header wrapper
+// around the delivery wrapper (a nil policy still refuses through the deadline
+// layer), and a request must still reach the wrapped handler.
 func TestNewHTTPServerContract(t *testing.T) {
 	cfg := config.Default()
 	cfg.ReadHeaderTimeout = 3 * time.Second
@@ -1014,15 +1054,18 @@ func TestNewHTTPServerContract(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	srv := newHTTPServer(next, cfg.ReadHeaderTimeout, cfg.IdleTimeout, deliveryPolicyFor(cfg), srvCtx)
-	wrapped, ok := srv.Handler.(deadlineHandler)
+	outer, ok := srv.Handler.(http.HandlerFunc)
 	if !ok {
-		t.Fatalf("Handler = %T, want the deadlineHandler delivery wrapper", srv.Handler)
+		t.Fatalf("Handler = %T, want the transport-header wrapper", srv.Handler)
 	}
 	rr := httptest.NewRecorder()
-	wrapped.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil))
+	outer.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "https://proxy.example/", nil))
 	if rr.Code != http.StatusNoContent || rr.Header().Get("X-Fixture-Handler") != "reached" {
 		t.Fatalf("wrapped handler = status %d header %q, want the constructor's handler reached",
 			rr.Code, rr.Header().Get("X-Fixture-Handler"))
+	}
+	if rr.Header().Get("Strict-Transport-Security") == "" {
+		t.Fatal("the transport-header layer did not run on a secure presentation")
 	}
 	if srv.ReadHeaderTimeout != cfg.ReadHeaderTimeout || srv.IdleTimeout != cfg.IdleTimeout {
 		t.Fatalf("timeouts = (%v, %v), want the boot config's (%v, %v)",
@@ -1046,8 +1089,10 @@ func TestNewHTTPServerContract(t *testing.T) {
 // TestOperatorSessionCookieSecureFlag pins the transport-derived Secure
 // attribute: the listener itself is plain HTTP, so loopback development keeps
 // working without Secure, while a TLS request or an ingress that terminates
-// TLS and sets X-Forwarded-Proto: https gets the flag. The gate mints the
-// cookie on every authenticated request, which is the path asserted here.
+// TLS and sets X-Forwarded-Proto gets the flag. The header is a list and ANY
+// secure token wins: a proxy that appends its own scheme after the client's
+// "http" must not downgrade the cookie. wss counts as secure. The gate mints
+// the cookie on every authenticated request, which is the path asserted here.
 func TestOperatorSessionCookieSecureFlag(t *testing.T) {
 	const token = "operator-fixture-credential"
 	cases := []struct {
@@ -1061,7 +1106,10 @@ func TestOperatorSessionCookieSecureFlag(t *testing.T) {
 		{"forwarded https", "http://proxy.example/", "https", true},
 		{"forwarded https folded", "http://proxy.example/", " HTTPS ", true},
 		{"forwarded first token https", "http://proxy.example/", "https, http", true},
-		{"forwarded http", "http://proxy.example/", "http, https", false},
+		{"forwarded plain http", "http://proxy.example/", "http", false},
+		{"appended https is not downgraded", "http://proxy.example/", "http, https", true},
+		{"forwarded wss", "http://proxy.example/", "wss", true},
+		{"forwarded wss folded", "http://proxy.example/", "HTTP, WSS ", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1092,5 +1140,203 @@ func TestOperatorSessionCookieSecureFlag(t *testing.T) {
 				t.Fatalf("session cookie lost a canonical attribute: %+v", cookie)
 			}
 		})
+	}
+}
+
+// TestClientIPPrefersTheRightmostForwardedAddress pins the throttle key: the
+// immediate hop is the only trusted one, so only the address that hop appended
+// may count. A client can prepend anything to X-Forwarded-For, and using the
+// first element would hand it a fresh bucket per guess.
+func TestClientIPPrefersTheRightmostForwardedAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		remote    string
+		forwarded string
+		want      string
+	}{
+		{"no header falls back to the peer", "192.0.2.9:5000", "", "192.0.2.9"},
+		{"the appended element wins over a forged prefix", "127.0.0.1:5000", "10.9.9.9, 198.51.100.7", "198.51.100.7"},
+		{"a forged suffix after whitespace still loses", "127.0.0.1:5000", "198.51.100.7 ,  10.0.0.1", "10.0.0.1"},
+		{"a port is stripped", "127.0.0.1:5000", "198.51.100.7:44321", "198.51.100.7"},
+		{"a bracketed IPv6 is normalized", "127.0.0.1:5000", "[2001:db8::7]:443", "2001:db8::7"},
+		{"bare IPv6 is accepted", "127.0.0.1:5000", "2001:db8::7", "2001:db8::7"},
+		{"unparseable elements are skipped", "127.0.0.1:5000", "junk, 198.51.100.7, not-an-ip", "198.51.100.7"},
+		{"an all-junk header falls back to the peer", "192.0.2.9:5000", "junk", "192.0.2.9"},
+		{"an unparseable peer is named", "not-an-address", "", "invalid"},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil)
+		r.RemoteAddr = tc.remote
+		if tc.forwarded != "" {
+			r.Header.Set("X-Forwarded-For", tc.forwarded)
+		}
+		if got := clientIP(r); got != tc.want {
+			t.Errorf("%s: clientIP = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestAuthLimiterLogsTheThresholdCrossingOnce pins the observable side of the
+// throttle: crossing the threshold is logged exactly once per source, so an
+// operator can see a brute-force run begin without a line per guess.
+func TestAuthLimiterLogsTheThresholdCrossingOnce(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	var l authLimiter
+	now := time.Now()
+	for range 3 * authFailureThreshold {
+		l.failure("198.51.100.7", now)
+	}
+	if got := strings.Count(buf.String(), "crossed 5 rejected credentials"); got != 1 {
+		t.Fatalf("threshold crossing logged %d times, want 1; log: %s", got, buf.String())
+	}
+	// A different source logs its own crossing.
+	l.failure("198.51.100.8", now)
+	l.failure("198.51.100.8", now)
+	l.failure("198.51.100.8", now)
+	l.failure("198.51.100.8", now)
+	l.failure("198.51.100.8", now)
+	if got := strings.Count(buf.String(), "198.51.100.8 crossed"); got != 1 {
+		t.Fatalf("second source crossing logged %d times, want 1; log: %s", got, buf.String())
+	}
+}
+
+// TestAuthLimiterLogsAFullTable pins the other silent bound: at the hard
+// address cap every new source costs an eviction, so previously tracked
+// sources start being forgotten. That must be visible, and only once per full
+// episode because a spoofed flood would otherwise log per request.
+func TestAuthLimiterLogsAFullTable(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	var l authLimiter
+	now := time.Now()
+	// Every entry stays fresh and unlocked, so no idle expiry frees a slot.
+	for i := range authMaxIPs {
+		l.failure(strconv.Itoa(i), now)
+	}
+	// Attempts past the cap evict, and log only the first of them.
+	for i := range 5 {
+		l.failure("overflow-"+strconv.Itoa(i), now)
+	}
+	if got := strings.Count(buf.String(), "address cap"); got != 1 {
+		t.Fatalf("full table logged %d times, want 1; log: %s", got, buf.String())
+	}
+	if len(l.entries) != authMaxIPs {
+		t.Fatalf("limiter holds %d entries, want the cap %d", len(l.entries), authMaxIPs)
+	}
+	// A lull (len drops below the cap) re-arms the report for the next
+	// episode instead of staying quiet forever.
+	l.mu.Lock()
+	for key := range l.entries {
+		delete(l.entries, key)
+		break
+	}
+	l.mu.Unlock()
+	l.failure("after-lull", now)
+	for i := range 5 {
+		l.failure("again-"+strconv.Itoa(i), now)
+	}
+	if got := strings.Count(buf.String(), "address cap"); got != 2 {
+		t.Fatalf("table refilled and logged %d times total, want 2; log: %s", got, buf.String())
+	}
+}
+
+// TestCrossOriginCheckIsCaseInsensitive pins the host comparison: RFC 9110
+// makes the host case-insensitive, but net/http compares the Origin host with
+// r.Host byte for byte, so a case-preserving ingress or a mixed-case Host
+// refused every mutation. Both directions are covered, and a genuinely foreign
+// origin must still be refused.
+func TestCrossOriginCheckIsCaseInsensitive(t *testing.T) {
+	const token = "operator-fixture-credential"
+	for _, tc := range []struct {
+		name   string
+		host   string
+		origin string
+		want   int
+	}{
+		{"same case", "proxy.example", "https://proxy.example", http.StatusNoContent},
+		{"mixed-case host", "Proxy.Example", "https://proxy.example", http.StatusNoContent},
+		{"mixed-case origin", "proxy.example", "https://PROXY.Example", http.StatusNoContent},
+		{"mixed-case both with port", "Proxy.Example:8443", "https://proxy.EXAMPLE:8443", http.StatusNoContent},
+		{"a different host still refuses", "proxy.example", "https://foreign.example", http.StatusForbidden},
+		{"a different port still refuses", "proxy.example:8443", "https://proxy.example:9443", http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := newOperatorGate(token)
+			h := protectOperatorRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}), gate)
+			r := httptest.NewRequest(http.MethodPost, "http://placeholder/metrics/bootstrap", nil)
+			r.Host = tc.host
+			r.Header.Set("Authorization", "Bearer "+token)
+			r.Header.Set("Origin", tc.origin)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %q)", w.Code, tc.want, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestDoubleSlashSpellingsAreRefused pins the one gap in the non-canonical
+// refusal: "//" passed the canonical test, so the gate admitted it and the mux
+// then answered a 301, which is exactly the unauthenticated redirect the gate
+// promises not to take. Every duplicated-separator spelling of an owned
+// namespace must be refused 404 instead, while the single trailing separator
+// that IS canonical for a subtree route stays admitted.
+func TestNonCanonicalPathTable(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/", false},
+		{"/index.html", false},
+		{"/metrics/bootstrap", false},
+		{"/metrics/", false},
+		{"/metrics/pprof/", false},
+		{"/admin/config", false},
+		{"//metrics/pprof", true},
+		{"//metrics/pprof/", true},
+		{"//", true},
+		{"//index.html", true},
+		{"/metrics//pprof", true},
+		{"/metrics//", true},
+		{"/./metrics", true},
+		{"/metrics/.", true},
+		{"/metrics/..", true},
+	} {
+		if got := nonCanonicalPath(tc.path); got != tc.want {
+			t.Errorf("nonCanonicalPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestDoubleSlashIsRefusedNotRedirected pins the same rule through the real
+// gate: a doubled leading separator answers the reserved 404 with no Location
+// header, so a caller never has to follow a redirect to learn the namespace
+// exists.
+func TestDoubleSlashIsRefusedNotRedirected(t *testing.T) {
+	const token = "operator-fixture-credential"
+	gate := newOperatorGate(token)
+	_, handler := newOperatorMux(gate, config.Default())
+	for _, tc := range []struct{ path, credential string }{
+		{"//", ""},
+		{"//metrics/bootstrap", token},
+		{"//metrics/bootstrap", ""},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "http://proxy.example"+tc.path, nil)
+		if tc.credential != "" {
+			r.Header.Set("Authorization", "Bearer "+tc.credential)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("GET %s: status = %d, want the reserved 404", tc.path, w.Code)
+		}
+		if location := w.Header().Get("Location"); location != "" {
+			t.Errorf("GET %s: Location = %q, want no redirect", tc.path, location)
+		}
 	}
 }

@@ -13,7 +13,7 @@ import (
 
 func TestDrainQueueReleasesMatchingWaiters(t *testing.T) {
 	s := New(Options{MaxQueueSize: 100})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Concurrency: 1}})
 	holder, err := s.AcquireWith(context.Background(), "p|holder", 0, WaiterHooks{Provider: "p", Client: "c0", Model: "m0"})
 	if err != nil {
 		t.Fatal(err)
@@ -69,8 +69,8 @@ func TestDrainQueueReleasesMatchingWaiters(t *testing.T) {
 
 func TestDrainQueueMatchesProviderAndModel(t *testing.T) {
 	s := New(Options{MaxQueueSize: 100})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 1}})
-	s.SetThrottle(Throttle{Provider: "q", Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"q"}}, Limit: Limit{Concurrency: 1}})
 	holder, err := s.AcquireWith(context.Background(), "p|holder", 0, WaiterHooks{Provider: "p"})
 	if err != nil {
 		t.Fatal(err)

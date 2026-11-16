@@ -5,7 +5,7 @@ module.exports = async function regressionsC(H) {
   const state = H.state;
 
     // F13: owner cleanup and stable focus identities. A competing prompt must
-    // not leave the Settings veil/pressed state behind; removing a scope chip
+    // not leave the Settings veil/expanded state behind; removing a scope chip
     // must land on its surviving neighbor/root; a drawer whose initiating row
     // was replaced must return focus to the equivalent control.
     {
@@ -17,17 +17,17 @@ module.exports = async function regressionsC(H) {
       await settleUntil(() => w.settingsIsOpen() && sheet.classList.contains('open'));
       const prompt = w.askOperatorToken();
       await settleUntil(() => !w.settingsIsOpen() && !sheet.classList.contains('open') &&
-        !veil.classList.contains('open') && settingsBtn.getAttribute('aria-pressed') === 'false' &&
+        !veil.classList.contains('open') && settingsBtn.getAttribute('aria-expanded') === 'false' &&
         !d.getElementById('operator-dialog').hidden);
       check('an operator prompt preempts open Settings without a stale veil or pressed trigger',
         !w.settingsIsOpen() && !sheet.classList.contains('open') && !veil.classList.contains('open') &&
-        settingsBtn.getAttribute('aria-pressed') === 'false' &&
+        settingsBtn.getAttribute('aria-expanded') === 'false' &&
         !d.getElementById('operator-dialog').hidden);
       d.querySelector('#operator-dialog [data-operator-auth="cancel"]').click();
       await prompt;
       check('the Settings takeover cleanup survives prompt cancel',
         !sheet.classList.contains('open') && !veil.classList.contains('open') &&
-        settingsBtn.getAttribute('aria-pressed') === 'false' &&
+        settingsBtn.getAttribute('aria-expanded') === 'false' &&
         d.getElementById('operator-dialog').hidden && !d.querySelector('main').hasAttribute('inert'));
     }
     {

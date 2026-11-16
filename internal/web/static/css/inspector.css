@@ -37,6 +37,11 @@
   .d-stat:first-child { border-left: 0; padding-left: 0; }
   .d-stat-k { color: var(--muted); font-size: 9px; letter-spacing: .05em; }
   .d-stat-v { color: var(--text); font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  /* Two console prefills seeded from this record. They sit under the readings
+     as one quiet row: prefills, not commits, so they carry the neutral button,
+     not the accent. */
+  .d-ops { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .d-ops .btn { min-height: 26px; }
 
   /* The final failure reads as one alert, not a buried key/value block. */
   .d-alert {
@@ -263,8 +268,8 @@
     .drawer { width: 100vw; max-width: 100vw; border-left: 0; }
     .drawer-hd { padding: 8px 9px 9px; gap: 5px; }
     .drawer-hd h3 { font-size: 11px; }
-    .drawer-hd .nav-btns .btn { width: 38px; height: 38px; }
-    .drawer-hd .btn { min-width: 38px; min-height: 38px; }
+    .drawer-hd .nav-btns .btn { width: var(--tap); height: var(--tap); }
+    .drawer-hd .btn { min-width: var(--tap); min-height: var(--tap); }
     .drawer-hd .drawer-tool { padding: 5px 8px; }
     .d-key { display: none; }
     .drawer-body { padding: 10px 10px calc(24px + env(safe-area-inset-bottom, 0px)); }
@@ -291,6 +296,11 @@
     .toast { bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
   }
   @media (hover: none), (pointer: coarse) {
+    /* A copy target is a small square icon, so it keeps its own size class
+       rather than the full row height. */
     .copy-btn { opacity: .65; width: 32px; height: 32px; }
     .detail-sec-hd > .detail-sec-actions .copy-btn { opacity: .7; }
+    /* The console prefills and the row's small actions are real targets, not
+       icons: a mis-tap seeds the wrong draft or opens the wrong attempt. */
+    .d-ops .btn, .mini-btn, .d-tab { min-height: var(--tap); }
   }

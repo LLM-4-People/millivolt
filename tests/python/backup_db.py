@@ -493,9 +493,35 @@ class BackupTest(unittest.TestCase):
                 self.copy()
                 with closing(sqlite3.connect(self.destination)) as edited:
                     edited.executescript(sql)
+                if sql == 'DELETE FROM meta':
+                    # The sidecar holds the same marker now; drop both proves
+                    # the boot-rewritten meta path still needs provenance.
+                    Path(str(self.destination) + subject.MARKER_SIDECAR_SUFFIX).unlink()
                 with self.assertRaises(ValueError):
                     subject.verify_docs_copy(self.destination)
                 self.destination.unlink()
+                Path(str(self.destination) + subject.MARKER_SIDECAR_SUFFIX).unlink(missing_ok=True)
+
+    def test_boot_settled_shape_is_produced_and_provenance_survives_meta_rewrite(self):
+        # A served copy boots once, so the repairs Store.Open runs would change
+        # rows the marker already hashed. The redactor applies them up front, and
+        # the marker's sidecar survives the boot that rewrites meta.
+        connection = self.source_db()
+        self.insert(connection, self.record(ttft_ms=4200, final_attempt_at=0, attempts='', tool_names=''))
+        self.copy()
+        row = self.rows()[0]
+        self.assertEqual((row['ttft_ms'], row['attempts'], row['tool_names']), (0, 'null', 'null'))
+        with closing(sqlite3.connect(self.destination)) as edited:
+            edited.execute('DELETE FROM meta')  # boot replaces meta with its repair markers
+            edited.commit()
+        self.assertEqual(subject.verify_docs_copy(self.destination)['records'], 1)
+        # A rebuilt table may reorder columns; the digest is by name.
+        forward = subject._Manifest(self.columns)
+        reversed_order = list(reversed(self.columns))
+        backward = subject._Manifest(reversed_order)
+        forward.add([row[name] for name in self.columns], row)
+        backward.add([row[name] for name in reversed_order], row)
+        self.assertEqual(forward.marker(), backward.marker())
 
     def test_provenance_types_are_strict(self):
         self.source_db()
@@ -503,8 +529,10 @@ class BackupTest(unittest.TestCase):
         with closing(sqlite3.connect(self.destination)) as connection:
             marker = json.loads(connection.execute('SELECT value FROM meta').fetchone()[0])
             marker['summary']['records'] = False
-            connection.execute('UPDATE meta SET value=?', (json.dumps(marker, separators=(',', ':')),))
             connection.commit()
+            marker['summary']['records'] = False
+        Path(str(self.destination) + subject.MARKER_SIDECAR_SUFFIX).write_text(
+            json.dumps(marker, separators=(',', ':')), encoding='utf-8')
         with self.assertRaises(ValueError):
             subject.verify_docs_copy(self.destination)
 

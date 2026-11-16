@@ -558,32 +558,41 @@ func TestExplorerPayloadCompactSelectionEquivalence(t *testing.T) {
 	})
 }
 
+// explorerFixtureGroup registers one fixture group with the membership slot the
+// fold would assign it, so fixtures keep matching the slot-keyed arrays.
+func explorerFixtureGroup(f *explorerFold, id uint32, name string) *entAcc {
+	g := &entAcc{id: id, name: name, slot: uint16(len(f.groups) + 1)}
+	f.groups[id] = g
+	return g
+}
+
 // TestExplorerSelectedGroupsLookupPaths pins low, boundary and high selection
-// to one bucket mapping, with unselected ids always resolving to zero.
+// to one bucket mapping, with unselected slots always resolving to zero.
 func TestExplorerSelectedGroupsLookupPaths(t *testing.T) {
-	for _, base := range []uint32{0, explorerDenseSelection - 2, 1 << 20} {
-		top := []*entAcc{{id: base + 1, name: "a"}, {id: base + 2, name: "b"}, {id: base + 3, name: "c"}}
-		selected := newExplorerSelectedGroups(top)
-		for id, want := range map[uint32]uint8{base: 0, base + 1: 1, base + 2: 2, base + 3: 3, base + 4: 0, base + 99: 0} {
-			if got := selected.bucket(id); got != want {
-				t.Fatalf("base %d id %d bucket = %d, want %d", base, id, got, want)
-			}
+	top := []*entAcc{{slot: 1, name: "a"}, {slot: explorerDenseSelection - 1, name: "b"},
+		{slot: explorerDenseSelection, name: "c"}, {slot: explorerDenseSelection + 1, name: "d"}}
+	selected := newExplorerSelectedGroups(top)
+	for slot, want := range map[uint16]uint8{
+		0: 0, 1: 1, explorerDenseSelection - 1: 2, explorerDenseSelection: 3,
+		explorerDenseSelection + 1: 4, explorerDenseSelection + 2: 0, 65535: 0,
+	} {
+		if got := selected.bucket(slot); got != want {
+			t.Fatalf("slot %d bucket = %d, want %d", slot, got, want)
 		}
 	}
 }
 
-// explorerCollidingHighIDs returns two distinct high ids with the same initial
-// open-addressed slot, so the mixed test exercises linear probing.
-func explorerCollidingHighIDs() (uint32, uint32) {
-	first := make(map[int]uint32, explorerHighSelection)
-	for id := uint32(explorerDenseSelection); id < explorerDenseSelection+1_000_000; id++ {
-		slot := explorerHighSlot(id)
-		if other, ok := first[slot]; ok && other != id {
-			return other, id
+// explorerCollidingHighSlots returns two distinct high ordinals with the same
+// initial open-addressed slot, so the mixed test exercises linear probing.
+func explorerCollidingHighSlots() (uint16, uint16) {
+	first := make(map[int]uint16, explorerHighSelection)
+	for ordinal := uint16(explorerDenseSelection); ; ordinal++ {
+		slot := explorerHighSlot(ordinal)
+		if other, ok := first[slot]; ok && other != ordinal {
+			return other, ordinal
 		}
-		first[slot] = id
+		first[slot] = ordinal
 	}
-	return 0, 0
 }
 
 // TestExplorerSelectedGroupsMixedAndCollision pins a table holding both low and
@@ -594,33 +603,33 @@ func TestExplorerSelectedGroupsMixedAndCollision(t *testing.T) {
 		t.Fatalf("high table slots = %d, xpNodeCap = %d: capacity must be a power of two above the cap",
 			explorerHighSelection, xpNodeCap)
 	}
-	first, second := explorerCollidingHighIDs()
+	first, second := explorerCollidingHighSlots()
 	if first == 0 || second == 0 || explorerHighSlot(first) != explorerHighSlot(second) {
 		t.Fatalf("collision fixture = %d/%d, slots %d/%d", first, second,
 			explorerHighSlot(first), explorerHighSlot(second))
 	}
 	top := []*entAcc{
-		{id: 2, name: "low-a"},
-		{id: first, name: "high-a"},
-		{id: 255, name: "low-b"},
-		{id: second, name: "high-b"},
-		{id: 1 << 20, name: "high-c"},
+		{slot: 2, name: "low-a"},
+		{slot: first, name: "high-a"},
+		{slot: 255, name: "low-b"},
+		{slot: second, name: "high-b"},
+		{slot: 65535, name: "high-c"},
 	}
 	selected := newExplorerSelectedGroups(top)
 	want := []struct {
-		id     uint32
+		slot   uint16
 		bucket uint8
 	}{
-		{1, 0}, {2, 1}, {255, 3}, {first, 2}, {second, 4}, {1 << 20, 5}, {257, 0}, {1 << 21, 0},
+		{1, 0}, {2, 1}, {255, 3}, {first, 2}, {second, 4}, {65535, 5}, {257, 0}, {60000, 0},
 	}
 	for _, probe := range want {
-		if got := selected.bucket(probe.id); got != probe.bucket {
-			t.Fatalf("id %d bucket = %d, want %d (high slots %d/%d)", probe.id, got, probe.bucket,
+		if got := selected.bucket(probe.slot); got != probe.bucket {
+			t.Fatalf("slot %d bucket = %d, want %d (high slots %d/%d)", probe.slot, got, probe.bucket,
 				explorerHighSlot(first), explorerHighSlot(second))
 		}
 	}
 	if selected.dense[2] != 1 || selected.dense[255] != 3 {
-		t.Fatalf("low ids left the dense table: %d/%d", selected.dense[2], selected.dense[255])
+		t.Fatalf("low slots left the dense table: %d/%d", selected.dense[2], selected.dense[255])
 	}
 }
 
@@ -632,13 +641,14 @@ func TestExplorerSelectedVisitorOccurrenceOrder(t *testing.T) {
 	for _, base := range []uint32{1, 1 << 20} {
 		f := newExplorerFold("tool", "", nil)
 		f.multiMember = true
+		f.groups = map[uint32]*entAcc{}
+		one := explorerFixtureGroup(f, base, "one")
+		two := explorerFixtureGroup(f, base+1, "two")
+		three := explorerFixtureGroup(f, base+2, "three")
+		one.n, two.n, three.n = 1, 1, 3
+		// The last occurrence names slot 4, which is not a returned card.
 		f.memberSpans = []explorerMemberSpan{{start: 0, count: 5}, {start: 5, count: 1}}
-		f.members = []uint32{base + 2, base + 3, base, base + 2, base + 1, base + 3}
-		f.groups = map[uint32]*entAcc{
-			base:     {id: base, name: "one", n: 1},
-			base + 1: {id: base + 1, name: "two", n: 1},
-			base + 2: {id: base + 2, name: "three", n: 3},
-		}
+		f.members = []uint16{three.slot, 4, one.slot, three.slot, two.slot, 4}
 		top := f.rankedGroups()
 		if len(top) != 3 || top[0].id != base+2 || top[1].id != base || top[2].id != base+1 {
 			t.Fatalf("base %d ranking = %+v", base, top)
@@ -666,11 +676,12 @@ func TestExplorerSelectedVisitorOccurrenceOrder(t *testing.T) {
 // compact lookup, including zero and unselected ids.
 func TestExplorerSelectedVisitorSingleValued(t *testing.T) {
 	f := newExplorerFold("client", "", nil)
-	f.singleMember = []uint32{2, 0, 1, 999}
-	f.groups = map[uint32]*entAcc{
-		1: {id: 1, name: "one", n: 1},
-		2: {id: 2, name: "two", n: 1},
-	}
+	f.groups = map[uint32]*entAcc{}
+	one := explorerFixtureGroup(f, 1, "one")
+	two := explorerFixtureGroup(f, 2, "two")
+	one.n, two.n = 1, 1
+	// Slot 9 is not a returned card.
+	f.singleMember = []uint16{two.slot, 0, one.slot, 9}
 	selected := newExplorerSelectedGroups(f.rankedGroups())
 	visit := f.selectedVisitor(&selected)
 	for row, want := range [][]uint8{{2}, nil, {1}, nil, nil} {
@@ -828,9 +839,9 @@ func TestExplorerSyntheticOtherIsDistinctFromRealOther(t *testing.T) {
 // TestExplorerDistinctGroupsStayBounded pins the explorer's internal group
 // budget at one million distinct values. Exact per-value accumulators stop at
 // explorerGroupBudget and the remainder folds into the synthetic other card,
-// so neither the error affected-ID maps nor the conversation payload map
-// scales with history cardinality. The top cards and scope/rail totals remain
-// exact and the completed payload is stable across calls.
+// so no per-card request-ID set and no conversation payload map scales with
+// history cardinality. The top cards and scope/rail totals remain exact and
+// the completed payload is stable across calls.
 func TestExplorerDistinctGroupsStayBounded(t *testing.T) {
 	const distinct = 1_000_000
 	const maxAlloc = 64 << 20
@@ -912,13 +923,13 @@ func TestExplorerDistinctGroupsStayBounded(t *testing.T) {
 // TestExplorerGroupBudgetExceedsNodeCap keeps the bounded top-card ranking
 // meaningful: an overflow bucket only ever aggregates values that could not
 // have appeared as cards themselves. It also pins the budget published in
-// docs/operations.md so that contract and the owner cannot drift apart.
+// docs/routes.md so that contract and the owner cannot drift apart.
 func TestExplorerGroupBudgetExceedsNodeCap(t *testing.T) {
 	if explorerGroupBudget < xpNodeCap {
 		t.Fatalf("explorerGroupBudget = %d, want at least xpNodeCap %d", explorerGroupBudget, xpNodeCap)
 	}
 	if explorerGroupBudget != 8192 {
-		t.Fatalf("explorerGroupBudget = %d, want the 8192 documented in docs/operations.md", explorerGroupBudget)
+		t.Fatalf("explorerGroupBudget = %d, want the 8192 documented in docs/routes.md", explorerGroupBudget)
 	}
 }
 
@@ -950,8 +961,8 @@ func TestExplorerOverflowAffectedRequests(t *testing.T) {
 	if !f.overflow || len(f.groups) != explorerGroupBudget {
 		t.Fatalf("overflow = %v with %d tracked groups", f.overflow, len(f.groups))
 	}
-	if f.other.n != 4 || f.otherAffected != 2 || f.other.errFin != 2 || f.other.code != "" {
-		t.Fatalf("overflow accumulator = %+v (affected %d)", f.other, f.otherAffected)
+	if f.other.n != 4 || f.other.affectedN != 2 || f.other.errFin != 2 || f.other.code != "" {
+		t.Fatalf("overflow accumulator = %+v (affected %d)", f.other, f.other.affectedN)
 	}
 	card := f.payload().Groups[0]
 	if card.Name != explorerOtherName || card.N != 2 || card.ErrEvents != 4 || card.ErrFinal != 2 || card.Code != "" {
@@ -997,29 +1008,32 @@ func explorerPayloadBenchFold(history int, multi bool, baseID uint32) *explorerF
 	rows := make([]int, xpNodeCap)
 	f.order.base.ttft = make([]metricSample[int64], history)
 	f.order.base.tps = make([]metricSample[float64], history)
+	slots := make([]uint16, xpNodeCap)
+	for group := range xpNodeCap {
+		tracked := explorerFixtureGroup(f, baseID+uint32(group), fmt.Sprintf("group-%02d", group))
+		slots[group] = tracked.slot
+	}
 	if multi {
 		f.memberSpans = make([]explorerMemberSpan, history)
-		f.members = make([]uint32, history)
+		f.members = make([]uint16, history)
 	} else {
-		f.singleMember = make([]uint32, history)
+		f.singleMember = make([]uint16, history)
 	}
 	for row := range history {
 		group := row % xpNodeCap
 		rows[group]++
-		id := baseID + uint32(group)
 		f.order.base.ttft[row] = metricSample[int64]{row: uint32(row), value: int64(row + 1)}
 		f.order.base.tps[row] = metricSample[float64]{row: uint32(row), value: float64(row + 1)}
 		if multi {
 			f.memberSpans[row] = explorerMemberSpan{start: uint32(row), count: 1}
-			f.members[row] = id
+			f.members[row] = slots[group]
 		} else {
-			f.singleMember[row] = id
+			f.singleMember[row] = slots[group]
 		}
 	}
-	for group := range xpNodeCap {
-		id := baseID + uint32(group)
-		f.groups[id] = &entAcc{id: id, name: fmt.Sprintf("group-%02d", group),
-			n: rows[group], ttftN: rows[group], tpsN: rows[group]}
+	for group, count := range rows {
+		tracked := f.groups[baseID+uint32(group)]
+		tracked.n, tracked.ttftN, tracked.tpsN = count, count, count
 	}
 	return f
 }

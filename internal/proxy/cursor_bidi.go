@@ -19,10 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"strings"
 	"time"
 
@@ -32,15 +32,13 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"golang.org/x/net/http2"
 )
 
 // cursorH2PingTimeout is HTTP/2 ping detection on the Cursor bidi transport
 // (half-open parked streams). Not SSE keepalive (that's SSEKeepaliveInterval).
 const cursorH2PingTimeout = 15 * time.Second
-
-// errEchoMax bounds an upstream error body echoed into a 502 message.
-const errEchoMax = 512
 
 // cursorClientFor returns the shared full-duplex HTTP/2 client used for Cursor
 // Run calls, building it on first use. It mirrors the main upstream client's
@@ -212,7 +210,7 @@ func cursorSendFailure(err, waitErr error) (paced bool, msg string) {
 // logCursorRequestShape logs the request's message SHAPE only (roles, content
 // lengths, tool_call ids). Oversized messages get a 4-byte sha256 prefix for
 // correlation - never content bytes (message content must not reach logs).
-func (s *Server) logCursorRequestShape(r *http.Request, body []byte) {
+func (s *Server) logCursorRequestShape(r *http.Request, body []byte, rec *metrics.Record) {
 	var in struct {
 		Messages []struct {
 			Role       string          `json:"role"`
@@ -232,7 +230,7 @@ func (s *Server) logCursorRequestShape(r *http.Request, body []byte) {
 		}
 		parts = append(parts, p)
 	}
-	log.Printf("cursor-shape session=%s n=%d msgs=%s", shortID(r.Header.Get("X-Session-Id")), len(in.Messages), strings.Join(parts, " "))
+	logging.Printf(rec.ID, "cursor-shape session=%s n=%d msgs=%s", shortID(r.Header.Get("X-Session-Id")), len(in.Messages), strings.Join(parts, " "))
 }
 
 // shortID renders a tool_call/session id as an 8-char suffix prefix (used in
@@ -250,7 +248,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 	// the same request): it fires per request, so an ungated log would
 	// scale log volume with traffic.
 	if rec.Debug {
-		s.logCursorRequestShape(r, body)
+		s.logCursorRequestShape(r, body, rec)
 	}
 	requestBody := body
 	rr := cursorTurnRender{
@@ -272,7 +270,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 				// everything, and a void outcome is flagged (empty_turn).
 				s.cursorRuns.drop(run)
 				run.Close()
-				log.Printf("cursor-run: COLD-START (parked stream died: %s…)", shortID(ids[len(ids)-1]))
+				logging.Printf(rec.ID, "cursor-run: COLD-START (parked stream died: %s…)", shortID(ids[len(ids)-1]))
 			} else {
 				// Only the trailing results are this turn's answers; older ids in the
 				// cumulative history were consumed turns ago.
@@ -289,7 +287,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 						}
 					}
 				}
-				log.Printf("cursor-run: RESUME ids=%d of %d", len(current), len(ids))
+				logging.Printf(rec.ID, "cursor-run: RESUME ids=%d of %d", len(current), len(ids))
 				// Resumed turns never open an upstream request, so StatusCode is
 				// never set by the fresh-run path below. With status 0 the dashboard
 				// keeps rendering the row as an in-flight "streaming" row forever.
@@ -300,7 +298,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 				return
 			}
 		} else {
-			log.Printf("cursor-run: COLD-START (trailing id not parked: %s…)", shortID(ids[len(ids)-1]))
+			logging.Printf(rec.ID, "cursor-run: COLD-START (trailing id not parked: %s…)", shortID(ids[len(ids)-1]))
 		}
 		// No live parked run owns these ids - fall through to a fresh Run (the
 		// history the client sent already carries the tool call + result).
@@ -411,7 +409,14 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 // to CursorRun; parked resumes never call this helper or replay a handshake.
 func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clientMessage []byte, groupKey string, hooks scheduler.WaiterHooks, firstSendIsRetry bool) (*http.Response, *io.PipeWriter, context.CancelFunc, error) {
 	own, failed := false, false
-	defer func() { s.cursorEndSend(groupKey, own, failed) }()
+	// ordinary and retried are the shared retry verdict the generic ladder
+	// keeps: the transient budget (max_retries) bounds the loop, and whether
+	// anything was absorbed decides whether the group returns to one probe or
+	// full concurrency. Without both, this driver retried past the configured
+	// budget and always restored full concurrency after a retry.
+	ordinary := 0
+	retried := false
+	defer func() { s.cursorEndSend(groupKey, own, failed, retried) }()
 	// permit and attemptStart are declared outside the loop so the admission
 	// call can assign them (and own) with a plain = : a := would shadow the
 	// outer own inside the loop body and silently drop the Trip-claimed send
@@ -441,12 +446,21 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		pr, pw := io.Pipe()
 		upstreamCtx, cancel := context.WithCancel(httptrace.WithClientTrace(context.Background(), timing.trace(t.tlsPossible())))
 		upstreamCancel := func() { cancel(); pr.Close(); pw.Close() }
-		req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, cursorRunURL(t), pr)
+		runTarget, err := cursorRunURL(t)
 		if err != nil {
 			permit.Cancel()
 			upstreamCancel()
 			return nil, nil, nil, err
 		}
+		req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, runTarget.String(), pr)
+		if err != nil {
+			permit.Cancel()
+			upstreamCancel()
+			return nil, nil, nil, err
+		}
+		// NewRequest re-parses its URL string, where a literal "#" in the
+		// query would become a fragment; keep the structurally built URL.
+		req.URL = runTarget
 		s.setCursorHeaders(req, t, key)
 		initialFrame := providerformat.AppendConnectEnvelope(nil, clientMessage)
 		go func() { _, _ = pw.Write(initialFrame) }()
@@ -469,11 +483,13 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 			}
 			retryable, msg := cursorSendFailure(err, waitErr)
 			active := s.observeStormTransport(ctx, permit, retryable)
-			if !retryable || !s.allowStormRetry(ctx, active) {
+			if !retryable || ordinary >= s.cfg().MaxRetries && !s.allowStormRetry(ctx, active) {
 				failed = retryable
 				return nil, nil, nil, err
 			}
 			own = s.absorbTransportRetry(state.rec, groupKey, msg, own)
+			ordinary++
+			retried = true
 			continue
 		}
 		// Quota-envelope classification precedes storm observation. Keep the
@@ -485,7 +501,7 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		stopRead := context.AfterFunc(ctx, upstreamCancel)
 		retryable, class, peekErr := s.cursorOutcome(ctx, resp)
 		active := s.observeStormHTTP(ctx, permit, resp, retryable)
-		if !retryable || !s.allowStormRetry(ctx, active) {
+		if !retryable || ordinary >= s.cfg().MaxRetries && !s.allowStormRetry(ctx, active) {
 			stopRead()
 			if peekErr != nil {
 				// The bounded peek failed mid-body (the whole-document
@@ -519,29 +535,33 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		}
 		s.publishUpdate(state.rec)
 		own = s.scheduler.Trip(groupKey, s.scheduler.BackoffFor(groupKey, retryAfter)) || own
+		ordinary++
+		retried = true
 	}
 }
 
-func cursorRunURL(t *target) string {
-	path := t.path
-	if path == "" {
-		path = providerformat.CursorConnectPath()
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	return t.baseURL + path
+// cursorRunURL builds the Connect run URL through the shared target owner, so
+// a base URL with a trailing slash, an X-Proxy-Path override and an
+// X-Proxy-Query override join and validate exactly like a relayed request.
+// Cursor differs from the generic builder only in the wire: a POST whose
+// enveloped duplex body is framed here, and headers from setCursorHeaders
+// rather than client forwarding.
+func cursorRunURL(t *target) (*url.URL, error) {
+	path := upstreamPath(t.path, providerformat.CursorConnectPath())
+	return upstreamURL(t.baseURL, path, t.query, "")
 }
 
-// cursorEndSend releases the send token. A retryable failure trips the
-// provider+key group; a success or 4xx/quota/cancel does not.
-func (s *Server) cursorEndSend(groupKey string, own, failed bool) {
+// cursorEndSend releases the send token through the shared verdict. A
+// retryable failure trips the provider+key group; a success or 4xx/quota/cancel
+// does not, and a request that absorbed anything leaves the group at one probe
+// instead of restoring full concurrency.
+func (s *Server) cursorEndSend(groupKey string, own, failed, retried bool) {
 	if failed {
 		s.scheduler.FailSend(groupKey, own)
 		return
 	}
 	if own {
-		s.scheduler.EndSend(groupKey, false)
+		s.scheduler.EndSend(groupKey, retried)
 	}
 }
 
@@ -636,7 +656,7 @@ func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, 
 // override (its ServeHTTP branch returns before the resolution point), so
 // discovery keeps its own header contract.
 func (s *Server) setCursorIdentity(req *http.Request, t *target, key string) {
-	s.applyProviderHeaders(req.Header, t.provider)
+	s.applyProviderHeaders(req, t.provider)
 	applyOverrideHeaders(req.Header, t.override, t.authHeader)
 	stripTransportModeHeaders(req.Header)
 	req.Header.Set("Connect-Protocol-Version", "1")
@@ -1017,9 +1037,9 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 		// (park() fails at capacity → close and let the client cold-start.)
 		if !s.cursorRuns.park(rr.scope, run) {
 			run.Close()
-			log.Printf("cursor-run: park FAILED (capacity) - run closed, client will cold-start")
+			logging.Printf(rec.ID, "cursor-run: park FAILED (capacity) - run closed, client will cold-start")
 		} else {
-			log.Printf("cursor-run: PARKED %d calls (%s…)", len(result.ToolCalls), shortID(result.ToolCalls[len(result.ToolCalls)-1].CallID))
+			logging.Printf(rec.ID, "cursor-run: PARKED %d calls (%s…)", len(result.ToolCalls), shortID(result.ToolCalls[len(result.ToolCalls)-1].CallID))
 		}
 		rec.FinishReason = "tool_calls"
 		emitFinal("tool_calls")
@@ -1256,13 +1276,18 @@ func applyCursorUsage(rec *metrics.Record, result *providerformat.TurnResult, es
 // renders them in the OpenAI GET /v1/models shape. This lets OpenAI-compatible
 // clients discover the usable model ids natively instead of hardcoding them.
 func (s *Server) serveCursorModels(d *modelsDiscovery, w http.ResponseWriter, r *http.Request, t *target, key string) {
-	targetURL := t.baseURL + providerformat.CursorModelsPath()
-	req, err := http.NewRequestWithContext(d.ctx, http.MethodPost, targetURL,
+	targetURL, err := modelsUpstreamURL(t, providerformat.CursorModelsPath())
+	if err != nil {
+		writeModelsError(w, err)
+		return
+	}
+	req, err := http.NewRequestWithContext(d.ctx, http.MethodPost, targetURL.String(),
 		bytes.NewReader(providerformat.EncodeGetUsableModelsRequest(nil)))
 	if err != nil {
 		writeModelsError(w, err)
 		return
 	}
+	req.URL = targetURL
 	// Unary call: the shared client is fine (it negotiates h2 via ALPN for
 	// https upstreams; h2c test servers go through the cursor transport's
 	// AllowHTTP dial - but the shared client's UnencryptedHTTP2 also covers it).
@@ -1289,11 +1314,8 @@ func (s *Server) serveCursorModels(d *modelsDiscovery, w http.ResponseWriter, r 
 		providerformat.CursorModelEntries(models, s.cfg().CursorDefaultContextWindow))
 }
 
-// truncateForErr bounds an upstream error body echoed into a 502 message.
+// truncateForErr bounds an upstream error body echoed into a 502 message
+// through the shared client-facing error bound.
 func truncateForErr(b []byte) string {
-	s := string(b)
-	if len(s) > errEchoMax {
-		s = s[:errEchoMax] + "…"
-	}
-	return s
+	return metrics.TruncateError(string(b))
 }

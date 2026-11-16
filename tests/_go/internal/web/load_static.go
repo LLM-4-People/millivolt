@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -27,7 +28,7 @@ func TestLoadStaticVersion(t *testing.T) {
 				files[spec.file] = &fstest.MapFile{Data: []byte("brand")}
 			}
 		}
-		files[dashboardSWPath] = &fstest.MapFile{Data: []byte("const CACHE='millivolt-shell-__DASHBOARD_VERSION__';")}
+		files[dashboardSWPath] = &fstest.MapFile{Data: []byte("const CACHE='millivolt-shell-__DASHBOARD_VERSION__';\nconst LIVE = __LIVE_PATHS__;")}
 		return files
 	}
 	base, version := loadStatic(fixture())
@@ -101,7 +102,7 @@ func completeStatic(index, sw []byte) fstest.MapFS {
 		}
 	}
 	if sw == nil {
-		sw = []byte("const CACHE='millivolt-shell-" + dashboardVersionMarker + "';")
+		sw = []byte("const CACHE='millivolt-shell-" + dashboardVersionMarker + "';\nconst LIVE = " + dashboardSWLiveMarker + ";")
 	}
 	files[dashboardSWPath] = &fstest.MapFile{Data: sw}
 	return files
@@ -110,7 +111,7 @@ func completeStatic(index, sw []byte) fstest.MapFS {
 func TestLoadStaticFailsClosed(t *testing.T) {
 	versionedRef := `<script defer src="` + DashPrefix + `js/app.js?` + dashVersionQuery + `=` + dashboardVersionMarker + `"></script>`
 	validIndex := []byte(dashboardVersionMeta + versionedRef + dashboardBootstrapMarker)
-	validSW := []byte("const CACHE='millivolt-shell-" + dashboardVersionMarker + "';")
+	validSW := []byte("const CACHE='millivolt-shell-" + dashboardVersionMarker + "';\nconst LIVE = " + dashboardSWLiveMarker + ";")
 	cases := []struct {
 		name, want string
 		fsys       fs.FS
@@ -122,8 +123,10 @@ func TestLoadStaticFailsClosed(t *testing.T) {
 		{"duplicate marker", "exactly one dashboard version meta marker", completeStatic([]byte(dashboardVersionMeta+dashboardVersionMeta+dashboardBootstrapMarker), validSW)},
 		{"missing bootstrap marker", "exactly one dashboard bootstrap marker", completeStatic([]byte(dashboardVersionMeta), validSW)},
 		{"duplicate bootstrap marker", "exactly one dashboard bootstrap marker", completeStatic([]byte(dashboardVersionMeta+dashboardBootstrapMarker+dashboardBootstrapMarker), validSW)},
-		{"missing SW marker", "exactly one dashboard version marker", completeStatic(validIndex, []byte("const CACHE='millivolt-shell';"))},
+		{"missing SW marker", "exactly one dashboard version marker", completeStatic(validIndex, []byte("const CACHE='millivolt-shell';\nconst LIVE = "+dashboardSWLiveMarker+";"))},
 		{"duplicate SW marker", "exactly one dashboard version marker", completeStatic(validIndex, append(append([]byte{}, validSW...), dashboardVersionMarker...))},
+		{"missing SW live marker", "exactly one live-path marker", completeStatic(validIndex, []byte("const CACHE='millivolt-shell-"+dashboardVersionMarker+"';"))},
+		{"duplicate SW live marker", "exactly one live-path marker", completeStatic(validIndex, append(append([]byte{}, validSW...), dashboardSWLiveMarker...))},
 		{"unreadable asset", "load dashboard assets", unreadableStaticFS{fstest.MapFS{dashboardIndexPath: {Data: validIndex}}}},
 	}
 	for _, tc := range cases {
@@ -140,5 +143,63 @@ func TestLoadStaticFailsClosed(t *testing.T) {
 			}()
 			loadStatic(tc.fsys)
 		})
+	}
+}
+
+// TestNamespaceTableOwnsAllThreePolicies pins S9: the gate, the mux
+// reservations and the service-worker live list all read this one table, so a
+// namespace cannot be gated but cached, or reserved but forwarded. The rows are
+// checked as invariants rather than a literal list so a new namespace only has
+// to declare the policies that apply to it.
+func TestNamespaceTableOwnsAllThreePolicies(t *testing.T) {
+	gatedRoots := map[string]bool{}
+	seen := map[string]bool{}
+	for _, ns := range namespaces {
+		if seen[ns.Root] {
+			t.Errorf("namespace %s appears twice", ns.Root)
+		}
+		seen[ns.Root] = true
+		if !strings.HasPrefix(ns.Root, "/") {
+			t.Errorf("namespace %s is not rooted", ns.Root)
+		}
+		if ns.Gated {
+			gatedRoots[ns.Root] = true
+			subtree := ns.Root == "/" || Gated(ns.Root+"/x")
+			if !Gated(ns.Root) || !subtree {
+				t.Errorf("gated namespace %s is not gated by the gate", ns.Root)
+			}
+		}
+	}
+	// Every table root is exactly one namespace, never a prefix of another
+	// (except "/", which is matched exactly).
+	for _, ns := range namespaces {
+		if ns.Root == "/" {
+			continue
+		}
+		if Gated(ns.Root) != gatedRoots[ns.Root] {
+			t.Errorf("gate disagrees with the table for %s", ns.Root)
+		}
+		if Gated(ns.Root+"/deep/path") != ns.Gated {
+			t.Errorf("gate disagrees about the subtree of %s", ns.Root)
+		}
+	}
+	// A reserved namespace must be generated into the worker list or be safely
+	// cacheable; /dash is the one cacheable gated root.
+	live := LiveWorkerPaths()
+	for _, ns := range namespaces {
+		if ns.Reserved && !slices.Contains(live, ns.Root) {
+			t.Errorf("reserved namespace %s is missing from the worker live list", ns.Root)
+		}
+	}
+	// The inference base stays ungated: provider credentials ride it untouched.
+	if Gated("/v1/chat/completions") {
+		t.Error("/v1 must stay ungated")
+	}
+	// The origin root matches only itself, not the whole origin.
+	if Gated("/v1") || !Gated("/") {
+		t.Errorf("root gating is wrong: /v1 gated=%v / gated=%v", Gated("/v1"), Gated("/"))
+	}
+	if !Gated(`/metrics\prometheus`) {
+		t.Error("a decoded backslash separator is not read as one")
 	}
 }

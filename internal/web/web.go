@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"log"
 	"maps"
 	"net/http"
 	"path"
@@ -17,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 //go:embed static
@@ -62,6 +63,10 @@ const dashboardVersionMarker = "__DASHBOARD_VERSION__"
 // dashboardVersionMeta is the shell's single authoritative version stamp,
 // required exactly once before loadStatic replaces every marker occurrence.
 const dashboardVersionMeta = `<meta name="dashboard-version" content="` + dashboardVersionMarker + `">`
+
+// dashboardSWLiveMarker is replaced at load with the generated never-cache
+// list, so the worker's live paths have the namespace table as their only own.
+const dashboardSWLiveMarker = "__LIVE_PATHS__"
 
 // dashboardBootstrapMarker is the sole insertion point for request-time
 // state. It remains in the static source identity; live data never changes
@@ -206,12 +211,21 @@ func loadStatic(fsys fs.FS) (map[string]*staticAsset, string) {
 	if strings.Count(sw, dashboardVersionMarker) != 1 {
 		panic("load dashboard assets: service worker must contain exactly one dashboard version marker")
 	}
+	if strings.Count(sw, dashboardSWLiveMarker) != 1 {
+		panic("load dashboard assets: service worker must contain exactly one live-path marker")
+	}
 	version := etagHex([]byte(identity.String()))
+	livePaths, err := json.Marshal(LiveWorkerPaths())
+	if err != nil {
+		panic(fmt.Errorf("encode live worker paths: %w", err))
+	}
 	// Every shell marker is intentional: the meta stamp, one per local asset
 	// URL, and the service worker's cache name. Replace all of them so the
 	// served index never advertises the source spelling.
 	cache[dashboardIndexPath] = newStaticAsset([]byte(strings.ReplaceAll(index, dashboardVersionMarker, version)), true)
-	cache[dashboardSWPath] = newStaticAsset([]byte(strings.Replace(sw, dashboardVersionMarker, version, 1)), true)
+	generatedSW := strings.Replace(sw, dashboardVersionMarker, version, 1)
+	generatedSW = strings.Replace(generatedSW, dashboardSWLiveMarker, string(livePaths), 1)
+	cache[dashboardSWPath] = newStaticAsset([]byte(generatedSW), true)
 	return cache, version
 }
 
@@ -284,7 +298,20 @@ func etagMatches(header, etag string) bool {
 }
 
 // dashboardCSP is the single owner of the dashboard document's policy.
-const dashboardCSP = "frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'"
+//
+// The document carries no inline script: the pre-paint theme guard is
+// js/theme_boot.js and every shell control is bound by js/bind_static.js, so
+// script-src is 'self'. The two inline style attributes (theme preview bar
+// heights) still need the attribute allowance on style-src. img-src names the
+// favicon service and the host it redirects to (www.google.com serves
+// /s2/favicons, which answers from *.gstatic.com), plus data: for the inline
+// SVG fallbacks. Everything else is denied by default: no plugins, no framing,
+// no base or form retargeting, and no referrer for the explorer's location
+// hash.
+const dashboardCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' https://www.google.com https://*.gstatic.com data:; connect-src 'self'; font-src 'self'; " +
+	"worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; object-src 'none'; " +
+	"base-uri 'none'; form-action 'self'"
 
 // Handler serves the cached dashboard shell with the canonical bootstrap
 // payload already present, avoiding a post-script round trip before first
@@ -304,9 +331,7 @@ func Handler(agg *AggAPI) http.Handler {
 		w.Header().Set("Cache-Control", "private, no-store")
 		// The shell is the one document that can host operator data, so it
 		// carries the whole policy: no framing, no plugins, no base/form
-		// retargeting, and no referrer for the explorer's location hash. The
-		// dashboard still uses authored inline handlers, so script-src is not
-		// claimed here; these directives hold today.
+		// retargeting, and no referrer for the explorer's location hash.
 		w.Header().Set("Content-Security-Policy", dashboardCSP)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -320,7 +345,7 @@ func Handler(agg *AggAPI) http.Handler {
 		// An inert application/json script is parsed by the existing JS boot.
 		payload, err := json.Marshal(agg.bootstrap(r.Context(), agg.buf.SnapshotSince(0)))
 		if err != nil {
-			log.Printf("dashboard: encode bootstrap: %v", err)
+			logging.Printf("", "dashboard: encode bootstrap: %v", err)
 			http.Error(w, "dashboard state unavailable", http.StatusInternalServerError)
 			return
 		}

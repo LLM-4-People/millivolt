@@ -14,7 +14,7 @@ traffic is healthy right now (throughput, latency, rate limits, errors, spend),
 to audit and debug individual requests after the fact, and secondarily to
 configure proxy behavior (pauses, limits, routing, debug sessions).
 
-## Product Purpose
+## Product purpose
 
 A self-hosted, OpenAI/Anthropic-compatible LLM proxy with the dashboard
 embedded in the same binary. It routes, translates and measures every request
@@ -31,7 +31,7 @@ API-key vault, no user accounts, no external analytics. Per-attempt
 observability is the differentiator: retries, absorbed failures, and in-band
 statuses a committed 200 hid are first-class facts.
 
-## Operating Context
+## Operating context
 
 Operators watch a live dashboard (health, chart, explorer, request log) with
 drill-down into a request drawer, filter by provider, model, client and key,
@@ -39,7 +39,7 @@ and manage pauses, limits, storm protection and debug sessions. A local or
 LAN-reachable instance (for example behind an internal hostname) is the normal
 deployment; the dashboard is used both at a desktop and on a phone.
 
-## Capabilities and Constraints
+## Capabilities and constraints
 
 - Go owns data semantics and the server-authoritative aggregates; browser JS
   mirrors are pinned to them by tests.
@@ -50,21 +50,21 @@ deployment; the dashboard is used both at a desktop and on a phone.
 - The owner's redesign constraint, quoted: "sentence case, no em dashes, must
   fit with the rest".
 
-## Brand Commitments
+## Brand commitments
 
 Name: millivolt. Copy voice: sentence case, lowercase labels, no em dashes,
 identifiers, protocol names and acronyms preserved. The dashboard keeps its
 dense, dark, accessible identity, and any redesigned component must read as
 part of the existing system rather than a bolted-on style.
 
-## Evidence on Hand
+## Evidence on hand
 
 - README.md and docs/dashboard.md, docs/operations.md, docs/architecture.md
   (dashboard design language, invariants, operations).
 - The live instance and its rendered history; the UI harness
   (tests/ui_harness/**) and Go web tests pin current behavior and geometry.
 
-## Product Principles
+## Product principles
 
 1. Measure every crossing; never mask what the provider said - the proxy
    discloses, it does not rewrite provider truth.
@@ -77,7 +77,7 @@ part of the existing system rather than a bolted-on style.
 5. Fast in the hand: live data stays live, controls respond immediately, and
    selection, scroll and focus survive updates.
 
-## Accessibility & Inclusion
+## Accessibility & inclusion
 
 The repo requires the dense, dark, accessible dashboard style: readable
 contrast in the dark palette, visible focus, keyboard-operable menus, touch

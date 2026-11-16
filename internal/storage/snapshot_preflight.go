@@ -69,7 +69,7 @@ func invalidPendingSnapshotFile(path, reason string) error {
 // otherwise create an empty database that passes preflight, and a later boot
 // would admit it over live history; an absent file is a missing snapshot
 // (errors.Is(err, fs.ErrNotExist)), never an empty one.
-func preflightPendingSnapshot(path string) error {
+func preflightPendingSnapshot(ctx context.Context, path string) error {
 	if err := checkPendingSnapshotFile(path); err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func preflightPendingSnapshot(path string) error {
 		db.Close()
 		return fmt.Errorf("journal_mode: got %q, want delete", mode)
 	}
-	if err := initializeDatabase(db, path); err != nil {
+	if err := initializeDatabase(ctx, db, path); err != nil {
 		db.Close()
 		return err
 	}
@@ -108,7 +108,7 @@ func preflightPendingSnapshot(path string) error {
 	// requests`), which would delete or rewrite accepted rows after the writer
 	// accounted them, so replacement admission rejects the whole set instead
 	// of trusting the writer probe (which reads its own sentinel back).
-	if err := preflightForeignTriggers(context.Background(), db); err != nil {
+	if err := preflightForeignTriggers(ctx, db); err != nil {
 		db.Close()
 		return err
 	}
@@ -119,7 +119,7 @@ func preflightPendingSnapshot(path string) error {
 	// before the fresh schema gained NOT NULL, and it stores any value class in
 	// any non-STRICT column (stream='abc', stream=2), so check the staged rows
 	// before any live file is touched.
-	if err := preflightRequestScanValues(context.Background(), db, "", "pending snapshot"); err != nil {
+	if err := preflightRequestScanValues(ctx, db, "", "pending snapshot"); err != nil {
 		db.Close()
 		return err
 	}
@@ -129,16 +129,16 @@ func preflightPendingSnapshot(path string) error {
 	// a BLOB or a blank id, a non-text payload, or a negative expiry. Such a
 	// row can never be fetched or swept while it still counts against
 	// debug_store_max_bytes. Reject the set before any live file is touched.
-	if err := preflightDebugSidecar(context.Background(), db, "", "pending snapshot"); err != nil {
+	if err := preflightDebugSidecar(ctx, db, "", "pending snapshot"); err != nil {
 		db.Close()
 		return err
 	}
-	// The legacy empty attempts spelling is a valid admission input (scans
-	// treat it as no attempts), but HasError/count/export/purge run json_each
-	// over the raw column. Canonicalize it to the writer's own no-value
+	// The legacy empty JSON spelling is a valid admission input (scans treat
+	// it as no value), but raw json_each/json_extract consumers run on the
+	// column. Canonicalize every such column to the writer's own no-value
 	// document in the staged file before any live file is touched; merge does
 	// the equivalent during its INSERT.
-	if err := canonicalizePendingAttempts(context.Background(), db); err != nil {
+	if err := canonicalizePendingJSON(ctx, db); err != nil {
 		db.Close()
 		return err
 	}
@@ -146,7 +146,7 @@ func preflightPendingSnapshot(path string) error {
 	// effective TPS source, folds only cost-bearing cost/token denominators and
 	// applies the checked integer arithmetic. Prove the whole staged snapshot
 	// produces representable totals before any live file is touched.
-	totals, err := readTotals(context.Background(), db)
+	totals, err := readTotals(ctx, db)
 	if err != nil {
 		db.Close()
 		return fmt.Errorf("pending snapshot aggregate totals: %w", err)
@@ -242,20 +242,24 @@ func preflightDebugSidecar(ctx context.Context, db mergeConn, schema, label stri
 	return nil
 }
 
-// canonicalizePendingAttempts turns the legacy empty attempts spelling into the
+// canonicalizePendingJSON turns the legacy empty JSON spelling into the
 // writer's canonical no-value document in a staged replacement. The empty
-// spelling is admission-compatible for scans, but HasError's json_each over the
-// raw column would fail on it. A missing legacy attempts column needs no work.
-func canonicalizePendingAttempts(ctx context.Context, db *sql.DB) error {
+// spelling is admission-compatible for scans, but a raw JSON consumer would
+// fail on it. A legacy database missing one of the columns needs no work for
+// that column.
+func canonicalizePendingJSON(ctx context.Context, db *sql.DB) error {
 	columns, err := tableColumnSet(ctx, db, "", "requests")
 	if err != nil {
 		return err
 	}
-	if _, ok := columns["attempts"]; !ok {
-		return nil
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE requests SET attempts = 'null' WHERE attempts = ''`); err != nil {
-		return fmt.Errorf("canonicalize pending attempts: %w", err)
+	for _, column := range jsonNoValueColumns {
+		if _, ok := columns[column]; !ok {
+			continue
+		}
+		q := `UPDATE requests SET ` + column + ` = ` + canonicalJSONExpr(column) + ` WHERE ` + column + ` = ''`
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("canonicalize pending %s: %w", column, err)
+		}
 	}
 	return nil
 }
@@ -268,8 +272,8 @@ const writerProbeIDAttempts = 16
 // probeWriterInsert proves the staged database accepts the writer's exact
 // INSERT: the shared column list, conflict target and value ordering. The row
 // is rolled back, so preflight leaves no data behind.
-func probeWriterInsert(db *sql.DB) error {
-	tx, err := db.Begin()
+func probeWriterInsert(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -283,7 +287,7 @@ func probeWriterInsert(db *sql.DB) error {
 	free := false
 	for suffix := 0; suffix < writerProbeIDAttempts; suffix++ {
 		var exists int
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests WHERE id = ?)`, probeID).Scan(&exists); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM requests WHERE id = ?)`, probeID).Scan(&exists); err != nil {
 			return err
 		}
 		if exists == 0 {

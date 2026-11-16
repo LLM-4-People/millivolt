@@ -5,14 +5,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // MergeSnapshot inserts snapshot rows whose ids are not already in the live
@@ -349,7 +350,7 @@ func (s *Store) mergeDebugTable(ctx context.Context, db mergeConn) (int64, error
 		return 0, err
 	}
 	if remaining := s.debugMaxBytes - current; incomingBytes > remaining {
-		log.Printf("storage: backup merge skipped %d debug captures (%d bytes) over the %d-byte store cap",
+		logging.Printf("", "storage: backup merge skipped %d debug captures (%d bytes) over the %d-byte store cap",
 			incomingRows, incomingBytes, s.debugMaxBytes)
 		return 0, nil
 	}
@@ -387,12 +388,12 @@ func mergeAttachedTableWhere(ctx context.Context, db mergeConn, table, where str
 	selects := make([]string, len(cols))
 	for i, col := range cols {
 		quoted := `incoming."` + col + `"`
-		// Merge owns canonicalization of JSON-bearing columns: the legacy
-		// empty spelling becomes the canonical no-value document, while a
-		// non-empty value already passed preflight's json_valid check and is
-		// copied byte-for-byte.
-		if table == "requests" && col == "attempts" {
-			quoted = `CASE WHEN incoming."attempts" IS NULL OR incoming."attempts" = '' THEN 'null' ELSE incoming."attempts" END`
+		// Merge owns canonicalization of the JSON columns: the legacy empty
+		// spelling becomes the canonical no-value document, while a non-empty
+		// value already passed preflight's json_valid check and is copied
+		// byte-for-byte.
+		if table == "requests" && slices.Contains(jsonNoValueColumns, col) {
+			quoted = canonicalJSONExpr(quoted)
 		}
 		// Merge also closes the reintroduction gap for the pre-0.3.34 TTFT
 		// anchor: a backup merged after the live database completed the boot

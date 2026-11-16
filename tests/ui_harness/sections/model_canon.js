@@ -4,11 +4,28 @@ module.exports = async function modelCanon(H) {
   const {DEF_RULES, cfgDoc, check, d, modelFixture, path, rows, settleUntil, w} = H;
   const state = H.state;
 
+  // Pane controls are repainted by the page's own poll, so a press waits for its
+  // node instead of dereferencing whatever the last render left behind.
+  const clickWait = async sel => {
+    await settleUntil(() => !!d.querySelector(sel));
+    d.querySelector(sel).click();
+  };
+
   const canonCases = [
     ['glm-5.3', 'glm-5-3'], ['glm-5-3', 'glm-5-3'], ['GLM-5.3', 'glm-5-3'],
     ['moonshotai/kimi-k3', 'kimi-k3'], ['moonshotai/kimi-k3:nube', 'kimi-k3'],
     ['z-ai/glm-5.3-flash:crofai', 'glm-5-3-flash'],
-    ['deepseek-v4-pro-0813', 'deepseek-v4-pro-0813'],
+    ['deploy-ai/deepseek-ai/deepseek-v4.1-flash-1017', 'deepseek-v4-1-flash'],
+    ['deepseek-v4-pro-0813', 'deepseek-v4-pro'],
+    ['deepseek-v4.1-flash-fast', 'deepseek-v4-1-flash'],
+    ['deepseek-v4.1-flash-fast-fp4', 'deepseek-v4-1-flash'],
+    ['deepseek-v4.1-flash-value', 'deepseek-v4-1-flash'],
+    ['step-5-preview-free', 'step-5'],
+    ['glm-5.3-flash', 'glm-5-3-flash'],
+    ['deepseek-v4.1-flash-1017-abliterated', 'deepseek-v4-1-flash-1017-abliterated'],
+    ['Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4', 'qwen2-5-72b-instruct'],
+    ['cursor-grok-4.6-xhigh-fast', 'cursor-grok-4-6'],
+    ['grok-4-fast', 'grok-4'],
     ['glm-5.3-fp4', 'glm-5-3'], ['glm-5.3-nvfp4', 'glm-5-3'], ['GLM-5.3-NXFP4', 'glm-5-3'],
     ['llama-3.3-70b-int8', 'llama-3-3-70b'], ['qwen2.5-72b-q4_k_m', 'qwen2-5-72b'],
     ['gemma-3-27b', 'gemma-3-27b'],
@@ -22,29 +39,46 @@ module.exports = async function modelCanon(H) {
     ['kimi-k3', 'kimi-k3'], ['deepseek-v4-pro', 'deepseek-v4-pro'], ['grok-4.6', 'grok-4-6'],
   ]));
   w.applyModelCanon(modelFixture(DEF_RULES, canonNames), true);
-  // Debug model checklist: spelling variants of the same model must render as
-  // ONE checkbox (grouped display; a session stores the raw spellings and the
-  // server matches them canonically through the cursor base name), and the
-  // models box must share the clients/providers structure - nesting
-  // it under .clear-opts used to stack the checkbox ABOVE the label (the
-  // .clear-opts label rule out-specifies .pause-check).
-  const dfm = d.getElementById('df-models');
-  check('models checklist sits in the pause-known structure', !!dfm.closest('.pause-known') && !dfm.closest('.clear-opts'));
-  w.eval("debugState.known_models = ['glm-5-3','glm-5.3','glm-5-3-flash','glm-5.3-flash','kimi-k3','moonshotai/kimi-k3','moonshotai/kimi-k3:nube','deepseek-v4-pro','deepseek-v4-pro-0813','grok-4.6']");
-  w.fillDebugChecks(dfm, w.eval('debugState.known_models').slice().sort(), new Set(), 'model');
-  const mboxes = [...dfm.querySelectorAll('input[type=checkbox]')];
-  check('spelling variants merge into one checkbox each',
-    mboxes.length === 6 && mboxes.every(b => ['deepseek-v4-pro','deepseek-v4-pro-0813','glm-5-3','glm-5-3-flash','grok-4.6','kimi-k3'].includes(b.value)));
-  check('a multi-variant group shows the bare spelling', !!dfm.querySelector('input[value="kimi-k3"]'));
-  dfm.querySelector('input[value="kimi-k3"]').checked = true;
-  const expanded = w.selectedDebugModels();
-  check('checking a group expands to every raw spelling',
-    expanded.length === 3 && expanded.includes('kimi-k3') && expanded.includes('moonshotai/kimi-k3') && expanded.includes('moonshotai/kimi-k3:nube'));
-  // The picked Set must come from the WINDOW realm (fillDebugChecks checks
-  // `picked instanceof Set` - a Node-realm Set is cross-realm and fails it).
-  w.fillDebugChecks(dfm, w.eval('debugState.known_models').slice().sort(), w.eval("new Set(['glm-5.3'])"), 'model');
-  check('editing a session with a raw spelling re-checks its group', dfm.querySelector('input[value="glm-5-3"]').checked);
-  w.eval("debugState.known_models = ['m']");
+  // The console capture composer is the one model picker: known models are
+  // folded into canonical groups and every raw spelling is offered, because a
+  // capture scopes the EXACT spelling the server stored. Selecting one variant
+  // writes that spelling into capture.models, never the canonical group name.
+  // ocKnownValues('models') reads the throttle state's known vocabulary; it is
+  // seeded directly here because applyThrottleState currently drops the
+  // server's known_clients/known_models fields (reported separately).
+  {
+    const known = ['glm-5-3', 'glm-5.3', 'glm-5-3-flash', 'glm-5.3-flash', 'kimi-k3',
+      'moonshotai/kimi-k3', 'moonshotai/kimi-k3:nube', 'deepseek-v4-pro',
+      'deepseek-v4-pro-0813', 'grok-4.6'];
+    w.__knownModels = known;
+    w.eval('throttleState = {...throttleState, known_models: window.__knownModels}');
+    w.openOperatorConsole('capture');
+    await clickWait('#oc-pane [data-oc-new="capture"]');
+    await clickWait('#oc-pane [data-oc-pick="models"]');
+    const rows = [...d.querySelectorAll('#oc-pane [data-oc-pick-value="models"]')]
+      .map(row => row.dataset.ocValue);
+    const grouped = w.eval('groupByCanonical(window.__knownModels).flatMap(g => g.variants).sort()');
+    check('the console capture picker lists every canonical-group variant',
+      JSON.stringify(rows) === JSON.stringify(grouped) && rows.length === 10 &&
+      rows.includes('glm-5.3') && rows.includes('glm-5-3') &&
+      rows.includes('moonshotai/kimi-k3:nube'));
+    // The picker's declared selection contract: a draft carrying the exact raw
+    // spelling marks that variant checked. (The click-to-toggle path for
+    // pause/capture drafts is broken in production and reported separately;
+    // this pins the value/check contract without hiding it.)
+    w.ocOpenOperatorForRecord('capture', {
+      id: 'model-pick', provider: 'p', client: 'c', model: 'moonshotai/kimi-k3:nube',
+    });
+    await clickWait('#oc-pane [data-oc-pick="models"]');
+    check('a capture draft keeps the exact model spelling and checks its picker row',
+      JSON.stringify(w.eval('ocDrafts.capture.scope.models')) === JSON.stringify(['moonshotai/kimi-k3:nube']) &&
+      d.querySelector('#oc-pane [data-oc-pick-value="models"][data-oc-value="moonshotai/kimi-k3:nube"]')
+        .getAttribute('aria-checked') === 'true');
+    w.closeOperatorConsole();
+    w.eval("ocDrafts.capture = null; ocView = {kind: '', id: ''}");
+    delete w.__knownModels;
+    w.eval('throttleState = {...throttleState, known_models: undefined}');
+  }
 
   // ---- model canonicalization: the observer dictionary contract ----
   // The same case table as Go's TestCanonicalModel pins the lockstep
@@ -58,9 +92,9 @@ module.exports = async function modelCanon(H) {
   // both sides through the cursor base name (debug.go modelIn).
   check('canonicalModel mirrors config.ApplyModelRules (default pipeline)',
     canonCases.every(([raw, want]) => w.canonicalModel(raw) === want));
-  w.applyModelCanon(modelFixture([{mode: 'exact', from: 'deepseek-v4-pro-0813', to: 'deepseek-v4-pro'}].concat(DEF_RULES), {...canonNames, 'deepseek-v4-pro-0813': 'deepseek-v4-pro'}), true);
+  w.applyModelCanon(modelFixture([{mode: 'exact', from: 'deepseek-v4-1-flash-1017-abliterated', to: 'deepseek-v4-1-flash'}].concat(DEF_RULES), {...canonNames, 'deepseek-v4-1-flash-1017-abliterated': 'deepseek-v4-1-flash'}), true);
   check('an exact rule merges what the generic pipeline cannot',
-    w.canonicalModel('deepseek-v4-pro-0813') === 'deepseek-v4-pro' &&
+    w.canonicalModel('deepseek-v4-1-flash-1017-abliterated') === 'deepseek-v4-1-flash' &&
     w.eval("canonicalModel('GLM-5.3')") === 'glm-5-3');
   w.applyModelCanon(modelFixture(), true);
   check('an empty rule pipeline = identity grouping', w.canonicalModel('GLM-5.3') === 'GLM-5.3' && w.canonicalModel(' glm-5.3 ') === 'glm-5.3');
@@ -80,39 +114,61 @@ module.exports = async function modelCanon(H) {
     w.recordMatchesDim({ model: 'glm-5.3' }, 'model', 'glm-5-3') === true &&
     w.recordMatchesDim({ model: 'glm-5-3' }, 'model', 'glm-5-3') === true &&
     w.recordMatchesDim({ model: 'grok-4.6' }, 'model', 'glm-5-3') === false);
-  // The debug checklist re-groups through the SAME rules: with an exact
-  // rule live, the two deepseek spellings collapse into one checkbox.
-  w.applyModelCanon(modelFixture([{mode: 'exact', from: 'deepseek-v4-pro-0813', to: 'deepseek-v4-pro'}].concat(DEF_RULES), {...canonNames, 'deepseek-v4-pro-0813': 'deepseek-v4-pro'}), true);
-  w.eval("debugState.known_models = ['deepseek-v4-pro', 'deepseek-v4-pro-0813', 'grok-4.6']");
-  w.fillDebugChecks(dfm, w.eval('debugState.known_models').slice().sort(), new Set(), 'model');
-  check('a config rule re-groups the debug checklist',
-    dfm.querySelectorAll('input[type=checkbox]').length === 2);
+  // The capture picker re-groups through the SAME rules: with an exact rule
+  // live, the two deepseek spellings fold into one canonical group, but each
+  // raw variant stays selectable so the wire keeps the exact spelling.
+  w.applyModelCanon(modelFixture([{mode: 'exact', from: 'deepseek-v4-1-flash-1017-abliterated', to: 'deepseek-v4-1-flash'}].concat(DEF_RULES), {...canonNames, 'deepseek-v4-1-flash-1017-abliterated': 'deepseek-v4-1-flash'}), true);
+  {
+    w.__knownModels = ['deepseek-v4-1-flash', 'deepseek-v4-1-flash-1017-abliterated', 'grok-4.6'];
+    w.eval('throttleState = {...throttleState, known_models: window.__knownModels}');
+    w.openOperatorConsole('capture');
+    await clickWait('#oc-pane [data-oc-new="capture"]');
+    await clickWait('#oc-pane [data-oc-pick="models"]');
+    check('a config rule groups the capture picker variants under one canonical key',
+      w.eval("groupByCanonical(window.__knownModels).length") === 2 &&
+      d.querySelectorAll('#oc-pane [data-oc-pick-value="models"]').length === 3);
+    w.closeOperatorConsole();
+    w.eval("ocDrafts.capture = null; ocView = {kind: '', id: ''}");
+    delete w.__knownModels;
+    w.eval('throttleState = {...throttleState, known_models: undefined}');
+  }
   w.applyModelCanon(modelFixture(DEF_RULES, canonNames), true);
   w.eval("debugState.known_models = ['m']");
   // The shared delete/download model select (populateFilterMenu fills the
-  // logs menu and the settings delete block alike): spelling variants
-  // cluster under a canonical <optgroup>, but every <option> keeps its RAW
-  // value (exact delete).
-  const modelSelHTML = w.eval(`(() => {
-    const saved = lastData;
-    lastData = { records: [{ model: 'glm-5.3' }, { model: 'glm-5-3' }, { model: 'grok-4.6' }] };
-    populateFilterMenu('lf');
-    const html = document.getElementById('lf-model').innerHTML;
-    lastData = saved;
-    return html;
-  })()`);
+  // settings sheet's delete block, the surviving filter surface): spelling
+  // variants cluster under a canonical <optgroup>, but every <option> keeps
+  // its RAW value (exact delete).
+  const filterHost = d.createElement('div');
+  filterHost.innerHTML = w.eval('settingsDeleteRowHTML()');
+  d.body.appendChild(filterHost);
+  let modelSelHTML, clientSelHTML;
+  try {
+    modelSelHTML = w.eval(`(() => {
+      const saved = lastData;
+      lastData = { records: [{ model: 'glm-5.3' }, { model: 'glm-5-3' }, { model: 'grok-4.6' }] };
+      populateFilterMenu('del');
+      const html = document.getElementById('del-model').innerHTML;
+      lastData = saved;
+      return html;
+    })()`);
+  } finally { filterHost.remove(); }
   check('filter model options cluster variants under canonical optgroups',
     modelSelHTML.includes('<optgroup label="glm-5-3 (2)"') &&
     modelSelHTML.includes('value="glm-5.3"') && modelSelHTML.includes('value="glm-5-3"') &&
     modelSelHTML.includes('value="grok-4.6"') && !modelSelHTML.includes('value="glm-5-3 (2)"'));
-  const clientSelHTML = w.eval(`(() => {
-    const saved = lastData;
-    lastData = { records: [{ client: 'opencode/1.18.32' }, { client: 'team/2fa' }] };
-    populateFilterMenu('lf');
-    const html = document.getElementById('lf-client').innerHTML;
-    lastData = saved;
-    return html;
-  })()`);
+  const clientHost = d.createElement('div');
+  clientHost.innerHTML = w.eval('settingsDeleteRowHTML()');
+  d.body.appendChild(clientHost);
+  try {
+    clientSelHTML = w.eval(`(() => {
+      const saved = lastData;
+      lastData = { records: [{ client: 'opencode/1.18.32' }, { client: 'team/2fa' }] };
+      populateFilterMenu('del');
+      const html = document.getElementById('del-client').innerHTML;
+      lastData = saved;
+      return html;
+    })()`);
+  } finally { clientHost.remove(); }
   check('client filter labels show the recorded identity while preserving exact values',
     clientSelHTML.includes('<option value="opencode/1.18.32">opencode/1.18.32</option>') &&
     clientSelHTML.includes('<option value="team/2fa">team/2fa</option>'));
@@ -288,15 +344,15 @@ module.exports = async function modelCanon(H) {
     const tpl = wrap.querySelector('.mr-tpl');
     const tplLabels = [...tpl.options].map(o => o.textContent).join(',');
     check('the template menu derives the five shipped rules plus the custom starters',
-      tpl.options.length === 8 && tplLabels === 'add from template…,lowercase fold,strip vendor/ prefix,strip :tag suffix,strip architecture/quant suffix (fp4, nvfp4, int8, q4_k_m…),unify . and - between digits,exact merge…,custom pattern…');
+      tpl.options.length === 8 && tplLabels === 'add from template…,lowercase fold,strip vendor/ prefixes,strip :tag suffixes,strip serving decorations (quant, tier, build…),unify . and - between digits,exact merge…,custom pattern…');
     tpl.value = '1';
     tpl.dispatchEvent(new w.Event('change', { bubbles: true }));
     const rows = [...wrap.querySelectorAll('.mr-row')];
     check('a template appends its pre-filled rule',
-      rows.length === 2 && rows[1].querySelector('.mr-from').value === '^[a-z0-9][a-z0-9._-]*/');
+      rows.length === 2 && rows[1].querySelector('.mr-from').value === '^(?:[a-z0-9][a-z0-9._-]*/)+');
     check('a shipped template carries the server doc payload, not a client copy',
       rows[1].querySelector('.mr-mode').value === 'pattern' && rows[1].querySelector('.mr-to').value === '' &&
-      JSON.stringify(w.eval('settingsDoc.defaults.model_rules[1]')) === JSON.stringify({ mode: 'pattern', from: '^[a-z0-9][a-z0-9._-]*/', to: '' }));
+      JSON.stringify(w.eval('settingsDoc.defaults.model_rules[1]')) === JSON.stringify({ mode: 'pattern', from: '^(?:[a-z0-9][a-z0-9._-]*/)+', to: '' }));
     wrap.querySelector('[data-mr-restore]').click();
     const defRows = [...wrap.querySelectorAll('.mr-row')];
     check('restore-defaults replaces the draft with the shipped pipeline',
@@ -337,6 +393,14 @@ module.exports = async function modelCanon(H) {
     live = d.getElementById('settings-live').textContent;
     check('no last_reload row renders before the first server apply',
       !/last apply/.test(live) && /listen/.test(live) && /store/.test(live) && /write/.test(live));
+    // A staged database restore is a system fact: it lands on restart and must
+    // be visible beside the other runtime facts, not only in the backup pane.
+    w.__lrPending = JSON.parse(JSON.stringify(cfgDoc));
+    w.__lrPending.backup = { config: true, database: true, requests: 4, pending_database: true };
+    w.eval('fillSettingsLive(window.__lrPending)');
+    check('a staged database restore is named in the system facts',
+      /staged/.test(d.getElementById('settings-live').textContent) &&
+      /database restore/.test(d.getElementById('settings-live').textContent));
     w.__lrJunk = JSON.parse(JSON.stringify(cfgDoc));
     w.__lrJunk.last_reload = { ok: true, at: 'not-a-time' };
     w.eval('fillSettingsLive(window.__lrJunk)');
@@ -559,6 +623,76 @@ module.exports = async function modelCanon(H) {
       calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1') && c.u.includes('database=1') && !c.u.includes('config=1')));
     check('restore refreshes settings even when a database restart is pending',
       calls.some(c => c.u.includes('/admin/config') && c.method === 'GET'));
+    // A restore applies only after one confirmation naming the members, the
+    // mode and the missing rollback. Cancel writes nothing and the sheet lives.
+    {
+      if (w.eval('settingsIsOpen()')) await w.openSettings(); // the ternary closes when open
+      await w.openSettings();
+      await settleUntil(() => !!w.eval('settingsIsOpen()'));
+      calls.length = 0;
+      w.eval("backupInspect = { file: new Blob(['x']), data: { config: { present: true }, database: { present: true, inspectable: true, requests: 1 } } }");
+      w.runBackupApply();
+      await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
+      const dlg = d.getElementById('oc-confirm-dialog');
+      check('the restore asks first and names the member, mode and the missing rollback (' + (dlg ? dlg.textContent.slice(0, 120) : 'no dialog') + '|' + w.eval('settingsIsOpen()') + '|' + d.getElementById('settings-count').textContent + ')',
+        !!dlg && /database/.test(dlg.textContent) && !/config/.test(dlg.textContent) &&
+        /cannot be undone/.test(dlg.textContent) &&
+        dlg.querySelector('[data-oc-confirm="ok"]').textContent === 'restore');
+      dlg.querySelector('[data-oc-confirm="cancel"]').click();
+      await settleUntil(() => !!w.eval('settingsIsOpen()'));
+      check('a cancelled restore writes nothing and puts the sheet back',
+        !calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1')) &&
+        !!w.eval('settingsIsOpen()'));
+      calls.length = 0;
+      w.eval("backupInspect = { file: new Blob(['x']), data: { config: { present: true }, database: { present: true, inspectable: true, requests: 1 } } }");
+      w.runBackupApply();
+      await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
+      d.getElementById('oc-confirm-dialog').querySelector('[data-oc-confirm="ok"]').click();
+      check('a confirmed restore posts and the sheet comes back',
+        await settleUntil(() => calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1') && c.u.includes('database=1'))) &&
+        await settleUntil(() => !!w.eval('settingsIsOpen()')));
+      await settleUntil(() => !d.getElementById('btn-backup-apply')?.dataset.busy);
+      // A database-only restore leaves the config alone, so an open dirty
+      // config draft is still valid: the refill must not discard it, while a
+      // config restore must.
+      {
+        const savedFetchSettings = w.fetchSettings;
+        const discards = [];
+        w.fetchSettings = discard => { discards.push(discard); return savedFetchSettings(discard); };
+        try {
+          w.eval('backupIncludeConfig = false; backupIncludeDatabase = true');
+          w.eval("backupInspect = { file: new Blob(['x']), data: { config: { present: true }, database: { present: true, inspectable: true, requests: 1 } } }");
+          w.runBackupApply();
+          await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
+          d.getElementById('oc-confirm-dialog').querySelector('[data-oc-confirm="ok"]').click();
+          await settleUntil(() => discards.length > 0);
+          check('a database-only restore keeps the config draft', discards[discards.length - 1] === false);
+          discards.length = 0;
+          w.eval('backupIncludeConfig = true; backupIncludeDatabase = true');
+          w.eval("backupInspect = { file: new Blob(['x']), data: { config: { present: true }, database: { present: true, inspectable: true, requests: 1 } } }");
+          w.runBackupApply();
+          await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
+          d.getElementById('oc-confirm-dialog').querySelector('[data-oc-confirm="ok"]').click();
+          await settleUntil(() => discards.length > 0);
+          check('a config restore discards the stale draft', discards[discards.length - 1] === true);
+        } finally {
+          w.fetchSettings = savedFetchSettings;
+        }
+      }
+      w.closeSettings(true);
+    }
+    // A failed restore must read as an error, not as an informational line:
+    // the status tone is the only difference between "restored" and "did not".
+    w.fetch = (url, opts) => String(url).includes('/admin/restore')
+      ? Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'restore blew up' }) })
+      : originalFetch(url, opts);
+    w.eval("backupInspect = { file: new Blob(['x']), data: { config: { present: true }, database: { present: false } } };");
+    d.getElementById('backup-include-config').checked = true;
+    d.getElementById('backup-include-config').dispatchEvent(new w.Event('change', { bubbles: true }));
+    w.runBackupApply();
+    await settleUntil(() => /restore blew up/.test(d.getElementById('settings-count').textContent));
+    check('a failed restore paints the settings status as an error',
+      d.getElementById('settings-count').dataset.tone === 'error');
     w.fetch = originalFetch;
     w.HTMLAnchorElement.prototype.click = origClick;
     // A store-less preview carries the database member but marks it

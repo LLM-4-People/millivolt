@@ -43,6 +43,7 @@ type options struct {
 	chunks, upstreams               int
 	maxRSS                          float64
 	token                           string
+	allowDrops                      bool
 }
 
 func main() {
@@ -57,6 +58,7 @@ func main() {
 	flag.DurationVar(&o.timeout, "timeout", 10*time.Second, "per-request, accounting-drain and final fixture-cleanup timeout")
 	flag.DurationVar(&o.sample, "sample", 100*time.Millisecond, "proxy CPU/RSS/FD sampling cadence")
 	flag.Float64Var(&o.maxRSS, "max-rss-mib", 2048, "stop the ramp if sampled proxy RSS exceeds this safety budget")
+	flag.BoolVar(&o.allowDrops, "allow-drops", false, "treat a confirmed durable-queue drop as an overload observation instead of stopping the ramp; response failures and unbalanced accounting still stop it")
 	// The final fixture cleanup purges through the gated operator plane, so
 	// the tool needs the same credential the dev instance was started with.
 	o.token = operatorTokenFromEnv()
@@ -328,11 +330,10 @@ func (c control) clearClients(ctx context.Context, tags []string, sample time.Du
 		if err := verify(ctx); err != nil {
 			return err
 		}
-		// The administrative filter's client field is an exact match. Encode a
-		// nonempty object, never an empty body (which means all history).
-		body, err := json.Marshal(struct {
-			Client string `json:"client"`
-		}{tag})
+		// The administrative predicate travels under "filter" in the published
+		// wire shape (mcp.PurgeFilterInput owns it); an empty body would mean
+		// all history. The client field is an exact match.
+		body, err := json.Marshal(mcp.PurgeFilterInput{Client: tag}.Body(nil))
 		if err != nil {
 			return err
 		}
@@ -346,12 +347,14 @@ func (c control) clearClients(ctx context.Context, tags []string, sample time.Du
 		if err != nil {
 			return err
 		}
+		// The success document is the store's PurgeResult; it carries no "ok".
 		var result struct {
-			OK bool `json:"ok"`
+			Deleted       int64 `json:"deleted"`
+			BufferRemoved int   `json:"buffer_removed"`
 		}
 		decodeErr := json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || decodeErr != nil || !result.OK {
+		if resp.StatusCode != http.StatusOK || decodeErr != nil {
 			return fmt.Errorf("fixture cleanup failed for %s (HTTP %d)", tag, resp.StatusCode)
 		}
 	}
@@ -763,7 +766,11 @@ func run(ctx context.Context, o options) (err error) {
 		clients = append(clients, localClient(o.timeout, transport))
 	}
 	enc := json.NewEncoder(os.Stdout)
-	if err := enc.Encode(map[string]any{"kind": "workload", "pid": pid, "target": c.base, "model": "closed-loop", "stream_duration": o.hold.String(), "chunks": o.chunks, "duration_per_level": o.duration.String(), "upstreams": o.upstreams, "source_ips": o.sources, "performance_settings": performanceSettings(cfg.Effective)}); err != nil {
+	// The fixture shape is published beside the results, so the run records the
+	// exact frame count, usage and unit cost it drove rather than leaving the
+	// page to restate defaults that can drift. Output tokens per request are the
+	// frame count, the same value the usage line emits.
+	if err := enc.Encode(map[string]any{"kind": "workload", "pid": pid, "target": c.base, "model": "closed-loop", "stream_duration": o.hold.String(), "chunks": o.chunks, "fixture_input_tokens": fixtureInputTokens, "fixture_cost": fixtureCost, "duration_per_level": o.duration.String(), "upstreams": o.upstreams, "source_ips": o.sources, "performance_settings": performanceSettings(cfg.Effective)}); err != nil {
 		return err
 	}
 	durable := cfg.Effective["db_path"] != ""
@@ -788,13 +795,22 @@ func run(ctx context.Context, o options) (err error) {
 				}
 			}
 		}
+		if o.allowDrops && r.StorageDropped != nil {
+			// An overload observation cannot also verify per-row tokens and
+			// cost for rows the bounded queue dropped. The invariant it can
+			// verify is the one the page publishes: durable plus dropped equals
+			// the successful requests.
+			r.AccountingOK = r.AccountingComparable &&
+				r.DurableRequests+int64(*r.StorageDropped) == int64(r.Successes)
+		}
 		if e := enc.Encode(r); e != nil {
 			return e
 		}
 		if err != nil {
 			return err
 		}
-		if r.Failures > 0 || (durable && !r.AccountingOK) || (r.StorageDropped != nil && *r.StorageDropped > 0) {
+		if r.Failures > 0 || (durable && !r.AccountingOK) ||
+			(r.StorageDropped != nil && *r.StorageDropped > 0 && !o.allowDrops) {
 			return errors.New("ramp stopped: response or durable-accounting failure")
 		}
 	}

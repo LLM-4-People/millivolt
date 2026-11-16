@@ -28,9 +28,12 @@ function addAliasRow(row) {
 // list is filled by syncProvMenuList, which excludes providers already added.
 function providersAddHTML() {
   return `<span class="prov-top"><button type="button" class="btn" data-prov-menu-toggle aria-haspopup="menu" aria-expanded="false">+ add provider</button>` +
-    `<span class="prov-menu" hidden role="menu">` +
+    `<span class="prov-menu" hidden role="menu" aria-label="add provider">` +
     `<span class="prov-menu-list"></span>` +
-    `<span class="prov-menu-custom"><input class="prov-new-label" placeholder="custom label - e.g. nano-gpt.com" aria-label="custom provider label"><button type="button" class="btn prov-addbtn" data-prov-add aria-label="add provider">+</button></span>` +
+    /* The menu holds one free-text field, which is not a menuitem: the group
+       names it so the row is announced as a field of this menu rather than a
+       second, nameless list. */
+    `<span class="prov-menu-custom" role="group" aria-label="custom provider"><input class="prov-new-label" placeholder="custom label - e.g. nano-gpt.com" aria-label="custom provider label"><button type="button" class="btn prov-addbtn" data-prov-add aria-label="add provider">+</button></span>` +
     `</span></span>`;
 }
 
@@ -47,7 +50,7 @@ function syncProvMenuList(row) {
   if (!list) return;
   const taken = new Set([...row.querySelectorAll('.st-prov .sp-label')].map(l => l.value.trim()));
   const known = (typeof pauseState === 'object' && pauseState && Array.isArray(pauseState[KNOWN_PROVIDERS_KEY])) ? pauseState[KNOWN_PROVIDERS_KEY] : [];
-  list.innerHTML = known.filter(p => !taken.has(p)).map(p => `<button type="button" class="prov-menu-item" data-prov-pick="${escapeHtml(p)}" role="menuitem"><span class="prov-ic" style="--ent:${ENTITY_TYPES.provider.color}" aria-hidden="true">☁</span>${escapeHtml(p)}</button>`).join('');
+  list.innerHTML = known.filter(p => !taken.has(p)).map(p => `<button type="button" class="prov-menu-item" data-prov-pick="${escapeHtml(p)}" role="menuitem"><span class="prov-ic" style="--ent:${ENTITY_TYPES.provider.color};--ent-ink:${ENTITY_TYPES.provider.ink}" aria-hidden="true">${ENTITY_TYPES.provider.icon}</span>${escapeHtml(p)}</button>`).join('');
 }
 
 // INPUT_FLASH_MS is the invalid-input red flash: long enough to register,

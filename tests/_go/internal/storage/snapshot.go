@@ -140,9 +140,7 @@ func TestOpenQuarantinesInvalidPendingSnapshot(t *testing.T) {
 	if _, err := os.Stat(incoming); !os.IsNotExist(err) {
 		t.Fatal("invalid pending was not consumed")
 	}
-	if _, err := os.Stat(incoming + ".invalid"); err != nil {
-		t.Fatalf("invalid pending was not quarantined: %v", err)
-	}
+	requireQuarantined(t, incoming)
 	got, err := reopened.LoadRecent(t.Context(), 10)
 	if err != nil {
 		t.Fatal(err)
@@ -208,9 +206,7 @@ func TestOpenQuarantinesIncompatiblePendingSnapshot(t *testing.T) {
 	if _, err := os.Stat(incoming); !os.IsNotExist(err) {
 		t.Fatal("incompatible pending was not consumed")
 	}
-	if _, err := os.Stat(incoming + ".invalid"); err != nil {
-		t.Fatalf("incompatible pending was not quarantined: %v", err)
-	}
+	requireQuarantined(t, incoming)
 	if _, err := os.Stat(dstPath + ".previous"); !os.IsNotExist(err) {
 		t.Fatal("rejected pending left a rollback sibling")
 	}
@@ -278,6 +274,75 @@ func TestPendingSnapshotRollbackRestoresLiveDatabase(t *testing.T) {
 	}
 }
 
+// TestAdmitPendingSnapshotReadmitsThePreservedSibling pins the boot half of
+// the preserve contract: a crash after the pre-existing pending snapshot was
+// preserved and its successor published leaves the successor in the slot and
+// the queued snapshot only as a preserved sibling. When the successor is
+// rejected, the sibling is the queue entry and must be re-admitted instead of
+// aging out under the 24 h sweep.
+func TestAdmitPendingSnapshotReadmitsThePreservedSibling(t *testing.T) {
+	dir := t.TempDir()
+	dstPath := filepath.Join(dir, "dst.db")
+	incoming := PendingSnapshotPath(dstPath)
+	if err := os.WriteFile(incoming, packedSnapshot(t, "queued"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(dir, ".millivolt-restore-pending-queued")
+	if err := os.Link(incoming, sibling); err != nil {
+		t.Fatal(err)
+	}
+	// The successor replaces the slot by rename, the way publishSnapshot does,
+	// so the preserved name keeps the queued inode.
+	successor := filepath.Join(dir, "successor.tmp")
+	if err := os.WriteFile(successor, []byte("not a database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(successor, incoming); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := admitPendingSnapshot(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admission == nil {
+		t.Fatal("the preserved sibling was never re-admitted")
+	}
+	defer admission.rollback()
+	if ids := readRequestIDs(t, dstPath); len(ids) != 1 || ids[0] != "queued" {
+		t.Fatalf("installed ids = %v, want the queued snapshot's [queued]", ids)
+	}
+	if _, err := os.Stat(sibling); !os.IsNotExist(err) {
+		t.Fatal("the re-admitted sibling still exists")
+	}
+}
+
+// TestAdmitPendingSnapshotReadmitsASiblingWithAnEmptySlot is the preserve
+// fallback's crash window: when link(2) is unavailable the slot is moved aside,
+// so a crash before the successor publishes leaves the sibling and no slot. The
+// sibling is still the queue entry and is re-admitted.
+func TestAdmitPendingSnapshotReadmitsASiblingWithAnEmptySlot(t *testing.T) {
+	dir := t.TempDir()
+	dstPath := filepath.Join(dir, "dst.db")
+	sibling := filepath.Join(dir, ".millivolt-restore-pending-queued")
+	if err := os.WriteFile(sibling, packedSnapshot(t, "queued"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := admitPendingSnapshot(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admission == nil {
+		t.Fatal("the preserved sibling beside an empty slot was never re-admitted")
+	}
+	defer admission.rollback()
+	if ids := readRequestIDs(t, dstPath); len(ids) != 1 || ids[0] != "queued" {
+		t.Fatalf("installed ids = %v, want the preserved snapshot's [queued]", ids)
+	}
+	if _, err := os.Stat(sibling); !os.IsNotExist(err) {
+		t.Fatal("the re-admitted sibling still exists")
+	}
+}
+
 // TestOpenRecoversInterruptedPendingSnapshot pins the boot fence: a .previous
 // sibling means an admission never committed, so the previous database is
 // restored and the staged incoming file is quarantined with its own suffix.
@@ -320,9 +385,7 @@ func TestOpenRecoversInterruptedPendingSnapshot(t *testing.T) {
 	if _, err := os.Stat(incoming); !os.IsNotExist(err) {
 		t.Fatal("boot recovery re-admitted the interrupted incoming file")
 	}
-	if _, err := os.Stat(incoming + ".invalid-interrupted"); err != nil {
-		t.Fatalf("boot recovery did not quarantine the interrupted incoming file: %v", err)
-	}
+	requireQuarantined(t, incoming)
 }
 
 // TestOpenRecoversInterruptedPendingSnapshotAfterInstall covers the other

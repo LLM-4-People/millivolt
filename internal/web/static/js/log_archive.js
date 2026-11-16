@@ -253,6 +253,48 @@ function maybeLoadMoreLog() {
   fetchOlderLog();
 }
 
+// renderLogEnd keeps the log's terminal row in step with the paging state. A
+// list that just stops reads as "that is all there is", and after a failed
+// page it says nothing about the missing rows at all. The row is a table foot
+// so it always lands after the newest appended page.
+const LOG_END_KEY = { failed: 'failed', end: 'end' };
+function renderLogEnd() {
+  const table = $('tbl-requests')?.querySelector('table');
+  if (!table) return;
+  const failed = logFetchFailed && !logExhausted;
+  const kind = failed ? LOG_END_KEY.failed : logExhausted ? LOG_END_KEY.end : '';
+  let foot = table.tFoot;
+  if (!kind) { if (foot) foot.remove(); return; }
+  if (!foot) {
+    foot = document.createElement('tfoot');
+    foot.className = 'log-end';
+    table.appendChild(foot);
+  }
+  if (foot.dataset.kind === kind) return;
+  foot.dataset.kind = kind;
+  foot.innerHTML = `<tr><td colspan="${REQ_COLS}"><div class="log-end-note">` +
+    (failed
+      ? ocEmptyHTML('older history did not load.',
+        'Every row below this point is missing. <button type="button" class="oc-link" data-log-retry>retry</button> to ask again.')
+      : ocEmptyHTML('end of stored history.', 'Every record in this scope is loaded.')) +
+    `</div></td></tr>`;
+}
+
+// retryOlderLog is the operator's own retry: it resets the failure budget the
+// automatic path exhausted and asks once, now.
+function retryOlderLog() {
+  if (logFetching || logExhausted || !lastData) return;
+  clearLogRetry();
+  logFailures = 0;
+  logFetchFailed = false;
+  updateLogStats();
+  fetchOlderLog();
+}
+
+$('tbl-requests')?.addEventListener('click', e => {
+  if (e.target.closest('[data-log-retry]')) retryOlderLog();
+});
+
 // scheduleLogRetry is the one delayed retry owner for a failed older-page
 // fetch. The generation check makes a scope/window reset unable to receive a
 // stale retry; the consecutive-failure budget stops the automatic path after
@@ -286,7 +328,7 @@ function fetchOlderLog() {
     // Presence is explicit: cursor_id may be the empty string, which is a real
     // boundary key. `next` must exist for that row even though its own row is
     // not rendered, or pagination stops and every older page is dropped.
-    const next = p && Number.isSafeInteger(p.cursor_ms) && typeof p.cursor_id === 'string'
+    const next = p && isCount(p.cursor_ms) && typeof p.cursor_id === 'string'
       ? {ms: p.cursor_ms, id: p.cursor_id} : null;
     const advanced = next && (!before || next.ms < before.ms || next.ms === before.ms && next.id !== before.id);
     if (next) logCursor = next;

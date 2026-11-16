@@ -663,12 +663,15 @@ func TestAuditCaptureGetPinsRecordIDAndSensitivity(t *testing.T) {
 	proxy.json(http.MethodGet, capturePath, document)
 	service := newTestService(t, proxy, Limits{})
 
-	out, err := service.auditCaptureGet(context.Background(), AuditCaptureGetInput{RecordID: "rec-1"})
+	out, err := service.auditCaptureGet(context.Background(), AuditCaptureGetInput{RecordID: "  rec-1\t"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out.RecordID != "rec-1" || out.StoredBytes != len(document) {
-		t.Fatalf("capture output = %+v", out)
+		t.Fatalf("capture output = %+v, want the trimmed record id", out)
+	}
+	if got := proxy.requests()[0].Query.Get("id"); got != "rec-1" {
+		t.Fatalf("lookup id = %q, want the trimmed record id", got)
 	}
 	decoded, ok := out.Document.(map[string]any)
 	if !ok {

@@ -1,20 +1,260 @@
 #!/usr/bin/env python3
 """Deterministic offline regressions for the small publication checker."""
 
+import json
 import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 from .. import repository_check as check
 from ..support import (PALETTE_OWNER, RETIRED_TOKENS, SITE_STYLESHEET, _template_comment_spans,
-                       root_custom_properties, site_palette_errors, token_drift_errors)
+                       css_names_control, root_custom_properties, site_palette_errors,
+                       token_drift_errors)
+
+
+MEASURED_UNIT = re.compile(
+    r"\b\d[\d,.]*\s*(?:ns|us|µs|ms|s|B/op|allocs(?:/op)?|MB|MiB|KiB|GB|GiB)\b")
+
+
+def measured_offenders(paths) -> list[str]:
+    """Files that print a number beside a benchmark name.
+
+    The block, not the line, is the unit: a hand copy often wraps ("... went
+    from 11.05-11.40 ms, 2.89 MB and 60,158 allocs to ..."), and a same-line
+    check misses every continuation. A design note may name the benchmark that
+    protects a path; the measured number belongs in the generated page.
+    """
+    offenders = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        cursor = 0
+        for block in re.split(r"\n\s*\n", text):
+            start = text.find(block, cursor)
+            cursor = start + len(block)
+            if "Benchmark" not in block or not MEASURED_UNIT.search(block):
+                continue
+            for offset, line in enumerate(block.splitlines()):
+                if "Benchmark" in line:
+                    number = text[:start].count("\n") + offset + 1
+                    offenders.append(f"{path.relative_to(check.ROOT)}:{number}")
+                    break
+    return offenders
+
+
+def prose_paths() -> list[Path]:
+    """Every hand-written document that could restate a measurement."""
+    root = check.ROOT
+    paths = [root / name for name in
+             ("README.md", "DESIGN.md", "CONTRIBUTING.md", "SECURITY.md", "OPERATIONS.md")]
+    paths += sorted((root / "docs").glob("*.md"))
+    paths += sorted((root / "site-src").glob("templates/*.html"))
+    return [path for path in paths if path.is_file() and path.name != "performance.md"]
 
 
 class RepositoryChecks(unittest.TestCase):
+    def test_measured_benchmark_numbers_live_only_in_the_generated_page(self):
+        """docs/performance.md is rendered from perf/results.json and checked
+        byte-for-byte. Every other document must link to it instead of copying
+        a result."""
+        self.assertEqual([], measured_offenders(prose_paths()),
+                         "measured benchmark numbers belong in docs/performance.md")
+
+    def test_measured_number_guard_sees_wrapped_prose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "docs").mkdir()
+            same = root / "docs" / "same.md"
+            same.write_text("`BenchmarkFoo` costs 12.9 ms.\n", encoding="utf-8")
+            wrapped = root / "docs" / "wrapped.md"
+            wrapped.write_text(
+                "The fold uses `BenchmarkBar`; the 1,000-frame run\n"
+                "went from 11.05 ms, 2.89 MB and 60,158 allocs to 6.2 ms.\n", encoding="utf-8")
+            prose = root / "docs" / "prose.md"
+            prose.write_text("The fold costs 12.9 ms.\n", encoding="utf-8")
+            linked = root / "docs" / "linked.md"
+            linked.write_text(
+                "`BenchmarkBaz` protects this path; the number is in\n"
+                "[performance](performance.md).\n", encoding="utf-8")
+            template = root / "site-src" / "templates"
+            template.mkdir(parents=True)
+            page = template / "landing.html"
+            page.write_text("<p>`BenchmarkQux` ran at 9,000 req/s over 5 s.</p>\n",
+                            encoding="utf-8")
+            with patch.object(check, "ROOT", root):
+                found = measured_offenders([same, wrapped, prose, linked, page])
+        self.assertEqual(["docs/same.md:1", "docs/wrapped.md:1", "site-src/templates/landing.html:1"],
+                         found)
+
+    def test_documented_console_sections_match_the_rail(self):
+        """The rail's section list is code; two documents restate it.
+
+        The count and the names are published as documentation, so a seventh
+        section or a rename must change the prose instead of leaving a reader
+        looking for a chip that is not there.
+        """
+        source = (check.ROOT / "internal/web/static/js/operator_console.js").read_text(encoding="utf-8")
+        block = re.search(r"const OC_SECTIONS = \[(.*?)\];", source, re.S)
+        self.assertIsNotNone(block, "operator_console.js no longer declares OC_SECTIONS")
+        ids = re.findall(r"id:\s*'([a-z-]+)'", block.group(1))
+        self.assertTrue(ids, "OC_SECTIONS has no ids")
+        count = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+                 7: "seven", 8: "eight", 9: "nine"}[len(ids)]
+        dashboard = re.sub(r"\s+", " ", (check.ROOT / "docs/dashboard.md").read_text(encoding="utf-8"))
+        self.assertIn(f"rail names {count} sections: {', '.join(ids[:-1])} and {ids[-1]}.",
+                      dashboard)
+        design = re.sub(r"\s+", " ", (check.ROOT / "DESIGN.md").read_text(encoding="utf-8"))
+        self.assertIn(f"{count} lowercase sections ({', '.join(ids)})", design)
+
+    def test_vendored_uplot_version_matches_its_notice(self):
+        """The notice is a hand-written copy of the vendored version.
+
+        The banner in the asset is the owner: it ships with the code and is what
+        a reader of the vendored file sees. Every version the notice states,
+        including its links, must be that one.
+        """
+        root = check.ROOT
+        banner = (root / "internal/web/static/vendor/uplot.js").read_text(encoding="utf-8")[:400]
+        match = re.search(r"uPlot \(v(\d+\.\d+\.\d+)\)", banner)
+        self.assertIsNotNone(match, "the vendored uPlot banner does not state its version")
+        version = match.group(1)
+        notice = (root / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        self.assertIn(f"uPlot {version}", notice)
+        linked = set(re.findall(r"uPlot/(?:tree|blob)/([^/\s)]+)", notice))
+        self.assertEqual({version}, linked, "the notice links a different uPlot version")
+        for asset in ("uplot.js", "uplot.css", "uplot.LICENSE"):
+            self.assertTrue((root / "internal/web/static/vendor" / asset).is_file(), asset)
+
+    def test_compose_defaults_match_the_documented_defaults(self):
+        """Compose owns each deployment default; the docs restate some of them.
+
+        A restated default that disagrees with `${VAR:-default}` would describe a
+        deployment the repository does not produce.
+        """
+        root = check.ROOT
+        compose = (root / "compose.yaml").read_text(encoding="utf-8")
+        defaults = dict(re.findall(r"\$\{(MILLIVOLT_[A-Z_]+):-([^}]*)\}", compose))
+        self.assertTrue({"MILLIVOLT_MEM_LIMIT", "MILLIVOLT_PIDS_LIMIT",
+                         "MILLIVOLT_PORT"} <= set(defaults), defaults)
+        claims = 0
+        for doc in ("docs/install.md", "docs/containers.md"):
+            text = (root / doc).read_text(encoding="utf-8")
+            for number, line in enumerate(text.splitlines(), 1):
+                for name in re.findall(r"`(MILLIVOLT_[A-Z_]+)`", line):
+                    if name not in defaults or "default" not in line:
+                        continue
+                    claim = re.search(r"defaults? to `([^`]+)`|default `([^`]+)`", line)
+                    if claim is None:
+                        continue
+                    claims += 1
+                    stated = claim.group(1) or claim.group(2)
+                    self.assertEqual(defaults[name], stated,
+                                     f"{doc}:{number} restates {name} with the wrong default")
+        self.assertGreaterEqual(claims, 5, "the documented compose defaults were not checked")
+
+    def test_css_control_predicate_covers_every_control_shape(self):
+        # The tap-target gate is only as good as its ability to recognize a
+        # control. A selector it cannot see is a 20px target nobody notices, so
+        # the vocabulary is asserted directly rather than trusted.
+        for selector in ('.oc-close', '.oc-select', '.theme-mode-opt', '.ro-tpl-item',
+                         '#traffic-legend .leg-item', '.mn.oc .oc-chip', '.mr-move button',
+                         'button', 'select', 'input'):
+            with self.subTest(selector=selector):
+                self.assertTrue(css_names_control(selector), selector)
+        for selector in ('.clear-count', '.st-status', '.tp-plot i', '.oc-receipt-main'):
+            with self.subTest(selector=selector):
+                self.assertFalse(css_names_control(selector), selector)
+
+    def test_node_suites_fail_closed_when_they_never_settle(self):
+        # A Node suite whose awaited promise never settles drains the loop and
+        # exits 0 with no verdict, which npm test reads as a pass. The timer has
+        # one owner; EVERY entry point npm test runs must arm it. The first
+        # version of this fix armed two of four, because it was written against
+        # "both entry points" while package.json runs four.
+        #
+        # Presence of the call text is not enough: an entry point that called
+        # watchdog(WATCHDOG_MS, ...) without importing WATCHDOG_MS threw
+        # ReferenceError before a single check ran, and a substring pin stayed
+        # green. Each entry is therefore LOADED far enough to resolve the
+        # binding it destructures, and the run below proves the loaded module
+        # refuses a drain.
+        owner = check.ROOT / "tests" / "watchdog.js"
+        self.assertIn("function watchdog(", owner.read_text())
+        scripts = json.loads((check.ROOT / "package.json").read_text())["scripts"]
+        entries = [part.split()[-1] for part in scripts["test"].split("&&")
+                   if part.strip().startswith("node ")]
+        self.assertGreaterEqual(len(entries), 4, entries)
+        for entry in entries:
+            text = (check.ROOT / entry).read_text()
+            with self.subTest(entry=entry):
+                self.assertIn("watchdog(", text)
+                # The clear must exist, or a normal run waits out the bound.
+                self.assertIn("clearWatchdog()", text)
+                # The timer must not be re-implemented per suite.
+                self.assertNotIn("setTimeout(() => {\n    console.error('watchdog", text)
+                # Every identifier the entry passes to watchdog() must be
+                # imported by the same file, so a dropped binding cannot ship.
+                # A qualified form (harness.WATCHDOG_MS) is satisfied by the
+                # namespace import itself, which is what resolves it.
+                imported = set()
+                for match in re.finditer(r"const\s*\{([^}]*)\}\s*=\s*require\(", text):
+                    imported.update(name.strip().split(":")[0].strip()
+                                    for name in match.group(1).split(","))
+                for match in re.finditer(r"const\s+([A-Za-z_$][\w$]*)\s*=\s*require\(", text):
+                    imported.add(match.group(1))
+                for call in re.finditer(r"watchdog\(([^,]+),", text):
+                    arg = call.group(1)
+                    for name in re.findall(r"[A-Za-z_$][\w$]*", arg):
+                        with self.subTest(entry=entry, binding=name):
+                            # A qualified form (harness.WATCHDOG_MS) resolves
+                            # through the namespace binding, which is imported;
+                            # only a bare identifier must be in the destructure.
+                            if re.search(r"\." + re.escape(name) + r"\b", arg):
+                                continue
+                            self.assertIn(name, imported,
+                                          entry + " passes " + name
+                                          + " to watchdog() without importing it")
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        with tempfile.TemporaryDirectory(prefix="watchdog-") as temp:
+            hang = Path(temp) / "hang.js"
+            # A one-hour bound: the timer cannot be what ends this run, so the
+            # only way to exit 1 is the drain path itself.
+            hang.write_text(
+                "const {watchdog} = require(" + repr(str(owner)) + ");\n"
+                + "watchdog(3600000, 'pin-drain');\n"
+                + "(async () => { await new Promise(() => {}); })();\n")
+            started = time.monotonic()
+            result = subprocess.run([node, str(hang)], capture_output=True, text=True, timeout=30)
+            elapsed = time.monotonic() - started
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("the event loop emptied", result.stderr)
+            # Reporting immediately is the whole point: the unrefed timer plus
+            # beforeExit must not wait out the bound.
+            self.assertLess(elapsed, 20, "the drain path waited " + str(round(elapsed, 1)) + "s")
+            clean = Path(temp) / "clean.js"
+            clean.write_text(
+                "const {watchdog} = require(" + repr(str(owner)) + ");\n"
+                + "const done = watchdog(60000, 'pin');\n"
+                + "done(); process.exit(0);\n")
+            self.assertEqual(
+                subprocess.run([node, str(clean)], capture_output=True, timeout=30).returncode, 0)
+            # A suite that records its verdict as exitCode = 0 is a pass, not a
+            # drain: the falsy zero once made the guard report it as a failure.
+            zero = Path(temp) / "zero.js"
+            zero.write_text(
+                "const {watchdog} = require(" + repr(str(owner)) + ");\n"
+                + "watchdog(3600000, 'pin-zero');\n"
+                + "process.exitCode = 0;\n")
+            self.assertEqual(
+                subprocess.run([node, str(zero)], capture_output=True, timeout=30).returncode, 0)
+
     def test_test_source_layout(self):
         for name in ("internal/unit_test.go", "scripts/browser_check.py", "ui_check.js", "other.spec.js"):
             with self.subTest(name=name):
@@ -637,7 +877,7 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("org.opencontainers.image.revision=${{ steps.cut.outputs.revision }}", meta)
         self.assertIn("build-args: REVISION=${{ steps.cut.outputs.revision }}", publish)
 
-        operations = self.read("docs/operations.md")
+        operations = self.read("docs/containers.md")
         section = operations.split("## Versions and images", 1)[1].split("\n## ", 1)[0]
         rows = dict(re.findall(r"^\| `([^`]+)` \| (.*?) \|$", section, re.M))
         self.assertIn("merged promotion PR", rows["main"])
@@ -696,7 +936,8 @@ class PublishedContracts(unittest.TestCase):
         operations_open = self.open_surface(operations, "docs/operations.md")
         for phrase in ("/session", "brand/PWA", "transparent inference"):
             self.assertIn(phrase, operations_open)
-        canonical = operations.split("### Operator access", 1)[1].split("\n### ", 1)[0]
+        routes = self.read("docs/routes.md")
+        canonical = routes.split("### Operator access", 1)[1].split("\n### ", 1)[0]
         for phrase in ("GET /healthz", "POST /session", "/manifest.webmanifest",
                        "/sw.js", "transparent inference", "canonical open-path list"):
             self.assertIn(phrase, canonical)
@@ -707,7 +948,7 @@ class PublishedContracts(unittest.TestCase):
         security_open = self.open_surface(security, "SECURITY.md")
         for phrase in ("/session", "brand/PWA", "transparent inference"):
             self.assertIn(phrase, security_open)
-        self.assertIn("docs/operations.md#operator-access", security_open)
+        self.assertIn("docs/routes.md#operator-access", security_open)
         security_mcp = self.mcp_surface(security, "SECURITY.md")
         self.assertIn("Bearer", security_mcp)
         self.assertRegex(security_mcp, r"refuses? a session cookie|session cookie[^.]*refused")
@@ -716,7 +957,7 @@ class PublishedContracts(unittest.TestCase):
         reverse_open = self.open_surface(reverse, "docs/reverse-proxy.md")
         for phrase in ("/session", "brand/PWA", "transparent inference"):
             self.assertIn(phrase, reverse_open)
-        self.assertIn("operations.md#operator-access", reverse_open)
+        self.assertIn("routes.md#operator-access", reverse_open)
         reverse_mcp = self.mcp_surface(reverse, "docs/reverse-proxy.md")
         self.assertIn("Bearer", reverse_mcp)
         self.assertIn("session cookie", reverse_mcp)
@@ -756,8 +997,40 @@ class PublishedContracts(unittest.TestCase):
         self.assertNotIn("$http_x_forwarded_proto", nginx.lower())
         reverse = self.read("docs/reverse-proxy.md")
         self.assertIn("X-Forwarded-Proto", reverse)
-        operations = self.read("docs/operations.md")
-        self.assertIn("X-Forwarded-Proto", operations)
+        # The allow lists evaluate the resolved address, so the one-hop trust
+        # limit must be stated where they are described.
+        self.assertIn("chooses what", reverse)
+        routes = self.read("docs/routes.md")
+        self.assertIn("X-Forwarded-Proto", routes)
+
+    def test_stdlib_log_is_limited_to_fatal_sites(self):
+        # internal/logging owns the one logging pipeline. Only the two boot
+        # sites that must abort the process before the pipeline exists may
+        # import the standard logger, and only for Fatal/Fatalf; a stray
+        # log.Printf elsewhere would bypass the shared schema and redaction.
+        allowed = {"cmd/proxy/main.go", "cmd/proxy/operator.go", "internal/logging/logging.go"}
+        import_block = re.compile(r'(?ms)^import\s*(\((.*?)^\)|"[^"]*")')
+        log_import = re.compile(r'(?m)^\s*(?:[A-Za-z_]\w*\s+)?"log"\s*$')
+
+        def imports_log(text):
+            for block in import_block.finditer(text):
+                if log_import.search(block.group(2) or block.group(1)):
+                    return True
+            return False
+
+        found = {}
+        for root in ("cmd", "internal"):
+            for path in sorted((check.ROOT / root).rglob("*.go")):
+                name = path.relative_to(check.ROOT).as_posix()
+                text = path.read_text()
+                if imports_log(text):
+                    found[name] = text
+        self.assertEqual(set(found), allowed)
+        for name in allowed - {"internal/logging/logging.go"}:
+            self.assertRegex(found[name], r"\blog\.Fatalf?\(")
+            # The Fatal allowance is the whole allowance: no Printf smuggled in.
+            self.assertLessEqual(set(re.findall(r"\blog\.([A-Za-z]+)\(", found[name])),
+                                 {"Fatal", "Fatalf"}, name)
 
     def test_adapters_pin_round8_contracts(self):
         adapters = re.sub(r"\s+", " ", self.read("docs/adapters.md"))
@@ -862,14 +1135,16 @@ class PublishedContracts(unittest.TestCase):
     def test_operations_known_limits_pin_translation_cap_and_strict_backup_read(self):
         operations = re.sub(r"\s+", " ", self.read("docs/operations.md"))
         self.assertIn("`translated_response_max_bytes` each (default 32 MiB)", operations)
-        self.assertIn("restored from the streamed chunk count", operations)
-        self.assertIn("up to 1,024 distinct indexes", operations)
         self.assertIn("502 `response_too_large`", operations)
+        routes = re.sub(r"\s+", " ", self.read("docs/routes.md"))
+        self.assertIn("restored from the streamed chunk count", routes)
+        self.assertIn("up to 1,024 distinct indexes", routes)
+        containers = re.sub(r"\s+", " ", self.read("docs/containers.md"))
         self.assertIn(
             "same strict, bounded reader used by config reload and restore, not the boot repair path",
-            operations,
+            containers,
         )
-        self.assertNotIn("same strict, bounded reader as boot and restore", operations)
+        self.assertNotIn("same strict, bounded reader as boot and restore", containers)
 
         adapters = re.sub(r"\s+", " ", self.read("docs/adapters.md"))
         self.assertIn("`translated_response_max_bytes` each (default 32 MiB)", adapters)

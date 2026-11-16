@@ -129,6 +129,112 @@ func TestCommittedKeepaliveNonCompletionRecords200(t *testing.T) {
 	}
 }
 
+// streamRetryCommittedRun drives one request into a quality re-send on a
+// committed 200 SSE socket: the absorbed first attempt relays a role frame and
+// ends, and the re-send answers the shape `second` writes. Returns the client
+// status and the finalized record.
+func streamRetryCommittedRun(t *testing.T, second func(w http.ResponseWriter)) (int, *metrics.Record) {
+	t.Helper()
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")
+			return
+		}
+		second(w)
+	}))
+	t.Cleanup(upstream.Close)
+
+	cfg := config.Default()
+	cfg.MaxRetries = 0
+	buf := metrics.NewBuffer(8)
+	srv := httptest.NewServer(New(cfg, buf))
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode, waitForRecord(t, buf, 1)[0]
+}
+
+// TestStreamRetryKeepsTheCommittedStatusAcrossResendAnswerShapes pins the
+// committed-SSE contract for every re-send answer shape that cannot replace
+// the status line: the record describes the 200 the client holds, never the
+// absorbed re-send's status. The >=400 arm already restored it; the transport
+// failure, a non-completion status and a non-2xx answer did not.
+func TestStreamRetryKeepsTheCommittedStatusAcrossResendAnswerShapes(t *testing.T) {
+	hijackFailure := func(w http.ResponseWriter) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		conn.Close()
+	}
+	cases := []struct {
+		name      string
+		second    func(w http.ResponseWriter)
+		rateLimit bool
+	}{
+		{"transport-failure", hijackFailure, false},
+		{"accepted-202", func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, `{"id":"x"}`)
+		}, false},
+		{"redirect-302", func(w http.ResponseWriter) {
+			w.Header().Set("Location", "/elsewhere")
+			w.WriteHeader(http.StatusFound)
+		}, false},
+		{"json-200", func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"id":"x"}`)
+		}, false},
+		{"upstream-429", func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":{"type":"rate_limit_error","message":"slow down"}}`)
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clientStatus, rec := streamRetryCommittedRun(t, tc.second)
+			if clientStatus != http.StatusOK {
+				t.Fatalf("client status = %d, want the committed 200", clientStatus)
+			}
+			if rec.StatusCode != clientStatus {
+				t.Fatalf("record status = %d, want the %d the client holds", rec.StatusCode, clientStatus)
+			}
+			// The in-band failure is still the turn's outcome.
+			if !rec.IsError() || rec.ErrorType == "" || rec.ErrorMsg == "" {
+				t.Fatalf("record lost the in-band failure: %+v", rec)
+			}
+			if rec.HasRateLimit() != tc.rateLimit {
+				t.Fatalf("rate-limit signal = %v, want %v", rec.HasRateLimit(), tc.rateLimit)
+			}
+			if !tc.rateLimit && len(rec.Attempts) != 1 {
+				t.Fatalf("attempts = %+v, want the absorbed attempt only", rec.Attempts)
+			}
+			if tc.rateLimit && (len(rec.Attempts) != 2 || !rec.Attempts[1].InBand) {
+				t.Fatalf("attempts = %+v, want the absorbed attempt plus one in-band 429", rec.Attempts)
+			}
+		})
+	}
+}
+
 // committedStatusRun holds the first request, lets a queued second request
 // commit a keepalive 200, then answers it with status/payload. The queued
 // client body and the finalized records by model are returned.

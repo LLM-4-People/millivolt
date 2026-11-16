@@ -88,7 +88,7 @@ func scrapeBenchmark(b *testing.B, name string, records int, cold bool) {
 		if !cold {
 			// Warm one build outside the timed region; every iteration below
 			// then has an unchanged revision.
-			HandlePrometheus(w, req, buf)
+			HandlePrometheus(w, req, buf, nil)
 			if w.Code != http.StatusOK {
 				b.Fatalf("GET /metrics/prometheus = %d, want 200", w.Code)
 			}
@@ -101,7 +101,7 @@ func scrapeBenchmark(b *testing.B, name string, records int, cold bool) {
 				buf.Record(coldRecord)
 			}
 			w.Body.Reset()
-			HandlePrometheus(w, req, buf)
+			HandlePrometheus(w, req, buf, nil)
 			if w.Code != http.StatusOK {
 				b.Fatalf("GET /metrics/prometheus = %d, want 200", w.Code)
 			}

@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -34,15 +35,25 @@ func TestPauseDurationKeysMatchFormatDuration(t *testing.T) {
 }
 
 func TestPauseTimerUnpauses(t *testing.T) {
-	p := New(config.Default(), metrics.Noop{})
-	p.applyHolds([]persistedPause{{All: true, Until: time.Now().Add(50 * time.Millisecond)}})
-	if !p.scheduler.Paused() {
-		t.Fatal("expected hold")
-	}
-	waitFor(t, func() bool { return !p.scheduler.Paused() })
-	if p.scheduler.Paused() {
-		t.Fatal("timer did not clear the hold")
-	}
+	// Virtual time, like TestPauseStaleTimerCannotRemoveExtendedHold below: the
+	// assertion "the hold is live, then its timer clears it" is about ordering,
+	// and a real 50ms window let a loaded runner expire the hold before the
+	// first assertion or leave it live past the wait.
+	synctest.Test(t, func(t *testing.T) {
+		p := New(config.Default(), metrics.Noop{})
+		defer p.applyHolds(nil)
+		p.applyHolds([]persistedPause{{All: true, Until: time.Now().Add(50 * time.Millisecond)}})
+		if !p.scheduler.Paused() {
+			t.Fatal("expected hold")
+		}
+		// No goroutine runs during this sleep, so the expiry timer fires at a
+		// virtual instant rather than whenever the machine gets to it.
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if p.scheduler.Paused() {
+			t.Fatal("timer did not clear the hold")
+		}
+	})
 }
 
 func TestPausePersistsAndRestores(t *testing.T) {
@@ -93,7 +104,7 @@ func TestSameUntilTimersClearBoth(t *testing.T) {
 
 func TestGetOmitsExpiredHold(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
-	p.scheduler.RestoreHolds([]scheduler.Hold{{ID: "live", Clients: []string{"y"}}})
+	p.scheduler.RestoreHolds([]scheduler.Hold{{ID: "live", Scope: scheduler.LimitScope{Clients: []string{"y"}}}})
 	p.pause.mu.Lock()
 	p.pause.holds = []persistedPause{
 		{ID: "dead", Clients: []string{"x"}, Until: time.Now().Add(-time.Second)},

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 )
@@ -179,7 +180,7 @@ func TestMetricsPprofRoutesServeOnlyThroughTheOperatorGate(t *testing.T) {
 	var upstreamHits []string
 	server := func(gate *operatorGate) *httptest.Server {
 		mux, handler := newOperatorMux(gate, config.Default())
-		registerPprofRoutes(mux)
+		registerPprofRoutes(mux, func() time.Duration { return time.Minute })
 		mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			upstreamHits = append(upstreamHits, r.URL.EscapedPath())

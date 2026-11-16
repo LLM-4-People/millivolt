@@ -55,7 +55,7 @@ func captureReclaimSnapshot(t *testing.T, s *Store, cursorRow, beforeRow int) re
 	for _, tc := range fields {
 		for _, before := range []*LogCursor{nil, cursor} {
 			filter := &LogFilter{All: []LogPredicate{{Field: tc.field, Value: tc.value}}}
-			candidates, err := s.QueryBeforeCandidates(t.Context(), before, filter, 25)
+			candidates, err := s.QueryBeforeCandidates(t.Context(), before, filter, 25, LogCandidatesAll)
 			if err != nil {
 				t.Fatal(err)
 			}

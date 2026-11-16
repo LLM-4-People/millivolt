@@ -11,7 +11,13 @@ const {
   boot,
   bootChecks,
   loaded,
+  watchdog,
+  WATCHDOG_MS,
 } = require('./theme_check_boot');
+
+// The same bound the functional suite uses: an unsettled promise would
+// otherwise drain the loop and exit 0 with no verdict at all.
+const clearWatchdog = watchdog(WATCHDOG_MS, 'theme check');
 const { contrastChecks } = require('./theme_check_contrast');
 const { pickerChecks } = require('./theme_check_picker');
 const { surfaceChecks } = require('./theme_check_surfaces');
@@ -72,11 +78,13 @@ const selectionIsSingle = (group, expected) => {
     d.getElementById('theme-current-label')?.textContent === 'Current: Instrument / Black');
   check('the preview caption starts on the committed pair',
     d.getElementById('theme-preview-label')?.textContent === 'Preview: same');
-  check('the inline guard lists exactly the registry ids', (() => {
+  check('the pre-paint guard lists exactly the registry ids', (() => {
+    // The guard is js/theme_boot.js (the document carries no inline script), so
+    // one owner still holds the id list it accepts.
     const themeSource = fs.readFileSync(path.join(STATIC, 'js/theme.js'), 'utf8');
     const registry = [...themeSource.matchAll(
       /\{ id: '([a-z-]+)', label: '[^']+', hint:/g)].map(match => match[1]);
-    const guardSource = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
+    const guardSource = fs.readFileSync(path.join(STATIC, 'js/theme_boot.js'), 'utf8');
     const guard = /\/\^\(([^)]+)\)\$\/\.test\(saved\.theme\)/.exec(guardSource);
     const ids = guard ? guard[1].split('|') : [];
     return registry.length === 8 && ids.length === registry.length &&
@@ -116,6 +124,7 @@ const selectionIsSingle = (group, expected) => {
   win.close();
   for (const extra of extraWindows) extra.window.close();
   console.log(failures === 0 ? 'ALL THEME CHECKS PASSED' : `${failures} THEME CHECK(S) FAILED`);
+  clearWatchdog();
   process.exit(failures === 0 ? 0 : 1);
 })().catch(error => {
   console.error('theme check crashed:', error);

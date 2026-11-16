@@ -1,194 +1,343 @@
-// test 8: Logs menu (filter menu + export URL)
-// Extracted from the inline suite without changing order, labels or state.
+// The operator console's export section is the one download surface now that
+// the five header menus are gone. The settings sheet's delete-matching block
+// stays the destructive twin, so both must read the same record dimensions
+// from the same server predicate.
 module.exports = async function logsMenu(H) {
-  const {JSDOM, STATIC, check, d, fire, fs, mkRec, path, settleUntil, w} = H;
-  const state = H.state;
+  const {check, d, mkRec, settleUntil, w} = H;
 
-  // ---- test 8: Logs menu (filter menu + export URL) ----
-  const logsMenu = d.getElementById('logs-menu');
-  check('logs menu starts hidden', logsMenu && logsMenu.hidden);
-  w.toggleLogsMenu({ stopPropagation() {} });
-  check('logs menu opens', !logsMenu.hidden);
-  check('logs open sets aria-expanded', d.getElementById('btn-logs').getAttribute('aria-expanded') === 'true');
-  // The whole Clear control moved into the settings sheet's storage
-  // category: the header must not keep the button, the menu, or a
-  // HEADER_MENUS registration for either.
-  check('the header carries no clear control',
-    !d.getElementById('btn-clear') && !d.getElementById('clear-menu'));
-  check('the header menu registry carries no clear entry',
-    !w.eval('Object.entries(HEADER_MENUS).some(([b, m]) => b === "btn-clear" || m === "clear-menu")'));
-  check('logs menu populated from records', d.querySelector('#lf-provider option[value="p"]') !== null);
-  // ---- R25 L4-1 freeze row: the export has been a gzip artifact with no
-  // plain-JSON fallback since wave 17, so the menu header must say so.
-  // Exact-text pin (like the debug menu header's) so the pre-compression
-  // "(JSON)" label cannot return.
-  check('logs menu header states the gzip export format',
-    d.querySelector('#logs-menu .clear-menu-hd').textContent === 'Export logs (JSON, gzip)');
-  // ---- L4-C8 pin: the Logs menu (lf-) and the settings sheet's
-  // delete-matching block (del-) are one row set modulo the id prefix.
-  // The row lists must stay identical (same label texts, same per-row
-  // select ids after the prefix), and the runtime fill
-  // (populateFilterMenu, already prefix-parameterized) must write the
-  // same option values into both surfaces from one record set.
-  {
-    const skelDoc = new JSDOM(fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8')).window.document;
-    const filterRows = root => [...root.querySelectorAll('label')].map(l => [
-      l.textContent.replace(/\s+/g, ' ').trim(),
-      l.querySelector('select').id.replace(/^(lf|del)-/, ''),
-    ]);
-    const lfRows = filterRows(skelDoc.getElementById('logs-menu'));
-    const delHost = d.createElement('div');
-    delHost.innerHTML = w.eval('settingsDeleteRowHTML()');
-    d.body.appendChild(delHost);
-    try {
-      const delRows = filterRows(delHost);
-      check('the logs menu and the settings delete block render one prefix-identical filter row set',
-        lfRows.length === 7 && JSON.stringify(lfRows) === JSON.stringify(delRows));
-      w.populateFilterMenu('del');
-      const optValues = pre => ['provider', 'model', 'client', 'status', 'errors', 'debug', 'age']
-        .map(name => [...d.getElementById(pre + '-' + name).options].map(o => o.value));
-      check('both filter surfaces fill the same option values per row',
-        JSON.stringify(optValues('lf')) === JSON.stringify(optValues('del')));
-    } finally { delHost.remove(); }
-  }
-  check('export URL encodes the filter', w.logsExportURL({ provider: 'openai', status_code: 429, has_error: false, debug: false, before_ms: 0, model: '', client: '' }) === '/metrics/export?provider=openai&status_code=429');
-  check('empty filter exports everything', w.logsExportURL({ provider: '', model: '', client: '', status_code: 0, has_error: false, debug: false, before_ms: 0 }) === '/metrics/export');
-  check('debug-only export encodes the flag', w.logsExportURL({ provider: '', model: '', client: '', status_code: 0, has_error: false, debug: true, before_ms: 0 }) === '/metrics/export?debug=1');
-  d.getElementById('lf-provider').value = 'p';
-  w.updateLogsCount();
-  check('logs count preview reads the backend count',
-    await settleUntil(() => d.getElementById('logs-count').textContent.includes('download 3 records')));
-  w.toggleLogsMenu({ stopPropagation() {} });
-  check('logs menu closes on second toggle', logsMenu.hidden);
-  check('logs close clears aria-expanded', d.getElementById('btn-logs').getAttribute('aria-expanded') === 'false');
-  // equal-size icon buttons: all six header actions share one min-width
-  const hdrIds = ['btn-pause', 'btn-debug', 'btn-limits', 'btn-logs', 'btn-restart', 'btn-settings'];
-  const bts = hdrIds.map(id => d.getElementById(id));
-  const styles = bts.map(b => w.getComputedStyle(b).minWidth);
-  check('header action buttons share one min-width', styles.every(s => s === styles[0] && s) && styles[0] !== 'auto');
-  check('header actions are icon-only', bts.every(b => b && b.querySelector('svg.hdr-ico') && b.getAttribute('aria-label')));
-  check('header hamburger exists', !!d.getElementById('btn-nav') && d.getElementById('btn-nav').getAttribute('aria-controls') === 'hdr-actions');
-  check('header hamburger is hidden on desktop', w.getComputedStyle(d.getElementById('btn-nav')).display === 'none');
-  check('header action labels are present for the mobile panel', bts.every(b => b.querySelector('.hdr-btn-label')));
-  w.refreshFooterState();
-  check('pause icon survives pressed-state refresh', !!d.getElementById('btn-pause').querySelector('svg.hdr-ico'));
-  check('debug icon survives pressed-state refresh', !!d.getElementById('btn-debug').querySelector('svg.hdr-ico'));
-  const debugMenu = d.getElementById('debug-menu');
-  check('debug menu starts hidden', debugMenu && debugMenu.hidden);
-  w.toggleDebugMenu({ stopPropagation() {} });
-  check('debug menu opens', !debugMenu.hidden);
-  check('debug open sets aria-expanded', d.getElementById('btn-debug').getAttribute('aria-expanded') === 'true');
-  check('opening debug closes logs', logsMenu.hidden);
-  w.toggleDebugMenu({ stopPropagation() {} });
-  check('debug menu closes on second toggle', debugMenu.hidden);
-  // Stamped-first debug priority: a request row's dbg pill must edit the
-  // session the server STAMPED on the record (debug_session_id), even when
-  // another live session's scope would also match the record. The stamp is
-  // the authoritative match; the raw-scope heuristic only serves records
-  // the stamp does not reach.
-  fire('record', { ...mkRec('dbg-stamped-rec'), debug: true, debug_session_id: 'dbg-stamped' }, '5');
-  // The record upsert schedules the coalesced rAF render; poll for the
-  // painted end state (the row's dbg pill) instead of a fixed sleep.
-  await settleUntil(() => !!d.querySelector('#tbl-requests tr.exp-row[data-id="dbg-stamped-rec"] .pill.debug[data-edit-debug]'));
-  check('a stamped debug record renders the dbg pill on its row',
-    !!d.querySelector('#tbl-requests tr.exp-row[data-id="dbg-stamped-rec"] .pill.debug[data-edit-debug]'));
-  w.eval("debugState = {...debugState, enabled: true, sessions: [" +
-    "{id: 'dbg-stamped', clients: ['other-client'], duration: '15m'}," +
-    "{id: 'dbg-scope', clients: ['c'], duration: '1h'}]}");
-  d.querySelector('#tbl-requests tr.exp-row[data-id="dbg-stamped-rec"] .pill.debug[data-edit-debug]').click();
-  {
-    const holds = [...d.querySelectorAll('#debug-menu .pause-hold')];
-    const editing = holds.filter(h => h.classList.contains('editing'));
-    check('the dbg pill edits the stamped session, not a scope-matching one',
-      !debugMenu.hidden && holds.length === 2 && editing.length === 1 &&
-        editing[0].querySelector('[data-operator="debug-edit"]').dataset.value === 'dbg-stamped' &&
-        holds.some(h => !h.classList.contains('editing') &&
-          h.querySelector('[data-operator="debug-edit"]').dataset.value === 'dbg-scope') &&
-        d.querySelector('#debug-menu .clear-menu-hd').textContent === 'Edit session');
-  }
-  w.resetDebugMenuForm();
-  w.toggleDebugMenu({ stopPropagation() {} });
-  w.eval("debugState = {...debugState, enabled: false, sessions: []}");
-  check('debug menu closes after the stamped edit', debugMenu.hidden);
-  // GAP-A pin: the pill-edit table's paused and throttled arms. The debug
-  // arm is pinned above; these two had zero coverage (mutation-proven).
-  // Same contract per arm: a live record carrying the server's state flag
-  // renders its state pill, and the pill opens the matching operator editor
-  // - the pause menu editing the hold matched via holdMatchesRecord (not
-  // the all-requests fallback, not a non-matching named hold), the limits
-  // menu editing the record's own provider among several.
-  {
-    const pausedRec = { ...mkRec('paused-live-rec', 0, 1700000105000), paused: true };
-    fire('begin', { record: pausedRec, in_flight: 1 });
-    const pausedPill = () => d.querySelector('#tbl-requests tr.exp-row[data-id="paused-live-rec"] .pill.paused[data-edit-pause]');
-    check('a paused live record renders the paused pill on its row',
-      await settleUntil(() => !!pausedPill()));
-    w.eval("pauseState = {...pauseState, paused: true, holds: [" +
-      "{id: 'hold-other', clients: ['other-client'], duration: '1h'}," +
-      "{id: 'hold-named', clients: ['c'], duration: '15m'}," +
-      "{id: 'hold-all', all: true, duration: '6h'}]}");
-    pausedPill().click();
-    {
-      const pauseMenu = d.getElementById('pause-menu');
-      const holds = [...pauseMenu.querySelectorAll('.pause-hold')];
-      const editing = holds.filter(h => h.classList.contains('editing'));
-      check('the paused pill edits the hold matched via holdMatchesRecord',
-        !pauseMenu.hidden && holds.length === 3 && editing.length === 1 &&
-          editing[0].querySelector('[data-operator="pause-edit"]').dataset.value === 'hold-named');
-    }
-    w.resetPauseMenuForm();
-    w.hideHdrMenu('pause-menu');
-    w.eval("pauseState = {...pauseState, paused: false, holds: []}");
+  const q = sel => d.querySelector(sel);
+  // The pane is repainted by the page's own poll, so a press waits for its node
+  // instead of dereferencing whatever the last render left behind.
+  const clickWait = async sel => {
+    await settleUntil(() => !!q(sel));
+    const el = q(sel);
+    el.click();
+    return el;
+  };
 
-    const throttledRec = { ...mkRec('throttled-live-rec', 0, 1700000106000), throttled: true };
-    fire('begin', { record: throttledRec, in_flight: 2 });
-    const throttledPill = () => d.querySelector('#tbl-requests tr.exp-row[data-id="throttled-live-rec"] .pill.throttled[data-edit-limit]');
-    check('a throttled live record renders the throttled pill on its row',
-      await settleUntil(() => !!throttledPill()));
-    w.eval("throttleState = {...throttleState, active: true, throttles: [" +
-      "{provider: 'other.example', requests: 1, request_window: '1m'}," +
-      "{provider: 'p', requests: 2, request_window: '2m'}]," +
-      "known_providers: ['p', 'other.example']}");
-    throttledPill().click();
+  const savedRecords = w.eval('lastData && lastData.records');
+  const savedFetch = w.fetch;
+  const savedDownload = w.triggerDownload;
+  let host = null;
+  try {
+    const shell = d.getElementById('operator-console');
+    check('the operator console starts hidden', !!shell && shell.hidden);
+    w.openOperatorConsole('export');
+    check('the console opens on its export section',
+      !shell.hidden && shell.classList.contains('mn') && shell.classList.contains('oc') &&
+      d.getElementById('oc-pane').dataset.section === 'export');
+    // The rebuild's focus preservation reads one definition of "reachable by
+    // keyboard inside the pane". Three literals lived on four adjacent lines,
+    // so a control type added to one would have been focusable for the control
+    // list but invisible to the slot lookup that restores the caret.
     {
-      const limitsMenu = d.getElementById('limits-menu');
-      const holds = [...limitsMenu.querySelectorAll('#lim-holds .pause-hold')];
-      const editing = holds.filter(h => h.classList.contains('editing'));
-      check('the throttled pill opens the limits editor for the record provider',
-        !limitsMenu.hidden && d.getElementById('lim-provider').value === 'p' &&
-          holds.length === 2 && editing.length === 1 &&
-          editing[0].querySelector('[data-operator="limit-edit"]').dataset.value === 'p');
+      const host = d.createElement('div');
+      host.innerHTML = '<button id="f-b">b</button><label id="f-l"><input id="f-i"></label>' +
+        '<span id="f-s" tabindex="0">s</span><button id="f-d" disabled>d</button>' +
+        '<a id="f-a" href="#x">a</a>';
+      const count = w.ocControls(host).map(el => el.id).join(',');
+      check('one selector defines the pane focus order and the slot lookup',
+        w.eval('typeof OC_FOCUSABLE') === 'string' &&
+        // The pane's contract is the console's own controls. A link is not one:
+        // the console navigates by button, and the modal frame keeps the wider
+        // selector that also reaches links.
+        count === 'f-b,f-i,f-s' &&
+        w.eval('OC_FOCUSABLE').includes('[tabindex]') &&
+        !w.eval('OC_FOCUSABLE').includes('a[href]') &&
+        // A slot that is itself focusable wins over a control inside it; a
+        // wrapper label resolves to its field.
+        w.ocFocusTarget(host.querySelector('#f-b')).id === 'f-b' &&
+        w.ocFocusTarget(host.querySelector('#f-l')).id === 'f-i' &&
+        w.ocFocusTarget(host.querySelector('#f-s')).id === 'f-s' &&
+        w.ocFocusTarget(null) === null);
     }
-    w.hideHdrMenu('limits-menu');
-    w.eval("throttleState = {...throttleState, active: false, throttles: []}");
-  }
-  // GAP-C pin: resyncOperatorSurfaces' live-repaint tail. The menu-sync
-  // half is pinned (the count-bits checks); `if (lastData)
-  // scheduleRenderLive()` is not. The row renderer detects change by record
-  // identity, so the tail's contract: after a wholesale record replacement
-  // in lastData (what upsert does) with the derivation invalidated but NO
-  // render scheduled and no feed event, applying operator state repaints
-  // the stale row from the fresh record.
-  {
-    const liveRec = { ...mkRec('gapc-live-rec', 0, 1700000107000) };
-    fire('begin', { record: liveRec, in_flight: 1 });
-    const gapcPill = () => d.querySelector('#tbl-requests tr.exp-row[data-id="gapc-live-rec"] .pill');
-    check('the in-flight row paints the live pill first',
-      await settleUntil(() => !!gapcPill() && gapcPill().classList.contains('live')));
-    w.eval("lastData.records[lastData.records.findIndex(r => r.id === 'gapc-live-rec')]" +
-      " = {...lastData.records.find(r => r.id === 'gapc-live-rec'), paused: true}; bumpData();");
-    check('no feed event leaves the painted row stale', gapcPill().classList.contains('live'));
-    let livePaints = 0;
-    const originalLive = w.renderLive;
-    w.renderLive = () => { livePaints++; originalLive(); };
-    w.applyPauseState({ ok: true, paused: true, holds: [{ id: 'gapc-hold', all: true, duration: '15m' }],
-      known_clients: ['c'], known_providers: ['p'], until: null, queued: 0, default_max_queued: 0 });
-    await settleUntil(() => livePaints === 1 &&
-      !!d.querySelector('#tbl-requests tr.exp-row[data-id="gapc-live-rec"] .pill.paused[data-edit-pause]'));
-    w.renderLive = originalLive;
-    check('applying a pause state repaints the held row without a feed event',
-      livePaints === 1 &&
-        !!d.querySelector('#tbl-requests tr.exp-row[data-id="gapc-live-rec"] .pill.paused[data-edit-pause]'));
-    w.eval("pauseState = {...pauseState, paused: false, holds: []}");
+    // Every delegated listener scopes its work through one guard, which owns
+    // the "closed console owns nothing" rule: a null node, a node outside the
+    // shell, and an absent shell are all false rather than a throw.
+    check('one guard scopes every delegated listener to the console',
+      w.eval('ocOwns(null)') === false &&
+      w.eval('ocOwns(document.body)') === false &&
+      w.eval('ocOwns(document.getElementById("oc-pane"))') === true &&
+      w.eval('ocOwns(document.getElementById("btn-controls"))') === false);
+
+    // A control's accessible name is the words on screen, never the wire key
+    // the dispatcher compares against. The registry carries both separately,
+    // and this asserts the DOM the renderer actually built: a renderer that
+    // fell back to the key would leave the registry correct and the markup
+    // wrong, which is exactly how this defect presented.
+    {
+      const byChoice = [...d.querySelectorAll('#oc-pane [data-oc-choice]')]
+        .map(el => [el.dataset.ocChoice, el.getAttribute('aria-label') ||
+          el.closest('.oc-chips')?.getAttribute('aria-label')]);
+      const groups = [...d.querySelectorAll('#oc-pane .oc-chips')]
+        .map(g => g.getAttribute('aria-label'));
+      check('rendered controls announce the visible words, not the wire key',
+        byChoice.length >= 2 && groups.includes('what to download') &&
+        byChoice.every(([name, label]) => !!label && label !== name && !/-/.test(label)));
+    }
+    const modeChips = [...d.querySelectorAll('#oc-pane [data-oc-choice="export-mode"]')]
+      .map(chip => chip.dataset.ocValue);
+    // All history is not a claim of "everything": it previews through the same
+    // server count the filtered mode uses, so its receipt is a number too.
+    check('the export section offers all history and matching records',
+      JSON.stringify(modeChips) === JSON.stringify(['all', 'filter']) &&
+      await settleUntil(() =>
+        /^\d+ records? · JSON, gzip$/.test(d.getElementById('oc-export-receipt').textContent), 3000));
+
+    // Controlled record set: both surfaces derive their options from lastData
+    // through their own owners, so one fixture proves the vocabularies agree.
+    w.__logsParityRecords = [
+      { ...mkRec('parity-a', 200), provider: 'p', model: 'glm-5.3', client: 'c', conversation_id: 'cv' },
+      { ...mkRec('parity-b', 429), provider: 'other', model: 'grok-4.6', client: 'c2', conversation_id: 'cv2' },
+    ];
+    w.eval('lastData.records = window.__logsParityRecords');
+
+    host = d.createElement('div');
+    host.innerHTML = w.eval('settingsDeleteRowHTML()');
+    d.body.appendChild(host);
+    w.populateFilterMenu('del');
+
+    await clickWait('#oc-pane [data-oc-choice="export-mode"][data-oc-value="filter"]');
+    // A mode switch invalidates the count, so the receipt asks for a filter
+    // rather than showing the unfiltered total beside a download that would
+    // act on a different predicate.
+    check('filter mode without an active filter asks for one and disables download',
+      await settleUntil(() =>
+        q('#oc-export-receipt')?.textContent === 'choose a filter to preview the export' &&
+        q('#oc-pane [data-oc-download]')?.disabled === true, 3000));
+    const exportValues = async dim => {
+      await clickWait(`#oc-pane [data-oc-filter-pick="${dim}"]`);
+      const values = [...d.querySelectorAll(`#oc-pane [data-oc-filter-value="${dim}"]`)]
+        .map(row => row.dataset.ocValue).filter(value => value !== '');
+      q(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
+      return values;
+    };
+    const delValues = dim => [...d.getElementById('del-' + dim).options]
+      .map(option => option.value).filter(value => value !== '');
+    check('settings delete and console export derive the same provider values',
+      JSON.stringify(await exportValues('provider')) === JSON.stringify(delValues('provider')));
+    check('settings delete and console export derive the same model values',
+      JSON.stringify(await exportValues('model')) === JSON.stringify(delValues('model')));
+    check('settings delete and console export derive the same client values',
+      JSON.stringify(await exportValues('client')) === JSON.stringify(delValues('client')));
+    check('settings delete and console export derive the same status values',
+      JSON.stringify(await exportValues('status')) === JSON.stringify(delValues('status')));
+    // Exporting history is the section's purpose, and after a restart the
+    // live ring is empty while the server still knows what ran. A dimension
+    // fed only from the ring would have nothing to offer and no way to type.
+    {
+      const savedRecords = w.eval('lastData.records');
+      w.applyThrottleState({ok: true, active: true,
+        known_providers: ['p'], known_clients: ['c'], known_models: ['glm-5.3'],
+        throttles: []});
+      w.eval('lastData.records = []');
+      w.openOperatorConsole('export');
+      await clickWait('#oc-pane [data-oc-choice="export-mode"][data-oc-value="filter"]');
+      const offered = async dim => {
+        await clickWait(`#oc-pane [data-oc-filter-pick="${dim}"]`);
+        const values = [...d.querySelectorAll(`#oc-pane [data-oc-filter-value="${dim}"]`)]
+          .map(row => row.dataset.ocValue).filter(value => value !== '');
+        q(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
+        return values;
+      };
+      check('an empty record ring still offers the server provider and client vocabularies',
+        (await offered('provider')).includes('p') && (await offered('client')).includes('c'));
+      // offered() repaints through the section, which closes the picker, so
+      // open one directly and read the fallback field it renders.
+      const typedField = async dim => {
+        await clickWait(`#oc-pane [data-oc-filter-pick="${dim}"]`);
+        const field = q(`#oc-pane [data-oc-filter-custom="${dim}"]`);
+        return !!field;
+      };
+      check('a quiet proxy can still filter an export by a typed model or provider',
+        await typedField('model') && await typedField('provider') && await typedField('client'));
+      w.eval('lastData.records = ' + JSON.stringify(savedRecords || null));
+    }
+
+    check('the console shares the settings sentence-case filter dimensions',
+      ['provider', 'model', 'client', 'status'].every(dim =>
+        !!d.querySelector(`#oc-pane [data-oc-filter-pick="${dim}"]`)) &&
+      !!d.querySelector('#oc-pane [data-oc-export-field="errorType"]') &&
+      ['export-errors', 'export-debug', 'export-age'].every(name =>
+        !!d.querySelector(`#oc-pane [data-oc-choice="${name}"]`)));
+
+    // A picker list is a 190px scroller, so the rows beyond the visible band
+    // are pure layout work. The export conversation picker over a record ring
+    // at its configured ceiling emitted 10,001 rows: 30,083 nodes and 2.6MB of
+    // HTML rebuilt on every keystroke, measured at 248-295ms, and the hidden
+    // panel retained them after close.
+    {
+      const ring = [];
+      for (let i = 0; i < 400; i++) {
+        ring.push({id: 'r' + i, started_at: Date.now() - i, client: 'c',
+          provider: 'p', model: 'm', conversation_id: 'conv-' + String(i).padStart(4, '0'),
+          status: 200});
+      }
+      const savedData = w.eval('lastData');
+      w.eval('lastData = ' + JSON.stringify({records: ring}));
+      try {
+        w.eval("ocDrafts.export = ocBlankExportDraft(); ocDrafts.export.mode = 'filter';"
+          + " ocDrafts.export.picker = {dim: 'conversation', filter: ''}; ocRender();");
+        const list = d.querySelector('#oc-pane .oc-pick-list');
+        const cap = w.eval('OC_PICK_ROWS_MAX');
+        const valueRows = list
+          ? [...list.querySelectorAll('.oc-pick-row')].filter(row => row.dataset.ocValue !== '').length
+          : 0;
+        check('a picker caps its value rows at the shared ceiling',
+          cap > 0 && valueRows > 0 && valueRows <= cap &&
+          w.eval("ocFilterValues('conversation').length") > cap);
+        const note = d.querySelector('#oc-pane .oc-pick-note');
+        check('a truncated picker names the remainder instead of reading complete',
+          (note?.textContent || '').includes('more match') &&
+          (note?.textContent || '').includes('300 more'));
+        // Narrowing to one value must show it, not the cap's first page.
+        w.eval("ocDrafts.export.picker.filter = 'conv-0399'; ocRender();");
+        const narrowed = [...d.querySelectorAll('#oc-pane .oc-pick-row[data-oc-filter-value="conversation"]')]
+          .map(row => row.dataset.ocValue).filter(Boolean);
+        check('a narrowed picker still reaches a value past the cap',
+          narrowed.includes('conv-0399') && narrowed.length === 1);
+      } finally {
+        w.eval('lastData = ' + JSON.stringify(savedData));
+      }
+    }
+
+    // FILTER_AGES is the one age vocabulary; the console renders its tokens
+    // through the shared choice control and ocExportFilter reads them.
+    check('FILTER_AGES offers canonical Go duration spellings',
+      JSON.stringify(w.eval('FILTER_AGES')) === JSON.stringify([
+        ['', 'any'], ['1h', '1 hour'], ['24h', '1 day'], ['168h', '1 week']]));
+    // The age list is four labelled spans, so it renders as a select; its
+    // options are still exactly the FILTER_AGES tokens.
+    const ageChoice = d.querySelector('#oc-pane [data-oc-choice="export-age"]');
+    check('the console export age choices are the FILTER_AGES tokens',
+      ageChoice.tagName === 'SELECT' &&
+      JSON.stringify([...ageChoice.options].map(option => option.value)) ===
+        JSON.stringify(w.eval('FILTER_AGES').map(([value]) => value)));
+
+    const now = Date.now();
+    const filter = w.ocExportFilter({
+      provider: 'p', model: 'm', client: 'c', conversation: 'cv', errorType: 'rate_limit',
+      status: '429', errors: true, debug: true, age: '1h', after: '24h',
+    });
+    check('ocExportFilter emits exactly the server purge filter keys',
+      JSON.stringify(Object.keys(filter).sort()) === JSON.stringify([
+        'after_ms', 'before_ms', 'client', 'conversation_id', 'debug', 'error_type',
+        'has_error', 'model', 'provider', 'status_code']));
+    check('ocExportFilter maps each export dimension to its server key',
+      filter.provider === 'p' && filter.model === 'm' && filter.client === 'c' &&
+      filter.conversation_id === 'cv' && filter.error_type === 'rate_limit' &&
+      filter.status_code === 429 && filter.has_error === true && filter.debug === true &&
+      filter.before_ms > now - 3700000 && filter.before_ms < now - 3500000 &&
+      filter.after_ms > now - 24 * 3600000 - 10000 && filter.after_ms < now - 24 * 3600000 + 10000);
+    check('an empty export filter is a fully empty server predicate',
+      JSON.stringify(w.ocExportFilter({})) === JSON.stringify({
+        provider: '', model: '', client: '', conversation_id: '', error_type: '',
+        status_code: 0, has_error: false, debug: false, before_ms: 0, after_ms: 0,
+      }));
+    check('ocExportURL encodes the filter with the server keys',
+      w.ocExportURL({ provider: 'openai', status_code: 429, has_error: false, debug: false,
+        before_ms: 0, model: '', client: '', conversation_id: '', error_type: '', after_ms: 0 }) ===
+        '/metrics/export?provider=openai&status_code=429');
+    check('empty filter exports everything', w.ocExportURL({}) === '/metrics/export');
+    // One predicate decides what counts as a chosen field, and the URL builder
+    // and the count gate both read it: a field the URL omits must not arm the
+    // gate, and a field the gate counts must reach the URL.
+    check('one predicate decides whether a filter field carries a choice',
+      w.eval('ocPredicateSet("")') === false && w.eval('ocPredicateSet(0)') === false &&
+      w.eval('ocPredicateSet(false)') === false && w.eval('ocPredicateSet("x")') === true &&
+      w.eval('ocPredicateSet(429)') === true && w.eval('ocPredicateSet(true)') === true &&
+      w.ocExportURL({ provider: '', status_code: 0, has_error: false, model: 'm' }) ===
+        '/metrics/export?model=m');
+    // The "choose a filter" gate reads the predicate owner, so a field that
+    // reaches ocExportFields is armed the moment it exists instead of the mode
+    // looking ready while the count refuses to run.
+    {
+      // The section is left exactly as this check found it: the lines below
+      // continue driving the live picker, so a stray mode reset here would
+      // remove the control they click.
+      const savedDraft = w.eval('JSON.stringify(ocDrafts.export)');
+      const armed = {};
+      const draftOf = patch => JSON.stringify(Object.assign(
+        JSON.parse(w.eval('JSON.stringify(ocBlankExportDraft())')), {mode: 'filter'}, patch));
+      w.eval('ocDrafts.export = ' + draftOf({}));
+      armed.blank = w.eval('ocFilterActive(ocDrafts.export)');
+      for (const field of ['provider', 'model', 'client', 'conversation', 'errorType', 'status']) {
+        w.eval('ocDrafts.export = ' + draftOf({[field]: field === 'status' ? '500' : 'x'}));
+        armed[field] = w.eval('ocFilterActive(ocDrafts.export)');
+      }
+      for (const field of ['errors', 'debug']) {
+        w.eval('ocDrafts.export = ' + draftOf({[field]: true}));
+        armed[field] = w.eval('ocFilterActive(ocDrafts.export)');
+      }
+      for (const field of ['age', 'after']) {
+        w.eval('ocDrafts.export = ' + draftOf({[field]: '1h'}));
+        armed[field] = w.eval('ocFilterActive(ocDrafts.export)');
+      }
+      w.eval("ocDrafts.export = Object.assign(ocBlankExportDraft(), {mode: 'all', provider: 'x'})");
+      armed.allMode = w.eval('ocFilterActive(ocDrafts.export)');
+      check('the export filter gate arms on every predicate field and stays off when empty',
+        armed.blank === false && armed.allMode === false &&
+        ['provider', 'model', 'client', 'conversation', 'errorType', 'status', 'errors', 'debug', 'age', 'after']
+          .every(field => armed[field] === true));
+      w.eval('ocDrafts.export = ' + savedDraft + '; ocRender()');
+    }
+    check('debug-only export encodes the shared flag',
+      w.ocExportURL({ debug: true }) === '/metrics/export?debug=1');
+    check('conversation and error type ride their server keys',
+      w.ocExportURL({ conversation_id: 'cv', error_type: 'rate_limit' }) ===
+        '/metrics/export?conversation_id=cv&error_type=rate_limit');
+
+    // Count preview: purgeCount reads /admin/purge/count with the same
+    // predicate, debounced 280ms behind the last filter mutation.
+    let countCalls = 0;
+    let countBody = null;
+    w.fetch = (url, options) => {
+      if (String(url).includes('/admin/purge/count')) {
+        countCalls++;
+        countBody = options.body ? JSON.parse(options.body) : null;
+        return Promise.resolve({ ok: true, json: async () => ({ count: 3 }) });
+      }
+      return savedFetch(url, options);
+    };
+    await clickWait('#oc-pane [data-oc-filter-pick="provider"]');
+    await clickWait('#oc-pane [data-oc-filter-value="provider"][data-oc-value="p"]');
+    check('the export count waits behind the debounce', countCalls === 0);
+    check('the debounced export count lands and paints its receipt',
+      await settleUntil(() => countCalls === 1 &&
+        d.getElementById('oc-export-receipt').textContent === '3 records · JSON, gzip'));
+    check('the count preview posts the same predicate the download uses',
+      countBody && countBody.filter.provider === 'p' &&
+      JSON.stringify(Object.keys(countBody.filter).sort()) === JSON.stringify([
+        'after_ms', 'before_ms', 'client', 'conversation_id', 'debug', 'error_type',
+        'has_error', 'model', 'provider', 'status_code']));
+
+    let downloaded = null;
+    w.triggerDownload = (href, download) => { downloaded = { href, download }; };
+    await clickWait('#oc-pane [data-oc-download]');
+    // The artifact streams, so this code cannot observe its status. The phrase
+    // reports the action taken, not an outcome nobody watched.
+    check('download uses the previewed filter URL and reports the request it made',
+      downloaded && downloaded.href === '/metrics/export?provider=p' && downloaded.download === '' &&
+      q('#oc-pane [data-oc-download]')?.disabled === false &&
+      d.getElementById('oc-change').textContent === 'downloading 3 records');
+
+    await clickWait('#oc-pane [data-oc-reset-export]');
+    check('reset returns the export section to all history and recounts it',
+      await settleUntil(() =>
+        /^\d+ records? · JSON, gzip$/.test(d.getElementById('oc-export-receipt').textContent) &&
+        q('#oc-pane [data-oc-choice="export-mode"][data-oc-value="all"]')
+          ?.getAttribute('aria-pressed') === 'true', 3000));
+  } finally {
+    w.fetch = savedFetch;
+    w.triggerDownload = savedDownload;
+    if (host) host.remove();
+    if (savedRecords) {
+      w.__logsParitySaved = savedRecords;
+      w.eval('lastData.records = window.__logsParitySaved');
+      delete w.__logsParitySaved;
+    }
+    delete w.__logsParityRecords;
+    w.closeOperatorConsole();
+    w.eval("ocDrafts.export = null; ocError = ''");
   }
 };

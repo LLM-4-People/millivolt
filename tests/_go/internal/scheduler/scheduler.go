@@ -37,10 +37,7 @@ func queueWaiters(g *group) []*waiter {
 // backoff under the group lock. The scheduler exports no observer; production
 // consumes these values through BackoffFor/FailSend/EndSend behavior.
 func groupBackoffState(s *Scheduler, key string) (attempt, request time.Duration) {
-	g := s.groupFor(key, 0)
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.backoff, g.requestBackoff
+	return s.groupFor(key, 0).backoffState()
 }
 
 func TestFIFOOrdering(t *testing.T) {
@@ -520,7 +517,7 @@ func TestRestoreHoldsIdempotent(t *testing.T) {
 func TestPauseOneClientDoesNotBlockAnother(t *testing.T) {
 	s := New(Options{MaxConcurrent: 1})
 	ctx := context.Background()
-	s.RestoreHolds([]Hold{{Clients: []string{"slow"}}})
+	s.RestoreHolds([]Hold{{Scope: LimitScope{Clients: []string{"slow"}}}})
 
 	slowGot := make(chan struct{})
 	go func() {

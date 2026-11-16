@@ -278,9 +278,12 @@ func EncodeResponse(p ir.Protocol, resp *ir.Response) ([]byte, error) {
 }
 
 // TranslateResponseBetween converts one non-streaming response body between
-// two protocols.
+// two protocols. It carries no request context, so a namespace group a
+// Responses request declared cannot be named again on a returned call; a caller
+// that needs that uses TranslateResponseBetweenIR with
+// ResponseOptions.ToolNames.
 func TranslateResponseBetween(inbound, outbound ir.Protocol, body []byte) ([]byte, ir.Warnings, error) {
-	out, _, warnings, err := TranslateResponseBetweenIR(inbound, outbound, body, nil)
+	out, _, warnings, err := TranslateResponseBetweenIR(inbound, outbound, body, nil, ResponseOptions{})
 	return out, warnings, err
 }
 
@@ -291,7 +294,7 @@ func TranslateResponseBetween(inbound, outbound ir.Protocol, body []byte) ([]byt
 // (parsed with the provider's custom keys) and replaces the usage the target
 // codec could decode from standard names alone. A provider error envelope
 // returns a nil response: the encoded error body is the whole result.
-func TranslateResponseBetweenIR(inbound, outbound ir.Protocol, body []byte, sourceUsage *ir.Usage) ([]byte, *ir.Response, ir.Warnings, error) {
+func TranslateResponseBetweenIR(inbound, outbound ir.Protocol, body []byte, sourceUsage *ir.Usage, opts ResponseOptions) ([]byte, *ir.Response, ir.Warnings, error) {
 	if outbound == ir.Anthropic {
 		if e, err := DecodeAnthropicError(body); err == nil {
 			out, err := EncodeError(inbound, e)
@@ -309,8 +312,17 @@ func TranslateResponseBetweenIR(inbound, outbound ir.Protocol, body []byte, sour
 	if sourceUsage != nil {
 		resp.Usage = *sourceUsage
 	}
+	resp.ToolNames = opts.ToolNames
 	out, err := EncodeResponse(inbound, resp)
 	return out, resp, resp.Warnings, err
+}
+
+// ResponseOptions carries the request-scoped context the inbound encoder needs
+// while it renders one translated response.
+type ResponseOptions struct {
+	// ToolNames maps a flat wire tool name back to the tool the translated
+	// request declared. See StreamOptions.ToolNames.
+	ToolNames map[string]ir.Tool
 }
 
 // StreamOptions carries the client's stream preferences that the target
@@ -334,6 +346,11 @@ type StreamOptions struct {
 	// The proxy passes config.StreamEventMaxBytes; zero keeps the package
 	// default for direct library callers.
 	EventMaxBytes int
+	// ToolNames maps a flat wire tool name back to the tool the translated
+	// request declared. A Responses client's namespace group has no flat
+	// equivalent, so the inbound encoder needs the map to name the group again
+	// on a returned call. Nil means every call is a plain function.
+	ToolNames map[string]ir.Tool
 }
 
 // TranslateStreamBetween converts one upstream SSE stream into the inbound
@@ -379,6 +396,7 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 	case ir.Responses:
 		responses := NewResponsesStreamEncoder(dst, flusher)
 		responses.fallbackModel = opts.FallbackModel
+		responses.toolNames = opts.ToolNames
 		enc = responses
 	case ir.Anthropic:
 		anthropic := NewAnthropicStreamEncoder(dst, flusher)

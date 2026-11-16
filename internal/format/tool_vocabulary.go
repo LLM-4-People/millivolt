@@ -1,10 +1,13 @@
 package format
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
@@ -26,6 +29,177 @@ var (
 
 func toolVocabularyError(target, field, value, pattern string) error {
 	return fmt.Errorf("%s %s %q does not match %s", target, field, boundedEcho(value), pattern)
+}
+
+// droppableProviderTools are the Responses tool types a provider executes
+// itself. They are optional to the client's remaining function tools and have
+// no cross-protocol equivalent, so a translated request drops one with a
+// warning instead of failing the turn. An unknown type still fails closed: a
+// tool this proxy cannot classify must not be silently discarded.
+var droppableProviderTools = map[string]bool{
+	"web_search":                true,
+	"web_search_preview":        true,
+	"file_search":               true,
+	"code_interpreter":          true,
+	"image_generation":          true,
+	"computer":                  true,
+	"computer_use_preview":      true,
+	"mcp":                       true,
+	"tool_search":               true,
+	"programmatic_tool_calling": true,
+	// A custom tool carries freeform input with a grammar instead of a JSON
+	// schema. Chat has no equivalent, and a client that declared it expects a
+	// custom_tool_call item back, which a function call cannot satisfy, so the
+	// tool is dropped rather than declared in a shape the client cannot use.
+	"custom": true,
+}
+
+// toolNamePartPattern is the class both halves of a flattened name must already
+// carry. A target's own class check then never sees a semicolon or a space, and
+// every validated name is one byte per character, so the length bound below is
+// the same in bytes and characters.
+var toolNamePartPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// toolNameSeparator joins a Responses namespace and its tool name into the flat
+// spelling a target without namespace support receives. Two underscores keep
+// the result inside the Chat function-name class, and the namer below resolves
+// the one ambiguous case where two pairs flatten to the same string.
+const toolNameSeparator = "__"
+
+// toolNameMax bounds a flattened name to the shortest target class, the Chat
+// function-name limit. A longer pair is truncated and suffixed with a hash so
+// the spelling stays deterministic for the same pair.
+const toolNameMax = 64
+
+// toolNameHashLen is the number of hex characters appended to a truncated flat
+// name. Uniqueness comes from the namer's suffix, not from the digest: the
+// digest only keeps the truncated spelling stable and hard to group by, so two
+// long pairs do not all collapse onto one readable prefix.
+const toolNameHashLen = 8
+
+// flatToolName is the preferred flat spelling for one namespace pair. A pair
+// whose joined spelling exceeds the target class is truncated and suffixed with
+// a hash of the pair, so the encoding is deterministic and collision-resistant.
+func flatToolName(namespace, name string) string {
+	if namespace == "" {
+		return name
+	}
+	joined := namespace + toolNameSeparator + name
+	if len(joined) <= toolNameMax {
+		return joined
+	}
+	sum := sha256.Sum256([]byte(namespace + "\x00" + name))
+	digest := hex.EncodeToString(sum[:])[:toolNameHashLen]
+	keep := toolNameMax - toolNameHashLen - 1
+	if keep < 1 {
+		keep = 1
+	}
+	return truncateToolName(joined, keep) + "_" + digest
+}
+
+// truncateToolName cuts a name to at most max characters without splitting a
+// multi-byte rune, so a non-ASCII client name still marshals as valid UTF-8.
+func truncateToolName(name string, max int) string {
+	if len(name) <= max {
+		return name
+	}
+	runes := []rune(name)
+	if len(runes) <= max {
+		return name
+	}
+	return string(runes[:max])
+}
+
+// toolNamer assigns one unique flat name per declared tool in a request. The
+// preferred spelling wins; a later pair that flattens to the same string gets a
+// numeric suffix, so every declared tool stays addressable and the returned
+// name always resolves back to exactly one tool.
+type toolNamer struct {
+	used map[string]string
+}
+
+func newToolNamer() *toolNamer {
+	return &toolNamer{used: map[string]string{}}
+}
+
+// claim records one exact spelling as taken without renaming it. A plain tool
+// keeps the name the client declared, even when the client declares it twice; a
+// later namespaced pair that flattens to that spelling takes a suffix instead.
+func (n *toolNamer) claim(name string) string {
+	if _, ok := n.used[name]; !ok {
+		n.used[name] = "plain\x00" + name
+	}
+	return name
+}
+
+// toolIdentity keys one declared tool by its namespace and declared name.
+func toolIdentity(namespace, name string) string { return namespace + "\x00" + name }
+
+// assignToolNames owns the flat spelling of every declared tool in a request.
+// Plain tools keep their declared name and are claimed first, so a namespace
+// pair that flattens to the same string always takes the suffix no matter which
+// array declared it. The returned map resolves the same pair later, for a named
+// tool choice or a replayed namespaced call, to the exact spelling the model
+// saw; a pair the request did not declare falls back to flatToolName.
+func assignToolNames(tools []ir.Tool) map[string]string {
+	namer := newToolNamer()
+	for _, tool := range tools {
+		if tool.Namespace == "" {
+			namer.claim(tool.Name)
+		}
+	}
+	assigned := make(map[string]string, len(tools))
+	for i := range tools {
+		tool := &tools[i]
+		if tool.Namespace == "" {
+			tool.WireName = tool.Name
+			continue
+		}
+		tool.WireName = namer.assign(tool.Namespace, tool.Name)
+		assigned[toolIdentity(tool.Namespace, tool.Name)] = tool.WireName
+	}
+	return assigned
+}
+
+// resolveToolName returns the declared pair's assigned spelling, or the
+// preferred flat spelling when this request declared no such pair.
+func resolveToolName(assigned map[string]string, namespace, name string) string {
+	if wire, ok := assigned[toolIdentity(namespace, name)]; ok {
+		return wire
+	}
+	return flatToolName(namespace, name)
+}
+
+// assign returns the unique flat name for one pair. identity identifies the
+// pair so a repeat of the same pair returns its first assignment instead of
+// taking a new suffix.
+func (n *toolNamer) assign(namespace, name string) string {
+	base := flatToolName(namespace, name)
+	identity := namespace + "\x00" + name
+	if got, ok := n.used[base]; ok {
+		if got == identity {
+			return base
+		}
+		// A colliding base can only come from a pair that flattens to the same
+		// string, so the loop terminates after a handful of iterations; the
+		// suffix keeps the candidate inside the class.
+		for i := 2; ; i++ {
+			suffix := "_" + strconv.Itoa(i)
+			candidate := base
+			if len(candidate)+len(suffix) > toolNameMax {
+				candidate = truncateToolName(candidate, toolNameMax-len(suffix))
+			}
+			candidate += suffix
+			if got, ok := n.used[candidate]; !ok || got == identity {
+				if !ok {
+					n.used[candidate] = identity
+				}
+				return candidate
+			}
+		}
+	}
+	n.used[base] = identity
+	return base
 }
 
 // checkToolCallName enforces the IR's non-empty tool-name invariant at the
@@ -145,8 +319,8 @@ func validateResponseToolIDs(resp *ir.Response) error {
 // ids are not pattern-constrained, so only the name is checked.
 func validateChatToolVocabulary(req *ir.Request) error {
 	for _, tool := range req.Tools {
-		if !openAIIdentifierPattern.MatchString(tool.Name) {
-			return toolVocabularyError("chat", "tool name", tool.Name, "^[a-zA-Z0-9_-]{1,64}$")
+		if name := tool.ModelName(); !openAIIdentifierPattern.MatchString(name) {
+			return toolVocabularyError("chat", "tool name", name, "^[a-zA-Z0-9_-]{1,64}$")
 		}
 	}
 	if req.ToolChoice != nil && req.ToolChoice.Mode == ir.ToolChoiceTool &&
@@ -250,8 +424,8 @@ func validateAnthropicToolResult(tr *ir.ToolResult) error {
 // classes on declared tools, named choices, tool calls and tool results.
 func validateAnthropicToolVocabulary(req *ir.Request) error {
 	for _, tool := range req.Tools {
-		if !anthropicToolNamePattern.MatchString(tool.Name) {
-			return toolVocabularyError("anthropic", "tool name", tool.Name, "^[a-zA-Z0-9_-]{1,128}$")
+		if name := tool.ModelName(); !anthropicToolNamePattern.MatchString(name) {
+			return toolVocabularyError("anthropic", "tool name", name, "^[a-zA-Z0-9_-]{1,128}$")
 		}
 	}
 	if req.ToolChoice != nil && req.ToolChoice.Mode == ir.ToolChoiceTool &&

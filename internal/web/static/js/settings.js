@@ -98,14 +98,13 @@ function openSettings() {
   if (typeof closeDrawer === 'function') closeDrawer();
   const s = $('settings-sheet');
   const v = $('settings-veil');
-  const b = $('btn-settings');
   if (!s) return;
   // A competing modal (the operator prompt) preempts the sheet through the
-  // generic close; run this owner's teardown so the veil and pressed state
-  // cannot survive the takeover.
+  // generic close; run this owner's teardown so the veil and the opener's
+  // expanded state cannot survive the takeover.
   openModal(s, {onPreempt: () => settingsClose(true)});
   if (v) v.classList.add('open');
-  if (b) b.setAttribute('aria-pressed', 'true');
+  settingsExpanded(true);
   requestAnimationFrame(() => s.classList.add('open'));
   const q = $('settings-q');
   if (q) q.value = '';
@@ -133,15 +132,22 @@ function settingsClose(force) {
   }
   const s = $('settings-sheet');
   const v = $('settings-veil');
-  const b = $('btn-settings');
   const wasOpen = settingsIsOpen();
   if (s) { s.classList.remove('open'); closeModal(s); }
   if (v) v.classList.remove('open');
-  if (b) b.setAttribute('aria-pressed', 'false');
+  settingsExpanded(false);
+  if (force) {
+    // A force close (a preempting prompt) ends this sheet session, so the
+    // console origin it may carry must not leak into the next header opening.
+    if (typeof ocForgetSettingsOrigin === 'function') ocForgetSettingsOrigin();
+  }
   if (wasOpen && !force) {
-    // The Settings opener lives inside the Actions flyout, which closed
-    // before the modal opened; closeModal's stored element is now hidden and
-    // cannot receive focus. Return to the visible header control instead.
+    // A sheet opened from the operator console goes back there, to the section
+    // it came from. Otherwise the Settings opener lives inside the Actions
+    // flyout, which closed before the modal opened; closeModal's stored
+    // element is now hidden and cannot receive focus, so the visible header
+    // control is the focus home.
+    if (typeof ocRestoreSettingsOrigin === 'function' && ocRestoreSettingsOrigin()) return;
     visibleHeaderControl()?.focus();
   }
 }
@@ -202,7 +208,7 @@ function fetchSettings(discard = false) {
 }
 
 function fillSettingsForm(doc) {
-  const box = $('settings-fields');
+  const box = settingsFields();
   const rail = $('settings-rail');
   const hd = $('settings-pane-hd');
   if (!box || !rail) return;
@@ -238,8 +244,8 @@ function fillSettingsForm(doc) {
     const ref = SETTINGS_CAT_REF[c.id] || SETTINGS_CAT_REF.server;
     const badge = ref.dim
       ? entityBadge(ref.dim, '', c.label, null, c.label)
-      : `<span class="ent" style="--ent:${vis.color}" title="${escapeHtml(c.label)}"><span class="ent-ic" aria-hidden="true">${vis.icon}</span><span class="ent-lb" title="${escapeHtml(c.label)}">${escapeHtml(c.label)}</span></span>`;
-    return `<button type="button" class="st-rail-item${on}" style="--ent:${vis.color}" data-st-cat="${escapeHtml(c.id)}" aria-current="${c.id === settingsCat ? 'page' : 'false'}" aria-label="${escapeHtml(c.label)}, ${n} settings">${badge}<span class="rail-n" aria-hidden="true">${n}</span></button>`;
+      : `<span class="ent" style="--ent:${vis.color};--ent-ink:${vis.ink || vis.color}" title="${escapeHtml(c.label)}"><span class="ent-ic" aria-hidden="true">${vis.icon}</span><span class="ent-lb" title="${escapeHtml(c.label)}">${escapeHtml(c.label)}</span></span>`;
+    return `<button type="button" class="st-rail-item${on}" style="--ent:${vis.color};--ent-ink:${vis.ink || vis.color}" data-st-cat="${escapeHtml(c.id)}" aria-current="${c.id === settingsCat ? 'page' : 'false'}" aria-label="${escapeHtml(c.label)}, ${n} settings">${badge}<span class="rail-n" aria-hidden="true">${n}</span></button>`;
   }).join('');
   // The storage pane also owns both database deletions: the scoped
   // delete-matching block and the whole-database action row ride the same
@@ -290,6 +296,8 @@ function fillSettingsForm(doc) {
   settingsCacheSnapshots(collectSettingsValues());
   settingsKeyEls = settingsKeyElementMap(box);
   showSettingsCat();
+  // A surface that asked for a category lands on it now that the rail exists.
+  if (typeof settingsApplyCatRequest === 'function') settingsApplyCatRequest();
   updateSettingsActions();
 }
 

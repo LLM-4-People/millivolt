@@ -22,8 +22,14 @@ func TestDashFileAllowlist(t *testing.T) {
 		DashPrefix + "css/requests.css",
 		DashPrefix + "css/inspector.css",
 		DashPrefix + "css/themes.css",
+		DashPrefix + "css/console.css",
 		DashPrefix + "vendor/uplot.js",
 		DashPrefix + "js/core.js",
+		DashPrefix + "js/operator_console.js",
+		DashPrefix + "js/operator_limits.js",
+		DashPrefix + "js/operator_holds.js",
+		DashPrefix + "js/operator_export.js",
+		DashPrefix + "js/operator_overview.js",
 		DashPrefix + "js/settings.js",
 	}
 	for _, p := range ok {
@@ -134,9 +140,16 @@ func TestIndexAndFaviconMethods(t *testing.T) {
 	if rec.Body.Len() != 0 {
 		t.Fatalf("HEAD / leaked %d body bytes", rec.Body.Len())
 	}
+	// The shell carries no inline script, so the policy claims script-src
+	// without 'unsafe-inline'; the two inline style attributes keep the
+	// attribute allowance on style-src.
 	if got := rec.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") ||
 		!strings.Contains(got, "object-src 'none'") || !strings.Contains(got, "base-uri 'none'") ||
-		!strings.Contains(got, "form-action 'self'") {
+		!strings.Contains(got, "form-action 'self'") || !strings.Contains(got, "default-src 'none'") ||
+		!strings.Contains(got, "script-src 'self'") ||
+		strings.Contains(got, "script-src 'self' 'unsafe-inline'") ||
+		!strings.Contains(got, "style-src 'self' 'unsafe-inline'") ||
+		!strings.Contains(got, "img-src 'self' https://www.google.com https://*.gstatic.com data:") {
 		t.Fatalf("dashboard CSP = %q", got)
 	}
 	if rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Header().Get("Referrer-Policy") != "no-referrer" {

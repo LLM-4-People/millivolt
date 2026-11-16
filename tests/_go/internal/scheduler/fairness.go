@@ -46,7 +46,7 @@ func TestFairProviderDrainGrantsOnePerKey(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
 		provider := "fair.example"
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 2}})
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 2}})
 		ctx := context.Background()
 		hooks := WaiterHooks{Provider: provider}
 
@@ -129,7 +129,7 @@ func TestFairSnapshotRotatesProviderGroups(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
 		provider := "rotate.example"
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 1}})
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		holder, err := s.AcquireWith(ctx, provider+"|holder", 0, WaiterHooks{Provider: provider})
@@ -213,7 +213,7 @@ func TestProviderFastPathQueuesBehindAnotherKey(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
 		provider := "fastpath.example"
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{
 			Concurrency: 10, Tokens: 100, TokWindow: time.Hour,
 		}})
 		ctx := context.Background()
@@ -299,7 +299,7 @@ func TestFairDrainNoStarvation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
 		provider := "starvation.example"
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: keys}})
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: keys}})
 		ctx := context.Background()
 		hooks := WaiterHooks{Provider: provider}
 
@@ -383,7 +383,7 @@ func TestFairDrainCancellationDoesNotLeak(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
 		provider := "cancel.example"
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 2}})
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 2}})
 		ctx := context.Background()
 		hooks := WaiterHooks{Provider: provider}
 
@@ -498,7 +498,7 @@ func TestProviderFastPathIgnoresPerKeyBlockedPeer(t *testing.T) {
 			name: "hold",
 			setup: func(t *testing.T, s *Scheduler, _ string) {
 				t.Helper()
-				if err := s.AddHold(Hold{ID: "peer", Clients: []string{"client-a"}}); err != nil {
+				if err := s.AddHold(Hold{ID: "peer", Scope: LimitScope{Clients: []string{"client-a"}}}); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -515,7 +515,7 @@ func TestProviderFastPathIgnoresPerKeyBlockedPeer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				s := New(Options{})
-				s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 10}})
+				s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 10}})
 				ctx := context.Background()
 				keyA, keyB := provider+"|a", provider+"|b"
 				holderA, err := s.AcquireWith(ctx, keyA, 0, WaiterHooks{Provider: provider})
@@ -600,7 +600,7 @@ func TestFairDrainClearsPerKeyBlockedMark(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
 		provider := "mixed.example"
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 3}})
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 3}})
 		ctx := context.Background()
 		hooks := WaiterHooks{Provider: provider}
 
@@ -661,7 +661,7 @@ func TestFairDrainClearsPerKeyBlockedMark(t *testing.T) {
 			t.Fatal("trip left the paced key in the fair-waiting set")
 		}
 		// Two more provider slots open at once: only B can use them.
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 5}})
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 5}})
 		synctest.Wait()
 		if got := len(grantsB); got != 2 {
 			t.Fatalf("key B grants = %d, want both freed slots", got)
@@ -705,7 +705,7 @@ func TestGateWaitingMarkClearsOnCancellationAndGrant(t *testing.T) {
 	t.Run("cancellation", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			s := New(Options{})
-			s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+			s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 1}})
 			ctx := context.Background()
 			holder, err := s.AcquireWith(ctx, provider+"|holder", 0, WaiterHooks{Provider: provider})
 			if err != nil {
@@ -741,7 +741,7 @@ func TestGateWaitingMarkClearsOnCancellationAndGrant(t *testing.T) {
 	t.Run("grant", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			s := New(Options{})
-			s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+			s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 1}})
 			ctx := context.Background()
 			holder, err := s.AcquireWith(ctx, provider+"|holder", 0, WaiterHooks{Provider: provider})
 			if err != nil {
@@ -787,7 +787,7 @@ func TestGateWaitingMarkClearsOnCancellationAndGrant(t *testing.T) {
 func TestReleaseSkipsPerKeyBlockedPeer(t *testing.T) {
 	s := New(Options{})
 	provider := "skip.example"
-	s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 3}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 3}})
 	ctx := context.Background()
 
 	holderA, err := s.AcquireWith(ctx, provider+"|a", 0, WaiterHooks{Provider: provider})
@@ -856,7 +856,7 @@ func TestReleaseSkipsPerKeyBlockedPeer(t *testing.T) {
 func TestFairDrainStopsWhenProviderConcurrencyFull(t *testing.T) {
 	s := New(Options{})
 	provider := "stop.example"
-	s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 1}})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -945,7 +945,7 @@ func TestFairDrainKeepsMultiSlotCapacity(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
 		provider := "multislot.example"
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 2}})
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 2}})
 		ctx := context.Background()
 		hooks := WaiterHooks{Provider: provider}
 
@@ -984,7 +984,7 @@ func TestFairDrainKeepsMultiSlotCapacity(t *testing.T) {
 			t.Fatalf("fair-waiting groups = %d, want keys A and B", got)
 		}
 
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 4}})
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 4}})
 		synctest.Wait()
 		if got := len(grants); got != 2 {
 			t.Fatalf("cap raise granted %d waiters, want both keys in one drain", got)
@@ -1039,7 +1039,7 @@ func BenchmarkThrottledReleaseFairBacklog(b *testing.B) {
 				}
 				release(0)
 			}
-			s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+			s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 1}})
 			holder, err := s.AcquireWith(ctx, provider+"|target", 0, hooks)
 			if err != nil {
 				b.Fatal(err)
@@ -1139,7 +1139,7 @@ func BenchmarkThrottledReleasePacedPeers(b *testing.B) {
 	for _, peers := range []int{0, 1, 100, 1000} {
 		b.Run(strconv.Itoa(peers), func(b *testing.B) {
 			s := New(Options{})
-			s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 10}})
+			s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 10}})
 			for i := 0; i < peers; i++ {
 				key := provider + "|peer-" + strconv.Itoa(i)
 				release, err := s.AcquireWith(ctx, key, 0, WaiterHooks{Provider: provider})

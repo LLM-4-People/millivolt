@@ -1,7 +1,7 @@
 // test 1: full render painted 30 rows
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function renderLive(H) {
-  const {JSDOM, STATIC, check, d, fire, fs, mkRec, path, rows, settleUntil, sleep, w} = H;
+  const {JSDOM, STATIC, check, d, fire, fs, mkRec, path, pauseAmbient, resumeAmbient, rows, settleUntil, sleep, w} = H;
   const state = H.state;
 
   // ---- test 1: full render painted 30 rows ----
@@ -11,7 +11,9 @@ module.exports = async function renderLive(H) {
     const cols = [...d.querySelectorAll('#tbl-requests colgroup col')];
     const ths = [...d.querySelectorAll('#tbl-requests thead th')];
     const labels = ths.map(th => th.textContent);
-    const expectedLabels = ['time', 'client · provider · model', 'status', 'ttft', 'tps',
+    // Status precedes the identity column: the outcome has to survive the
+    // first sideways scroll on a phone, and the identity is the widest cell.
+    const expectedLabels = ['time', 'status', 'client · provider · model', 'ttft', 'tps',
       'in/out', 'cache', 'tools', 'finish', 'dur', 'turns', 'queued', 'cost', ''];
     const firstCell = d.querySelector('#tbl-requests tr.exp-row td');
     check('the request table column contract is literal',
@@ -29,6 +31,51 @@ module.exports = async function renderLive(H) {
     })());
     check('the actions header has an accessible name',
       ths[13]?.getAttribute('aria-label') === 'Request actions');
+    // The opener is the only control in the table, so it must not scroll out
+    // of reach and must not be a glyph-sized target.
+    const actionProbe = (() => {
+      const btn = d.querySelector('#tbl-requests tr.exp-row:not(.retry-sub) .log-open');
+      const lastTd = btn && btn.closest('td:last-child');
+      if (!btn) return false;
+      const css = w.getComputedStyle;
+      return [css(ths[13]).position, css(ths[13]).right, css(lastTd).position,
+        css(lastTd).right, css(btn).width, css(btn).height].join(',');
+    })();
+    check('the actions column pins to the right edge and the opener is a real target (' + actionProbe + ')',
+      actionProbe === 'sticky,0px,sticky,0px,26px,26px');
+    // Every row repeats the same glyph, so the name has to say which request it
+    // opens: the time and the identity make eleven openers distinguishable.
+    const openerLabels = [...d.querySelectorAll('#tbl-requests .log-open')]
+      .map(button => button.getAttribute('aria-label') || '');
+    check('every request opener names its own request by time and identity (' + openerLabels.length + ' openers)',
+      openerLabels.length > 1 && new Set(openerLabels).size === openerLabels.length &&
+      openerLabels.every(label => /^Open request details for \d.* \S+ · \S+ · \S+ \(\w{6}\)$/.test(label)));
+    // The pinned cell repaints with its row in the row's other states, and the
+    // opener takes the touch target on a coarse pointer or a narrow viewport
+    // (jsdom resolves neither media query, so the source order is pinned).
+    const reqCSS = fs.readFileSync(path.join(STATIC, 'css/requests.css'), 'utf8');
+    const repaint = /#tbl-requests tr:hover td:last-child,\s*#tbl-requests tr:focus-within td:last-child,\s*#tbl-requests tr\.exp-row\.expanding td:last-child \{ background: var\(--panel2\); \}/.test(reqCSS);
+    check('the pinned cell repaints with its row on hover, focus and the open row',
+      repaint && /#tbl-requests tr\.exp-row:not\(\.retry-sub\) td:last-child \{\s*position: sticky/.test(reqCSS));
+    const coarseBlock = reqCSS.indexOf('.log-open { width: var(--tap); height: var(--tap); font-size: 17px; }');
+    check('the opener reaches the touch target on a coarse pointer or narrow viewport',
+      coarseBlock > reqCSS.indexOf('width: 26px; height: 26px') &&
+      reqCSS.lastIndexOf('@media (max-width: 800px), (hover: none), (pointer: coarse)', coarseBlock) > 0);
+    check('an actionable status pill is a button, not a pointer-only span', (() => {
+      const rec = {client: 'c', provider: 'p', model: 'm', status_code: 0, live: true,
+        paused: true, throttled: false, stream: true, debug: true};
+      const host = d.createElement('div');
+      host.innerHTML = w.liveStatusCell(rec);
+      const throttled = d.createElement('div');
+      throttled.innerHTML = w.liveStatusCell({...rec, paused: false, throttled: true});
+      const debugOnly = d.createElement('div');
+      debugOnly.innerHTML = w.debugBadge({debug: true});
+      const all = [host, throttled, debugOnly].flatMap(box => [...box.querySelectorAll('button')]);
+      return host.querySelector('.pill.paused')?.tagName === 'BUTTON' &&
+        throttled.querySelector('.pill.throttled')?.tagName === 'BUTTON' &&
+        debugOnly.querySelector('.pill.debug')?.tagName === 'BUTTON' &&
+        all.length === 5 && all.every(b => b.type === 'button');
+    })());
     check('request cells clip and ellipsize only as a below-floor backstop',
       !!firstCell && w.getComputedStyle(firstCell).overflow === 'hidden' &&
       w.getComputedStyle(firstCell).textOverflow === 'ellipsis');
@@ -318,6 +365,10 @@ module.exports = async function renderLive(H) {
       w.renderGallery(w.explorerState());
     }
 
+    // The page's own tick refetches a payload it considers foreign (this
+    // fixture carries no scopeKey), which overwrote the rail under load. Own
+    // the timers for this block and hand them back afterwards.
+    pauseAmbient();
     const trigger = d.getElementById('xp-dim-trigger');
     let mutations = [];
     const observer = new w.MutationObserver(records => mutations.push(...records));
@@ -364,6 +415,7 @@ module.exports = async function renderLive(H) {
       observer.disconnect();
       w.eval('explorerAgg=window.__restoreRailAgg;delete window.__restoreRailAgg');
       w.renderDimRail(w.explorerState());
+      resumeAmbient();
     }
   }
 
@@ -527,6 +579,63 @@ module.exports = async function renderLive(H) {
     check('KPI band skeleton matches the first-rendered tile structure',
       skel.length === live.length && JSON.stringify(skel) === JSON.stringify(live) &&
       JSON.stringify(live));
+  }
+
+  // An in-flight count is activity, not failure: the flight tile has no error
+  // voice of its own, so it only wears the coral tick when nothing is wrong.
+  {
+    const cls = w.eval(`(() => {
+      const html = errors => {
+        const saved = kpiAgg;
+        kpiAgg = { requests: 4, errors, in_flight: 3, cost: 0, cost_per_req: null, cost_per_mtok: null,
+          input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null };
+        const host = document.createElement('div');
+        host.innerHTML = derive({ records: [], counters: { in_flight: 3 }, _rev: 3 + errors }).kpiHtml;
+        kpiAgg = saved;
+        const tiles = [...host.querySelectorAll('.kpi')];
+        return [tiles[1].className, tiles[tiles.length - 1].className].join('|');
+      };
+      return html(0) + '#' + html(1);
+    })()`);
+    const [clean, erring] = cls.split('#');
+    check('the in-flight tile keeps the neutral tick beside a zero error rate',
+      !/\bk-err\b/.test(clean.split('|')[0]) &&
+      !/\bk-err\b/.test(erring.split('|')[0]) && /\bk-err\b/.test(erring.split('|')[1]));
+  }
+
+  // The document carries no inline handler, which is what lets the policy
+  // claim script-src 'self': every shell control is in one id table, and each
+  // of those ids exists.
+  {
+    const html = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
+    check('the shell carries no inline handlers',
+      !/\son(?:click|input|change|keydown)=/.test(html));
+    const table = w.eval('STATIC_BINDINGS');
+    check('every bound control exists and every handler is a function',
+      Object.keys(table).length >= 15 &&
+      Object.entries(table).every(([id, events]) =>
+        !!d.getElementById(id) && Object.values(events).every(fn => typeof fn === 'function')));
+    check('the pre-paint guard is a static script after the stylesheets',
+      html.indexOf('js/theme_boot.js') > html.lastIndexOf('rel="stylesheet"') &&
+      !/<script>\n/.test(html));
+  }
+
+  // Two "Requests" headings were one heading too many, and a disclosure that
+  // only expands a panel is not a menu. The band names the measure, the theme
+  // trigger announces the dialog it opens, and the flyout is a named group.
+  {
+    const heads = [...d.querySelectorAll('#kpis h2')].map(h => h.textContent);
+    const nav = d.getElementById('btn-nav');
+    const theme = d.getElementById('btn-theme');
+    check('the band counts this section once by name',
+      heads.filter(h => h === 'Request count').length === 1 &&
+      !heads.includes('Requests') &&
+      d.querySelector('#tbl-requests')?.closest('.card')?.querySelector('.card-hd h2')?.textContent === 'Request log');
+    check('the theme trigger opens a dialog and the flyout is a named group',
+      theme.getAttribute('aria-haspopup') === 'dialog' &&
+      d.getElementById('hdr-actions').getAttribute('role') === 'group' &&
+      d.getElementById('hdr-actions').getAttribute('aria-label') === 'Header actions' &&
+      !nav.hasAttribute('aria-haspopup'));
   }
 
   // The Avg TPS KPI uses the same compact unit as the Overview timing tile.

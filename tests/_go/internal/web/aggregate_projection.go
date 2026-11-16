@@ -408,3 +408,34 @@ func TestProjectionVisitSinceCancellation(t *testing.T) {
 		t.Fatal("canceled fold walked the whole history")
 	}
 }
+
+// A panic inside the builder's scan callback must release the single-flight
+// build token. While the token leaks, every later aggregate read waits on it
+// until the process restarts; after the release the next read rebuilds.
+func TestProjectionPanicDuringBuildReleasesWaiters(t *testing.T) {
+	api, _ := projectionAPI(t)
+	api.store.Record(cacheRecord("panicking", time.Now()))
+	if err := api.store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	api.testHooks = &aggregateTestHooks{scan: func() { panic("projection scan panicked") }}
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_ = api.PreloadHistory(t.Context())
+	}()
+	if recovered == nil {
+		t.Fatal("scan hook did not panic")
+	}
+	api.testHooks = nil
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := api.withProjection(ctx, func(p *projectionData) error {
+		if len(p.rows) != 1 || !p.cursor.Ready {
+			t.Fatalf("rebuilt projection = %+v", p)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read after a panicking build: %v", err)
+	}
+}

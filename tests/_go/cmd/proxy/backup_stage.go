@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -76,6 +80,231 @@ func assertNoPreservedPending(t *testing.T, dir string) {
 		if strings.HasPrefix(e.Name(), ".millivolt-restore-pending-") {
 			t.Fatalf("preserved pending snapshot left behind: %s", e.Name())
 		}
+	}
+}
+
+// TestCaptureRestorePendingKeepsTheSlotPinned pins D1: the preserved copy is a
+// hard link made before anything replaces the slot, so a crash inside the
+// stage window can never leave a queue that is both empty and recoverable only
+// from an expiring staging orphan. Rollback still restores the queued bytes.
+func TestCaptureRestorePendingKeepsTheSlotPinned(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "live.db")
+	pending := storage.PendingSnapshotPath(dbPath)
+	original := []byte("queued snapshot")
+	if err := os.WriteFile(pending, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := captureRestorePending(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(filepath.Base(guard.backup), ".millivolt-restore-pending-") {
+		t.Fatalf("preserved name = %q, want the registered staging pattern", guard.backup)
+	}
+	// The slot is still the queued snapshot (not renamed away) and the
+	// preserved name is the same inode, so either name survives a crash.
+	if got, err := os.ReadFile(pending); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("slot during the stage = %q, %v; want the queued bytes", got, err)
+	}
+	slotInfo, err := os.Stat(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preservedInfo, err := os.Stat(guard.backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(slotInfo, preservedInfo) {
+		t.Fatal("the preserved name is a second copy, not a hard link to the queued snapshot")
+	}
+	// The stage publishes its successor by rename over the slot; a rollback
+	// must bring the preserved bytes back.
+	successor := filepath.Join(dir, "successor.tmp")
+	if err := os.WriteFile(successor, []byte("successor"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(successor, pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(pending); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("rollback restored %q, %v; want the queued bytes", got, err)
+	}
+}
+
+// TestRestorePendingRollbackRemovesThePreservedSibling pins the other rollback
+// shape: a stage that fails BEFORE publish's rename leaves the slot and the
+// preserved name as two links of one inode, so restoring the slot by rename is
+// a no-op. The sibling must still be removed, or it survives hidden behind an
+// emptied guard until the 24 h staging sweep.
+func TestRestorePendingRollbackRemovesThePreservedSibling(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "live.db")
+	pending := storage.PendingSnapshotPath(dbPath)
+	original := []byte("queued snapshot")
+	if err := os.WriteFile(pending, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := captureRestorePending(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.rollback(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoPreservedPending(t, dir)
+	if got, err := os.ReadFile(pending); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("rollback left %q, %v; want the queued bytes", got, err)
+	}
+	if guard.backup != "" {
+		t.Fatalf("guard still names %q after rollback", guard.backup)
+	}
+}
+
+// TestCaptureRestorePendingFallsBackWithoutHardLinks pins the removable-volume
+// case: link(2) is unavailable on exFAT/vfat and on several FUSE and SMB
+// mounts. A replace restore must still stage, so an unavailable link falls back
+// to moving the slot aside, which the guard's rollback and the boot
+// re-admission both handle.
+func TestCaptureRestorePendingFallsBackWithoutHardLinks(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "live.db")
+	pending := storage.PendingSnapshotPath(dbPath)
+	original := []byte("queued snapshot")
+	if err := os.WriteFile(pending, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := restorePendingLinkHook
+	restorePendingLinkHook = func(string, string) error { return syscall.EPERM }
+	defer func() { restorePendingLinkHook = previous }()
+
+	guard, err := captureRestorePending(dbPath)
+	if err != nil {
+		t.Fatalf("restore refused on a volume without hard links: %v", err)
+	}
+	if _, err := os.Lstat(pending); !os.IsNotExist(err) {
+		t.Fatal("the fallback must move the slot aside, not copy it")
+	}
+	if err := guard.rollback(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoPreservedPending(t, dir)
+	if got, err := os.ReadFile(pending); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("rollback left %q, %v; want the queued bytes", got, err)
+	}
+}
+
+// blockingRestoreBody blocks the first read until release closes, so a test can
+// observe the restore's upload window.
+type blockingRestoreBody struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingRestoreBody) Read([]byte) (int, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return 0, io.EOF
+}
+
+func (b *blockingRestoreBody) Close() error { return nil }
+
+// TestRestoreUploadRefusesSaveAndReloadInsteadOfBlocking pins the lock contract
+// of the restore transaction: the upload is exempt from the read timeout and
+// may stream for as long as the client keeps trickling, and the transaction
+// holds reloadMu across it. A Settings save or /admin/reload must therefore
+// refuse with 409 in that window instead of hanging on the lock for the whole
+// upload.
+func TestRestoreUploadRefusesSaveAndReloadInsteadOfBlocking(t *testing.T) {
+	liveReloadFixture(t)
+	if err := os.WriteFile(liveConfigPath, []byte("max_retries: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := &blockingRestoreBody{entered: make(chan struct{}), release: make(chan struct{})}
+	req := httptest.NewRequest(http.MethodPost, "/admin/restore?config=1&database=0", body)
+	done := make(chan int, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		handleRestore(rr, req)
+		done <- rr.Code
+	}()
+	select {
+	case <-body.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never started reading the upload")
+	}
+	// A blocked call would hang the whole package run, so each call gets its
+	// own deadline.
+	status := func(name string, serve func(*httptest.ResponseRecorder)) int {
+		t.Helper()
+		code := make(chan int, 1)
+		go func() {
+			rr := httptest.NewRecorder()
+			serve(rr)
+			code <- rr.Code
+		}()
+		select {
+		case got := <-code:
+			return got
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s blocked behind the upload", name)
+			return 0
+		}
+	}
+	if got := status("reload", func(rr *httptest.ResponseRecorder) {
+		reloadHandler()(rr, httptest.NewRequest(http.MethodPost, "/admin/reload", nil))
+	}); got != http.StatusConflict {
+		t.Fatalf("/admin/reload during an upload = %d, want 409", got)
+	}
+	h := adminConfigHandler()
+	if got := status("save", func(rr *httptest.ResponseRecorder) {
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/config",
+			strings.NewReader(`{"values":{},"revision":"r"}`)))
+	}); got != http.StatusConflict {
+		t.Fatalf("settings save during an upload = %d, want 409", got)
+	}
+	close(body.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the restore did not finish after the upload")
+	}
+}
+
+// TestRestoreConfigRollbackKeepsASymlinkedConfigALink pins H28: the rollback
+// must publish like the forward writer. A plain temp-and-rename replaced the
+// config symlink with a regular file holding the pre-restore bytes while the
+// linked target kept the restored document, so the next boot read stale bytes.
+func TestRestoreConfigRollbackKeepsASymlinkedConfigALink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.yaml")
+	if err := os.WriteFile(target, []byte("old: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "proxy.yaml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreConfigFile(link, []byte("previous: 2\n"), 0o600, true); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("rollback replaced the config symlink with a regular file")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "previous: 2\n" {
+		t.Fatalf("link target = %q, want the restored rollback bytes", got)
 	}
 }
 

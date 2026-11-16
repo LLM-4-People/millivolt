@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,6 +148,8 @@ func TestStagingSweepPreservesLivePendingAndRollback(t *testing.T) {
 		path + pendingSnapshotStateSuffix,
 		PendingSnapshotPath(path) + pendingSnapshotInvalidSuffix,
 		PendingSnapshotPath(path) + pendingSnapshotInterruptedSuffix,
+		PendingSnapshotPath(path) + pendingSnapshotInvalidSuffix + "-token",
+		PendingSnapshotPath(path) + pendingSnapshotInvalidSuffix + "-token-wal",
 	}
 	old := time.Now().Add(-2 * stagingSweepMinAge)
 	for _, safePath := range safe {
@@ -438,7 +441,9 @@ func TestStagingSweepReclaimsOrphansPastFirstBatch(t *testing.T) {
 // snapshot moves its sidecars beside the quarantined main, and those files
 // must use the protected sidecar spelling rather than a suffix order the
 // sweep's path fence does not know. The live basename is staging-shaped so a
-// name-only sweep would reclaim the old sidecars if the fence missed them.
+// name-only sweep would reclaim the old sidecars if the fence missed them. A
+// second rejection must also keep the first: quarantine names are unique, so
+// both preserved sets survive together.
 func TestStagingSweepPreservesQuarantinedPendingSidecars(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -452,42 +457,39 @@ func TestStagingSweepPreservesQuarantinedPendingSidecars(t *testing.T) {
 			path := filepath.Join(dir, "millivolt-snapshot-live.db")
 			s := &Store{path: path}
 			incoming := PendingSnapshotPath(path)
-			makeStagingEntry(t, incoming, false)
-			for _, sidecar := range snapshotSidecarSuffixes {
-				makeStagingEntry(t, incoming+sidecar, false)
-			}
-			if err := quarantinePendingSnapshot(incoming, tc.suffix); err != nil {
-				t.Fatal(err)
-			}
-
-			quarantined := incoming + tc.suffix
-			actual := make(map[string]string, len(snapshotSidecarSuffixes))
-			for _, sidecar := range snapshotSidecarSuffixes {
-				normalized := quarantined + sidecar
-				legacy := incoming + sidecar + tc.suffix
-				actualPath := normalized
-				if _, err := os.Stat(normalized); err != nil {
-					if _, legacyErr := os.Stat(legacy); legacyErr != nil {
-						t.Fatalf("quarantined sidecar %s missing in both spellings", sidecar)
-					}
-					actualPath = legacy
+			quarantine := func() string {
+				t.Helper()
+				makeStagingEntry(t, incoming, false)
+				for _, sidecar := range snapshotSidecarSuffixes {
+					makeStagingEntry(t, incoming+sidecar, false)
 				}
-				actual[sidecar] = actualPath
+				quarantined, err := quarantinePendingSnapshot(incoming, tc.suffix)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantPrefix := filepath.Base(incoming) + tc.suffix + "-"
+				if !strings.HasPrefix(filepath.Base(quarantined), wantPrefix) {
+					t.Fatalf("quarantined name = %q, want the %q token prefix", quarantined, wantPrefix)
+				}
+				return quarantined
+			}
+			first := quarantine()
+			second := quarantine()
+			if second == first {
+				t.Fatalf("second rejection reused the quarantine name %s", first)
 			}
 
 			if removed := s.sweepOrphanedStaging(time.Now()); removed != 0 {
 				t.Fatalf("sweep removed %d quarantined entries, want 0", removed)
 			}
-			if _, err := os.Stat(quarantined); err != nil {
-				t.Fatalf("sweep removed the quarantined main file: %v", err)
-			}
-			for _, sidecar := range snapshotSidecarSuffixes {
-				want := quarantined + sidecar
-				if _, err := os.Stat(want); err != nil {
-					t.Fatalf("quarantined sidecar %s was not kept under the protected spelling: %v", sidecar, err)
+			for _, quarantined := range []string{first, second} {
+				if _, err := os.Stat(quarantined); err != nil {
+					t.Fatalf("sweep removed the quarantined main file: %v", err)
 				}
-				if actual[sidecar] != want {
-					t.Fatalf("quarantine wrote sidecar %s at %s, want the protected spelling %s", sidecar, actual[sidecar], want)
+				for _, sidecar := range snapshotSidecarSuffixes {
+					if _, err := os.Stat(quarantined + sidecar); err != nil {
+						t.Fatalf("quarantined sidecar %s was not kept under the protected spelling: %v", sidecar, err)
+					}
 				}
 			}
 		})

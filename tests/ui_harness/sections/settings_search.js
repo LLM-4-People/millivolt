@@ -441,6 +441,114 @@ module.exports = async function settingsSearch(H) {
     check('the settings status line is announced as a live region',
       d.getElementById('settings-count').getAttribute('role') === 'status' &&
       d.getElementById('settings-count').getAttribute('aria-live') === 'polite');
+    // A live region must only speak when its words change. The status line
+    // re-renders on every keystroke with the same "N unsaved" sentence, and an
+    // unconditional assignment replaces the text node even when the string is
+    // identical, so the screen reader would repeat it per character. The shared
+    // writer compares first; this asserts the rule and the helper's semantics.
+    {
+      const status = d.getElementById('settings-count');
+      // Node identity, not a MutationObserver: an identical assignment replaces
+      // the text node synchronously, and the replacement IS the re-announcement.
+      // Observing asynchronously would let the assertion pass on a broken writer.
+      w.settingsStatus('1 unsaved');
+      const first = status.firstChild;
+      w.settingsStatus('1 unsaved');
+      const sameSentenceKept = status.firstChild === first;
+      w.settingsStatus('2 unsaved');
+      const changed = status.firstChild !== first && status.textContent === '2 unsaved';
+      // The rule must hold for every live region, not just the two that were
+    // reported. A region is usually reached through a local alias
+    // (`const el = $('id')` then `el.textContent = ...`), so the scan resolves
+    // that binding per file and flags an alias written without the guard.
+    {
+      const fs = require('fs');
+      const path = require('path');
+      const jsDir = path.join(__dirname, '..', '..', '..', 'internal', 'web', 'static', 'js');
+      const sources = fs.readdirSync(jsDir).filter(n => /\.js$/.test(n))
+        .map(n => [n, fs.readFileSync(path.join(jsDir, n), 'utf8')]);
+      // Both sources of a live region: the static shell and the markup a
+      // module builds at render time. The export receipt is only ever the
+      // second kind, and a shell-only scan could not see it.
+      const regionIds = [...d.documentElement.outerHTML.matchAll(/<[^>]*(?:role="status"|aria-live=")[^>]*>/g)]
+        .map(tag => (tag[0].match(/id="([^"]+)"/) || [])[1]).filter(Boolean);
+      for (const [name, raw] of sources) {
+        for (const m of raw.matchAll(/<[^>]*(?:role="status"|aria-live=")[^>]*>/g)) {
+          const id = (m[0].match(/id="([^"]+)"/) || [])[1];
+          if (id && !regionIds.includes(id)) regionIds.push(id);
+        }
+      }
+      const offenders = [];
+      for (const id of regionIds) {
+        for (const [name, raw] of sources) {
+          const src = raw.replace(/\/\/.*$/gm, '');
+          // Every local alias of this region in this file.
+          const aliases = [...src.matchAll(new RegExp("(?:const|let|var)\\s+(\\w+)\\s*=\\s*\\$\\('" + id + "'\\)", 'g'))]
+            .map(m => m[1]);
+          for (const alias of aliases) {
+            const assigns = new RegExp('\\b' + alias + '\\.textContent\\s*=').test(src);
+            if (!assigns) continue;
+            if (new RegExp('setText\\(' + alias + '[,)]').test(src)) continue;
+            // A deliberate re-announcement (one transient message that should
+            // speak again) opts out in the declaration comment, so the
+            // exception is stated where the writer lives rather than here.
+            // The tag names the file that owns the exception, so it is honored
+            // before any alias reasoning.
+            if (/live-region-scan:\s*allow/.test(raw)) continue;
+            offenders.push(name + ':' + id);
+          }
+        }
+      }
+      check('every live region is written through the guarded setter',
+        regionIds.length >= 6 && offenders.length === 0);
+    }
+    // A live region must also be a node whose contents only change when its
+    // words change. updateSection() replaces the whole innerHTML of its target
+    // on a poll, so every child is destroyed and rebuilt even when the visible
+    // data is identical: a screen reader then re-reads the entire strip on
+    // each tick. The totals strip was exactly that defect (polite region,
+    // repainted every chart refresh), so the rule is derived from the writers
+    // rather than restated per element.
+    {
+      const fs = require('fs');
+      const path = require('path');
+      const jsDir = path.join(__dirname, '..', '..', '..', 'internal', 'web', 'static', 'js');
+      const sources = fs.readdirSync(jsDir).filter(n => /\.js$/.test(n))
+        .map(n => [n, fs.readFileSync(path.join(jsDir, n), 'utf8')]);
+      const repainted = new Set();
+      for (const [, raw] of sources) {
+        for (const m of raw.replace(/\/\/.*$/gm, '').matchAll(/updateSection\(\s*'([^']+)'/g)) {
+          repainted.add(m[1]);
+        }
+      }
+      const shell = d.documentElement.outerHTML;
+      const markup = sources.map(([, raw]) => raw).join('\n');
+      const claimsLive = (id) => [shell, markup].some(src =>
+        [...src.matchAll(/<[^>]*>/g)].some(tag =>
+          tag[0].includes('id="' + id + '"') &&
+          /(?:role="(?:status|alert|log)"|aria-live=)/.test(tag[0])));
+      const liveTargets = [...repainted].filter(claimsLive);
+      // The control: the scan can see a repainted element that does claim a
+      // live role, so an empty result means "none are live", not "none found".
+      const probe = repainted.size >= 8 &&
+        claimsLive('settings-count') === true &&
+        claimsLive('chart-totals') === false;
+      check('a wholesale-repainted section is never a live region',
+        probe && liveTargets.length === 0);
+    }
+    check('a live region speaks only when its words change',
+        w.eval('typeof setText') === 'function' &&
+        sameSentenceKept && changed &&
+        // The control: a bare assignment is what the guard prevents, so this
+        // proves the assertion can tell the two writers apart.
+        (() => {
+          const el = d.createElement('div');
+          el.textContent = 'same';
+          const node = el.firstChild;
+          el.textContent = 'same';
+          return el.firstChild !== node;
+        })());
+    }
     const railCount = d.querySelector('#settings-rail .rail-n');
     const countStyle = w.getComputedStyle(railCount);
     check('settings rail counts right-align instead of taking the explorer count floor',

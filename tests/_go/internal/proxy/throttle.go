@@ -72,8 +72,10 @@ func deferThrottleWriter(p *Server) {
 // reads as a zero Throttle, matching a cleared cap.
 func schedThrottleFor(sched *scheduler.Scheduler, provider string) scheduler.Throttle {
 	for _, info := range sched.ListThrottles() {
-		if info.Provider == provider {
-			return info.Throttle
+		if info.Scope.PrimaryProvider() == provider {
+			th := info.Throttle
+			th.ID = ""
+			return th
 		}
 	}
 	return scheduler.Throttle{}
@@ -92,8 +94,8 @@ func TestThrottleUnchangedHeadersSkipPersistence(t *testing.T) {
 	provider := "provider.example"
 	// Seed the anti-burst pair so every header merge below must carry it: an
 	// unchanged header is a whole-policy no-op only if both fields survive.
-	initial := scheduler.Throttle{Provider: provider, Limit: scheduler.Limit{Concurrency: 3, AntiBurst: true, RampDuration: 10 * time.Second}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: time.Now().Add(-time.Hour)}
-	p.applyThrottle(initial)
+	initial := scheduler.Throttle{Scope: scheduler.LimitScope{Providers: []string{provider}}, Limit: scheduler.Limit{Concurrency: 3, AntiBurst: true, RampDuration: 10 * time.Second}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: time.Now().Add(-time.Hour)}
+	applyTestThrottle(p, initial)
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	r.Header.Set(hdrLimitConcurrency, "3")
 	for i := 0; i < 20; i++ {
@@ -104,7 +106,7 @@ func TestThrottleUnchangedHeadersSkipPersistence(t *testing.T) {
 	if err := p.FlushThrottles(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if saves := store.saveCount(); saves != 1 || schedThrottleFor(p.scheduler, provider) != initial {
+	if saves := store.saveCount(); saves != 1 || !reflect.DeepEqual(schedThrottleFor(p.scheduler, provider), initial) {
 		t.Fatal("repeated header rewrote a dashboard policy or its persistence")
 	}
 	// The opposite source direction is also a policy no-op.
@@ -120,8 +122,8 @@ func TestThrottleUnchangedHeadersSkipPersistence(t *testing.T) {
 		t.Fatal("changed header policy was not persisted with new attribution")
 	}
 	initial.Limit.Concurrency = 4
-	p.applyThrottle(initial)
-	if saves := store.saveCount(); saves != 2 || schedThrottleFor(p.scheduler, provider) != headerPolicy {
+	applyTestThrottle(p, initial)
+	if saves := store.saveCount(); saves != 2 || !reflect.DeepEqual(schedThrottleFor(p.scheduler, provider), headerPolicy) {
 		t.Fatal("identical UI cap replaced the last actual header policy change")
 	}
 	r.Header.Set(hdrLimitConcurrency, "off")
@@ -150,7 +152,7 @@ func TestThrottleConcurrentHeadersMergeLatestPolicy(t *testing.T) {
 	})
 	provider := "provider.example"
 	for i := 0; i < 40; i++ {
-		p.applyThrottle(scheduler.Throttle{Provider: provider})
+		applyTestThrottle(p, scheduler.Throttle{Scope: scheduler.LimitScope{Providers: []string{provider}}})
 		start := make(chan struct{})
 		var wg sync.WaitGroup
 		for name, value := range map[string]string{hdrLimitConcurrency: "3", hdrLimitRequests: "10/1m", hdrLimitTokens: "100/1m"} {
@@ -173,7 +175,7 @@ func TestThrottleConcurrentHeadersMergeLatestPolicy(t *testing.T) {
 			t.Fatal(err)
 		}
 		raw, _ := store.LoadThrottle(context.Background())
-		items := decodeThrottles(raw)
+		items, _ := decodeThrottles(raw)
 		if len(items) != 1 {
 			t.Fatalf("persisted stale clear: %s", raw)
 		}
@@ -224,7 +226,7 @@ func TestThrottleConcurrentUIAndHeaderMerge(t *testing.T) {
 	})
 	provider := "provider.example"
 	for i := 0; i < 40; i++ {
-		p.applyThrottle(scheduler.Throttle{Provider: provider})
+		applyTestThrottle(p, scheduler.Throttle{Scope: scheduler.LimitScope{Providers: []string{provider}}})
 		start := make(chan struct{})
 		var wg sync.WaitGroup
 		wg.Go(func() {
@@ -262,7 +264,7 @@ func TestThrottleConcurrentUIAndHeaderMerge(t *testing.T) {
 		if rr := postThrottle(t, p, `{"provider":"provider.example","concurrency":8,"tokens":-1}`); rr.Code != http.StatusBadRequest {
 			t.Fatalf("invalid UI patch status = %d", rr.Code)
 		}
-		if schedThrottleFor(p.scheduler, provider) != before || store.saveCount() != saves {
+		if !reflect.DeepEqual(schedThrottleFor(p.scheduler, provider), before) || store.saveCount() != saves {
 			t.Fatal("invalid UI patch partly changed or persisted the policy")
 		}
 	}
@@ -481,6 +483,46 @@ func TestThrottleHeaderMissingWindowRejected(t *testing.T) {
 	}
 }
 
+// A window with no count bounds nothing, so a fresh policy accepted it, stored
+// no cap and answered 200 inactive. Refuse it, but keep the useful shape: a
+// window that retunes an already stored count.
+func TestThrottleBareWindowIsRefused(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	provider := "neutral.example"
+	for _, body := range []string{
+		`{"provider":"` + provider + `","request_window":"2m"}`,
+		`{"provider":"` + provider + `","token_window":"2m"}`,
+	} {
+		rr := postThrottle(t, p, body)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("%s = %d, want 400 body %s", body, rr.Code, rr.Body.Bytes())
+		}
+	}
+	if n := len(p.scheduler.ListThrottles()); n != 0 {
+		t.Fatalf("refused windows stored %d policies", n)
+	}
+
+	// With a stored count the same bare window retunes the window only.
+	if rr := postThrottle(t, p, `{"provider":"`+provider+`","requests":30,"tokens":10,"request_window":"1m","token_window":"1m"}`); rr.Code != 200 {
+		t.Fatalf("seed = %d %s", rr.Code, rr.Body.Bytes())
+	}
+	if rr := postThrottle(t, p, `{"provider":"`+provider+`","request_window":"5m"}`); rr.Code != 200 {
+		t.Fatalf("window retune = %d %s", rr.Code, rr.Body.Bytes())
+	}
+	th := schedThrottleFor(p.scheduler, provider)
+	if th.Limit.Requests != 30 || th.Limit.ReqWindow != 5*time.Minute {
+		t.Fatalf("retune = %+v, want requests 30 over 5m", th.Limit)
+	}
+	// An explicit zero still clears the dimension and its window.
+	if rr := postThrottle(t, p, `{"provider":"`+provider+`","requests":0}`); rr.Code != 200 {
+		t.Fatalf("clear requests = %d %s", rr.Code, rr.Body.Bytes())
+	}
+	th = schedThrottleFor(p.scheduler, provider)
+	if th.Limit.Requests != 0 || th.Limit.ReqWindow != 0 || th.Limit.Tokens != 10 {
+		t.Fatalf("clear = %+v", th.Limit)
+	}
+}
+
 func TestThrottlePOSTAndClear(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
 	rr := postThrottle(t, p, `{"provider":"alpha.example","concurrency":4,"requests":30,"request_window":"1m","tokens":90000,"token_window":"1m","anti_burst":true,"ramp_duration":"10s"}`)
@@ -567,14 +609,14 @@ func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
 
 	base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	policies := []scheduler.Throttle{
-		{Provider: "alpha.example", Limit: scheduler.Limit{Requests: 30, ReqWindow: time.Minute}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base},
-		{Provider: "busy.example", Limit: scheduler.Limit{Concurrency: 1}, Source: scheduler.ThrottleSourceHeader, UpdatedBy: "client-a", UpdatedAt: base.Add(time.Minute)},
-		{Provider: "ramp.example", Limit: scheduler.Limit{Concurrency: 4, AntiBurst: true, RampDuration: 10 * time.Second}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(90 * time.Second)},
-		{Provider: "zulu.example", Limit: scheduler.Limit{Tokens: 9000, TokWindow: time.Hour}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(2 * time.Minute)},
+		{Scope: scheduler.LimitScope{Providers: []string{"alpha.example"}}, Limit: scheduler.Limit{Requests: 30, ReqWindow: time.Minute}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base},
+		{Scope: scheduler.LimitScope{Providers: []string{"busy.example"}}, Limit: scheduler.Limit{Concurrency: 1}, Source: scheduler.ThrottleSourceHeader, UpdatedBy: "client-a", UpdatedAt: base.Add(time.Minute)},
+		{Scope: scheduler.LimitScope{Providers: []string{"ramp.example"}}, Limit: scheduler.Limit{Concurrency: 4, AntiBurst: true, RampDuration: 10 * time.Second}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(90 * time.Second)},
+		{Scope: scheduler.LimitScope{Providers: []string{"zulu.example"}}, Limit: scheduler.Limit{Tokens: 9000, TokWindow: time.Hour}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(2 * time.Minute)},
 	}
 	for _, th := range policies {
-		if err := p.applyThrottle(th); err != nil {
-			t.Fatalf("apply %s: %v", th.Provider, err)
+		if err := applyTestThrottle(p, th); err != nil {
+			t.Fatalf("apply %s: %v", th.Scope.PrimaryProvider(), err)
 		}
 	}
 
@@ -608,7 +650,7 @@ func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
 	// still holds its in-flight slot and parked waiter.
 	changed := policies[0]
 	changed.Limit.Requests = 31
-	if err := p.applyThrottle(changed); err != nil {
+	if err := applyTestThrottle(p, changed); err != nil {
 		t.Fatalf("apply changed policy: %v", err)
 	}
 
@@ -616,7 +658,7 @@ func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
 	legacy := make([]persistedThrottle, 0, len(infos))
 	busyLive := false
 	for _, inf := range infos {
-		if inf.Provider == "busy.example" && inf.InFlight == 1 && inf.Queued == 1 {
+		if inf.Scope.PrimaryProvider() == "busy.example" && inf.InFlight == 1 && inf.Queued == 1 {
 			busyLive = true
 		}
 		legacy = append(legacy, throttleToPersisted(inf.Throttle))
@@ -624,7 +666,7 @@ func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
 	if !busyLive {
 		t.Fatalf("dashboard listing lost live occupancy: %+v", infos)
 	}
-	wantRaw, err := json.Marshal(persistedThrottleDoc{Throttles: legacy})
+	wantRaw, err := json.Marshal(persistedThrottleDoc{Version: throttleDocVersion, Throttles: legacy})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -639,7 +681,7 @@ func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
 	if !reflect.DeepEqual(snap, legacy) {
 		t.Fatalf("latestThrottleSnap = %+v, want %+v", snap, legacy)
 	}
-	snapRaw, err := json.Marshal(persistedThrottleDoc{Throttles: snap})
+	snapRaw, err := json.Marshal(persistedThrottleDoc{Version: throttleDocVersion, Throttles: snap})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -877,12 +919,42 @@ func TestThrottleSnapshotMatchesGET(t *testing.T) {
 	}
 }
 
+// TestProviderLimitBandsHaveOneOwner pins the scheduler bands to their literal
+// values. Both the proxy and the MCP surface read the scheduler declaration, so
+// comparing the two consumers to the owner would be a tautology: it passes no
+// matter what number the owner holds. The literals are the contract a client
+// and a model were told to expect, so they are what this asserts.
+func TestProviderLimitBandsHaveOneOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		got     int64
+		literal int64
+	}{
+		{"concurrency", scheduler.LimitConcurrencyMax, 100_000},
+		{"requests", scheduler.LimitRequestsMax, 1_000_000_000},
+		{"tokens", scheduler.LimitTokensMax, 1_000_000_000_000},
+		{"window min (ns)", int64(scheduler.LimitWindowMin), int64(time.Second)},
+		{"window max (ns)", int64(scheduler.LimitWindowMax), int64(24 * time.Hour)},
+	} {
+		if tc.got != tc.literal {
+			t.Errorf("%s: scheduler owner = %d, want the published band %d (a widening or narrowing of an enforced band is a client-visible contract change, not a refactor)", tc.name, tc.got, tc.literal)
+		}
+	}
+	// The proxy's own aliases must resolve to that owner, not to a fresh copy.
+	if maxLimitConcurrency != scheduler.LimitConcurrencyMax ||
+		maxLimitRequests != scheduler.LimitRequestsMax ||
+		maxLimitTokens != scheduler.LimitTokensMax ||
+		minLimitWindow != scheduler.LimitWindowMin ||
+		maxLimitWindow != scheduler.LimitWindowMax {
+		t.Error("internal/proxy re-declares a limit band instead of reading the scheduler owner")
+	}
+}
+
 // TestMCPThrottleSchemaMirrorsTheProxyBands pins the model-visible throttle
 // argument documentation to the proxy constants that enforce it. The MCP
-// server duplicates the bands so a typo becomes a readable tool message
-// instead of a request the proxy refuses after assembly; the proxy owner is
-// the source, and the schema text is what the model reads, so a band change on
-// either side must fail here.
+// server validates against the same scheduler owner, so the bands cannot
+// disagree; the schema text is what the model reads, so a band change on
+// either side must still fail here.
 func TestMCPThrottleSchemaMirrorsTheProxyBands(t *testing.T) {
 	windowBand := fmt.Sprintf("%s to %dh", minLimitWindow, int(maxLimitWindow/time.Hour))
 	for _, tc := range []struct {

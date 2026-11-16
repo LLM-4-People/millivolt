@@ -5,10 +5,10 @@ module.exports = async function restartBootstrap(H) {
   const state = H.state;
 
   // The Restart control's eligibility rides the payload the page ALREADY
-  // loads: a fresh page must decide before the menu is ever opened, without a
-  // second round trip. A -trimpath image (no source tree, no go toolchain)
-  // therefore never paints the control at all, while a build that reports
-  // nothing keeps today's behaviour.
+  // loads: a fresh page must decide before the console is ever opened, without
+  // a second round trip. A -trimpath image (no source tree, no go toolchain)
+  // therefore offers no restart and says why in the system section, while a
+  // build that reports nothing keeps today's behaviour.
   {
     const base = {
       dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'restart-seed', seq: 1, pending_revision: 0,
@@ -23,6 +23,7 @@ module.exports = async function restartBootstrap(H) {
       ['eligible', {available: true, reason: ''}],
       ['silent', undefined],
     ]) {
+      const verdict = !(restart && restart.available === false);
       let bootstrapFetches = 0;
       const seed = restart ? {...base, restart} : base;
       const isolated = dashboardDOM(assembleHTML(seed), {...pageOptions,
@@ -31,6 +32,15 @@ module.exports = async function restartBootstrap(H) {
           const fallback = win.fetch;
           win.fetch = (url, options) => {
             if (String(url).includes('/metrics/bootstrap')) bootstrapFetches++;
+            // The status fetch the system section issues answers with the
+            // same build verdict the seed reports, exactly as the real
+            // server does: the reason lives in the status document.
+            if (String(url).includes('/admin/restart')) {
+              return Promise.resolve({ok: true, json: async () => ({
+                available: verdict, reason: restart ? restart.reason : '',
+                phase: 'idle', rank: -1, error: '', pid: 424242, started_at: 1000,
+              })});
+            }
             return fallback(url, options);
           };
           win.EventSource = function() {
@@ -40,13 +50,24 @@ module.exports = async function restartBootstrap(H) {
       });
       await loaded(isolated);
       await settleUntil(() => isolated.window.eval('!!lastData'));
-      const wrap = isolated.window.document.getElementById('restart-wrap');
+      const iw = isolated.window, idoc = iw.document;
+      // Nothing but the first bootstrap ran: the boot payload's verdict is
+      // already folded into restartServerState before any console opens.
       check(`${label} seed decides the Restart control from the payload it already loads`,
-        bootstrapFetches === 0 && !!wrap && wrap.hidden === !!(restart && restart.available === false));
-      if (label === 'ineligible') {
-        check('the ineligible verdict also keeps the action itself disabled',
-          isolated.window.document.getElementById('btn-restart-now').disabled);
+        bootstrapFetches === 0 &&
+        (restart ? iw.eval('restartServerState.available') === verdict
+          : iw.eval('restartServerState.available') === undefined));
+      const action = () => idoc.querySelector('#oc-pane [data-oc-restart]');
+      const warning = () => idoc.querySelector('#oc-pane .oc-warning');
+      iw.openOperatorConsole('system');
+      check(`${label} seed paints the system section from that verdict`,
+        !!action() && (restart && restart.available === false
+          ? !!warning() && warning().textContent.includes(trimpath) && action().disabled
+          : !warning() && !action().disabled));
+      if (restart && restart.available === false) {
+        check('the ineligible verdict also keeps the action itself disabled', action().disabled);
       }
+      iw.closeOperatorConsole();
       isolated.window.close();
     }
   }

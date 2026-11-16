@@ -149,8 +149,8 @@ func TestStreamingRetryNonCompletionStatusStaysInBand(t *testing.T) {
 		t.Fatalf("records = %d, want 1", len(recs))
 	}
 	rec := recs[0]
-	if rec.StatusCode != http.StatusAccepted || rec.ErrorType != "upstream_error" ||
+	if rec.StatusCode != http.StatusOK || rec.ErrorType != "upstream_error" ||
 		rec.ErrorCode != metrics.CodeTruncated || rec.Retries != 1 {
-		t.Fatalf("record = %+v, want status 202 with one truncated retry", rec)
+		t.Fatalf("record = %+v, want the committed 200 with one truncated retry", rec)
 	}
 }

@@ -95,6 +95,7 @@ still name one. Boolean flags accept `--flag`, `--flag=true`, `--flag=1`,
 | `mvctl overview` | KPI, storage, pause, throttle and debug state |
 | `mvctl requests [N]` | one page of the request log, default the shipped `dash_log_rows`; `N` must be inside that setting's schema band |
 | `mvctl query "SELECT ..."` | bounded SQL through `/metrics/query` |
+| `mvctl chart` | server-authoritative time series; `--window` is all history or whole minutes, `--filter` scopes it |
 | `mvctl prometheus` | the Prometheus text exposition |
 | `mvctl watch` | sample live counters and print a sparkline |
 | `mvctl health` | check `/healthz` |
@@ -108,9 +109,21 @@ JSON rows intentionally omit captured content previews, response headers and
 retry attempts. Use the dashboard capture drawer when full bodies are needed.
 
 `query` accepts `--query-timeout DURATION`; the default is the shipped MCP
-query bound, and an explicit value must be greater than zero. The statement
-must be a single `SELECT` without a semicolon, using the same pre-check as the
-MCP query tool. The SQL text is sent as one `q` parameter and is never logged.
+query bound, and an explicit value must be greater than zero. The shared HTTP
+client carries that shipped bound on its query path too, which is the one
+`chart` takes. The statement must be a single `SELECT` without a semicolon,
+using the same pre-check as the MCP query tool. The SQL text is sent as one `q`
+parameter and is never logged.
+
+`chart` prints the server-authoritative series: bucket geometry, percentile and
+stat arrays, blended cost per million tokens and the buckets themselves. Its
+fold runs through the client's query path with `--query-timeout` as the one
+bound, so `--timeout` (the generic per-request deadline) never cuts it short.
+`--window` takes `all` or a whole number of minutes; `--filter` takes
+comma-separated `dim:id` pairs using the same dimensions as the log scope
+(`client`, `provider`, `model`, `conversation`, `key`, `status`, `time`, `tool`,
+`error`). `key` is the SHA-256 hash of the client key. A chart fold covers
+finalized requests only, so a live in-flight status class is refused.
 
 `watch` accepts `--samples N`, bounded by the command's settings surface, and
 `--interval DURATION` (default the shipped `dash_poll_interval`). Interrupting
@@ -152,15 +165,18 @@ measurements, not credentials, and are never redacted.
 | --- | --- |
 | `mvctl pause [show]` | list holds and queued requests |
 | `mvctl pause on --client X --provider P --yes` | create a scoped hold |
+| `mvctl pause on --model M --conversation C --yes` | narrow a hold to a model or conversation |
 | `mvctl pause on --new --yes` | hold clients first seen after the hold |
 | `mvctl pause on --all --yes` | hold every client and provider |
 | `mvctl pause on --id ID [flags] --yes` | edit one hold in place |
 | `mvctl pause off --id ID --yes` | remove one hold |
 | `mvctl pause off --all --yes` | remove every hold |
 
-`pause on` requires a scope: `--client`, `--provider`, `--new` or `--all`,
-unless `--id` names an existing hold to edit. `--duration` and
-`--max-queued` are optional. `pause off` deliberately rejects scope flags: the
+`pause on` requires a scope: `--client`, `--provider`, `--model`,
+`--key-hash`, `--conversation`, `--new` or `--all`, unless `--id` names an
+existing hold to edit. Set dimensions intersect and an unset dimension matches
+any value, exactly as they do for a limit. `--duration` and `--max-queued` are
+optional. `pause off` deliberately rejects scope flags: the
 proxy identifies a hold by `id`, and a scope-looking command that cleared every
 hold would be unsafe. Use exactly one of `--id` or `--all`. A resume carries
 only the hold id because the proxy has no scope-selective resume.
@@ -177,7 +193,12 @@ only the hold id because the proxy has no scope-selective resume.
 
 `throttle set` flags are `--concurrency`, `--requests`, `--request-window`,
 `--tokens`, `--token-window`, `--anti-burst` and `--ramp-duration`. Windows and
-ramps take a duration such as `1m`. At least one dimension is required.
+ramps take a duration such as `1m`. A count needs its window unless the policy
+already stores one for that dimension, and a count of `0` clears the dimension
+with its window; a window without a count is refused unless a count is stored.
+At least one dimension is required. The set and clear commands are provider-only. Scoped selectors and recurring
+schedules are available through the HTTP API (`/admin/throttle`) and the
+dashboard console, not through this CLI.
 
 ### Queue and capture
 
@@ -217,11 +238,12 @@ usage error rather than an omitted constraint. `--all` cannot be combined with
 a filter. The command always calls `/admin/purge/count` first and prints the
 count; only `--yes` calls `/admin/purge`, and an unfiltered purge also needs
 `--all`. Before deleting, the command re-counts and refuses when the total
-changed since the preview. That compares counts, not row identities, and rows
-committed after the re-count are still deleted: the check catches a population
-change, not every concurrent insert. A missing, fractional, negative or
-non-finite count is a failure, never zero. A genuinely bodyless purge is the
-proxy's delete-everything form.
+changed since the preview, then sends that count with the delete so the proxy
+checks it once more inside the delete transaction. That compares counts, not
+row identities, so the guarantee is a refused moved population rather than a
+row-identity binding. A missing, fractional, negative or non-finite count is a
+failure, never zero. A genuinely bodyless purge is the proxy's
+delete-everything form.
 
 `backup --out FILE` is required; there is no default path. `--config` and
 `--database` default to true (the command's settings surface) and are always
@@ -234,6 +256,9 @@ by cancellation, not by `--timeout`.
 
 `restore` defaults to `inspect=1`, which validates the archive without applying
 it; `--inspect` forces that mode even with `--yes`. `--yes` applies it. The
+preview decodes and preflights the whole archived database member on the server,
+so it costs about as much as the apply's decode; `--yes` alone skips the
+preview and applies directly. The
 member selection (`--config`, `--database`) and the mode (`--config-mode`,
 `--database-mode`; `merge` or `replace`) are always sent explicitly, and both
 the inspect and apply output name the selected members and modes. The default mode is `replace`, the proxy's documented default, so the

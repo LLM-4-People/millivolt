@@ -56,17 +56,36 @@ func TestHealthcheckRejectsInvalidBaseConfig(t *testing.T) {
 	}
 }
 
-// TestHealthcheckMissingConfigUsesDefaults pins the documented missing-file
-// exception: healthcheck probes with the built-in defaults instead of failing
-// the config load. An invalid document is covered above and still exits 1.
-func TestHealthcheckMissingConfigUsesDefaults(t *testing.T) {
+// TestHealthcheckMissingConfigFailsClosed pins the fail-closed exception: a
+// named config that does not exist fails the probe instead of silently
+// probing the built-in default listener. The empty -config case (built-in
+// defaults by definition) is covered by config.LoadFileStrict and stays a 0.
+// An invalid document is covered above and also exits 1.
+func TestHealthcheckMissingConfigFailsClosed(t *testing.T) {
 	oldPath, oldListen := liveConfigPath, liveListenOverride
 	t.Cleanup(func() { liveConfigPath, liveListenOverride = oldPath, oldListen })
 	probe := httptest.NewServer(http.HandlerFunc(handleHealthz))
 	defer probe.Close()
+	// The override points at a reachable probe, so a 0 could only come from
+	// the default fallback this test removes.
+	liveListenOverride = strings.TrimPrefix(probe.URL, "http://")
 	liveConfigPath = filepath.Join(t.TempDir(), "missing.yaml")
+	if code := runHealthcheck(); code != 1 {
+		t.Fatalf("healthcheck with a missing named config = %d, want 1", code)
+	}
+}
+
+// TestHealthcheckEmptyConfigUsesBuiltInDefaults pins the one remaining default
+// path: -config "" means the built-in defaults, so the probe runs instead of
+// failing for a file that was never named.
+func TestHealthcheckEmptyConfigUsesBuiltInDefaults(t *testing.T) {
+	oldPath, oldListen := liveConfigPath, liveListenOverride
+	t.Cleanup(func() { liveConfigPath, liveListenOverride = oldPath, oldListen })
+	probe := httptest.NewServer(http.HandlerFunc(handleHealthz))
+	defer probe.Close()
+	liveConfigPath = ""
 	liveListenOverride = strings.TrimPrefix(probe.URL, "http://")
 	if code := runHealthcheck(); code != 0 {
-		t.Fatalf("healthcheck with a missing config = %d, want 0 via defaults", code)
+		t.Fatalf("healthcheck with built-in defaults = %d, want 0", code)
 	}
 }

@@ -15,34 +15,28 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-// joinUpstreamURL joins a base URL and a request path without duplicating a
-// shared leading path segment. Clients typically request "/v1/chat/completions"
-// while operators variously set the base to "https://host" or
-// "https://host/v1" - naive concatenation would yield ".../v1/v1/..." and 404.
-// If the base's last path segment equals the request path's first segment, the
-// duplicate is dropped. This is purely a path-join convenience; it never strips
-// segments that differ.
-func joinUpstreamURL(baseURL, path string) string {
-	base := strings.TrimRight(baseURL, "/")
-	bu, err := url.Parse(base)
-	if err != nil {
-		return base + path
-	}
-	baseSegs := strings.Split(strings.Trim(bu.Path, "/"), "/")
-	pathSegs := strings.Split(strings.Trim(path, "/"), "/")
-	// Drop the request path's first segment when it duplicates the base's last
-	// non-empty segment (e.g. base ".../v1" + path "/v1/chat/completions").
-	if len(baseSegs) > 0 && baseSegs[0] != "" && len(pathSegs) > 0 &&
-		baseSegs[len(baseSegs)-1] == pathSegs[0] {
-		path = "/" + strings.Join(pathSegs[1:], "/")
-	}
-	return base + path
-}
-
 // upstreamURL builds the request target structurally. The path is already an
 // escaped path (client request or validated X-Proxy-Path) and is never
 // re-parsed as part of a concatenated URL, so an encoded ? or # cannot become
 // a query or fragment delimiter.
+// upstreamPath resolves the target's configured path override, else the
+// caller's default, and guarantees the leading slash upstreamURL expects. An
+// absent path is "/". One owner, so passthrough, discovery and the Cursor
+// transport cannot normalize differently.
+func upstreamPath(configured, fallback string) string {
+	path := configured
+	if path == "" {
+		path = fallback
+	}
+	if path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		return "/" + path
+	}
+	return path
+}
+
 func upstreamURL(baseURL, escapedPath, queryOverride, clientQuery string) (*url.URL, error) {
 	base, err := url.Parse(baseURL)
 	if err != nil {
@@ -212,6 +206,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 			return nil, fmt.Errorf("invalid %s header", hdrPath)
 		}
 		t.path = p
+		t.pathSet = true
 	}
 	if q := strings.TrimSpace(r.Header.Get(hdrQuery)); q != "" {
 		if !validProxyQueryHeader(q) {
@@ -362,6 +357,8 @@ func defaultPort(scheme string) string {
 // on that host. A plain prefix match silently widened the operator's intent:
 // an entry for http://10.0.0.5 also reached :9200. Path prefixes remain
 // supported: an entry may name a path and admits that path and its children.
+// Only the escaped path is compared; a query on either side neither widens nor
+// narrows the match.
 func allowed(base string, prefixes []string) bool {
 	baseAuth, baseRest := baseAuthority(base)
 	for _, prefix := range prefixes {
@@ -370,8 +367,7 @@ func allowed(base string, prefixes []string) bool {
 			continue
 		}
 		if prefixRest == "" || baseRest == prefixRest ||
-			strings.HasPrefix(baseRest, prefixRest+"/") ||
-			strings.HasPrefix(baseRest, prefixRest+"?") {
+			strings.HasPrefix(baseRest, prefixRest+"/") {
 			return true
 		}
 	}

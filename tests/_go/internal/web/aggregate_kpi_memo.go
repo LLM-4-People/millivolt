@@ -132,12 +132,12 @@ func TestKPIMemoInvalidatesEveryPath(t *testing.T) {
 		checkKPI(t, api, 2, false)
 
 		// A filtered purge republishes durable totals through installTotals.
-		if _, err := s.Clear(t.Context(), &storage.PurgeFilter{Provider: "p"}, nil); err != nil {
+		if _, err := s.Clear(t.Context(), &storage.PurgeFilter{Provider: "p"}, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		checkKPI(t, api, 1, true)
 		checkKPI(t, api, 1, false)
-		if _, err := s.Clear(t.Context(), nil, nil); err != nil {
+		if _, err := s.Clear(t.Context(), nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		checkKPI(t, api, 0, true)

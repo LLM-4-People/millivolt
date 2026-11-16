@@ -78,10 +78,15 @@ func (s *Server) cursorScopeFor(t *target, key, model, client string) cursorScop
 	if key != "" {
 		auth = hashKey(t.authPrefix + key)
 	}
+	runURL, err := cursorRunURL(t)
+	fingerprintURL := t.baseURL
+	if err == nil {
+		fingerprintURL = runURL.String()
+	}
 	raw, _ := json.Marshal(struct {
 		URL, AuthHeader, AuthHash, Model, Client string
 		Headers                                  map[string]string
-	}{cursorRunURL(t), strings.ToLower(t.authHeader), auth, model, client, s.cfg().Providers[t.provider].Headers})
+	}{fingerprintURL, strings.ToLower(t.authHeader), auth, model, client, s.cfg().Providers[t.provider].Headers})
 	return sha256.Sum256(raw)
 }
 

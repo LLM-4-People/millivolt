@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"os"
@@ -77,9 +78,7 @@ func TestAdmissionRejectsUnwritableWriterSchema(t *testing.T) {
 	if _, err := os.Stat(incoming); !os.IsNotExist(err) {
 		t.Fatal("rejected pending snapshot was not consumed")
 	}
-	if _, err := os.Stat(incoming + pendingSnapshotInvalidSuffix); err != nil {
-		t.Fatalf("rejected pending snapshot was not quarantined: %v", err)
-	}
+	requireQuarantined(t, incoming)
 
 	// The live store still accepts writes on the same database.
 	reopened.Record(&metrics.Record{ID: "after-reject", Provider: "neutral.example", Model: "n", StatusCode: 200})
@@ -136,7 +135,7 @@ func TestOpenRejectsUnwritableLiveWriterSchema(t *testing.T) {
 func TestValidatePendingSnapshotRejectsMissingPendingFile(t *testing.T) {
 	dir := t.TempDir()
 	dstPath := filepath.Join(dir, "dst.db")
-	err := ValidatePendingSnapshot(dstPath)
+	err := ValidatePendingSnapshot(t.Context(), dstPath)
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ValidatePendingSnapshot missing pending = %v, want a not-exist rejection", err)
 	}
@@ -156,7 +155,7 @@ func TestValidatePendingSnapshotRunsAdmissionPreflight(t *testing.T) {
 	if err := StageSnapshot(dstPath, packedSnapshot(t, "valid-row")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidatePendingSnapshot(dstPath); err != nil {
+	if err := ValidatePendingSnapshot(t.Context(), dstPath); err != nil {
 		t.Fatalf("valid pending snapshot rejected: %v", err)
 	}
 	if _, err := os.Stat(PendingSnapshotPath(dstPath)); err != nil {
@@ -201,7 +200,7 @@ func TestValidatePendingSnapshotRunsAdmissionPreflight(t *testing.T) {
 	if err := StageSnapshot(dstPath, bad); err != nil {
 		t.Fatal(err)
 	}
-	err = ValidatePendingSnapshot(dstPath)
+	err = ValidatePendingSnapshot(t.Context(), dstPath)
 	if err == nil || !strings.Contains(err.Error(), "writer insert probe") {
 		t.Fatalf("ValidatePendingSnapshot = %v, want a writer insert probe rejection", err)
 	}
@@ -254,9 +253,7 @@ func TestAdmissionRejectsIDWithoutUniqueKey(t *testing.T) {
 	if len(rows) != 1 || rows[0].ID != "keep-old" {
 		t.Fatalf("live rows after rejection = %#v, want keep-old", rows)
 	}
-	if _, err := os.Stat(PendingSnapshotPath(dstPath) + pendingSnapshotInvalidSuffix); err != nil {
-		t.Fatalf("rejected pending snapshot was not quarantined: %v", err)
-	}
+	requireQuarantined(t, PendingSnapshotPath(dstPath))
 	reopened.Record(&metrics.Record{ID: "after-reject", Provider: "neutral.example", Model: "n", StatusCode: 200, Start: time.Now()})
 	if err := reopened.Flush(); err != nil {
 		t.Fatalf("live ingestion after rejection: %v", err)
@@ -321,5 +318,22 @@ func TestAdmissionThroughSymlinkedDBPathKeepsTheLinkAndReplacesTheTarget(t *test
 	}
 	if _, err := os.Stat(PendingSnapshotPath(target)); !os.IsNotExist(err) {
 		t.Fatal("admitted pending snapshot was not consumed at the resolved target")
+	}
+}
+
+// TestValidatePendingSnapshotHonorsTheContext pins the maintenance budget: a
+// canceled caller context must stop the schema sequence and scans instead of
+// letting the preflight (or a VACUUM inside the initializer) run unbounded.
+func TestValidatePendingSnapshotHonorsTheContext(t *testing.T) {
+	dstPath := filepath.Join(t.TempDir(), "dst.db")
+	incoming := PendingSnapshotPath(dstPath)
+	if err := os.WriteFile(incoming, packedSnapshot(t, "replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := ValidatePendingSnapshot(ctx, dstPath)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ValidatePendingSnapshot with a canceled context = %v, want context.Canceled", err)
 	}
 }

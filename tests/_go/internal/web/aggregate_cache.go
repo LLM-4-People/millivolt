@@ -161,7 +161,7 @@ func TestAggregateMemoInvalidatesDatabaseMutations(t *testing.T) {
 	if cost := api.explorerMemo.entry.value.Groups[0].Cost; cost != 0.75 {
 		t.Fatalf("external writer invisible to cache: cost %v, want 0.75", cost)
 	}
-	if _, err := s.Clear(t.Context(), &storage.PurgeFilter{Provider: "new.example"}, nil); err != nil {
+	if _, err := s.Clear(t.Context(), &storage.PurgeFilter{Provider: "new.example"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	refresh(0, "")
@@ -170,7 +170,7 @@ func TestAggregateMemoInvalidatesDatabaseMutations(t *testing.T) {
 		t.Fatal(err)
 	}
 	refresh(1, "old.example")
-	if _, err := s.Clear(t.Context(), nil, nil); err != nil {
+	if _, err := s.Clear(t.Context(), nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	refresh(0, "")
@@ -224,23 +224,26 @@ func TestAggregateMemoSnapshotRulesAndMidScanMutation(t *testing.T) {
 			buf := metrics.NewBuffer(8)
 			buf.Record(cacheRecord("first", now.Add(-time.Minute)))
 			api := NewAggAPI(buf, nil, time.Second)
-			calls := 0
-			api.ModelCanon = func() config.ModelCanon {
-				calls++
-				if calls == 2 {
-					buf.Record(cacheRecord("racing", now.Add(-time.Minute)))
-				}
-				return config.ModelCanon{}
-			}
+			api.ModelCanon = func() config.ModelCanon { return config.ModelCanon{} }
+			// The key is taken before the cold fold, so a record committed from
+			// the cold hook is a mid-scan mutation the publish recheck must see.
+			api.testHooks = &aggregateTestHooks{cold: func() {
+				buf.Record(cacheRecord("racing", now.Add(-time.Minute)))
+			}}
+			// The fold already saw the racing record (the hook runs before it),
+			// but the key was taken before, so its payload must not become a
+			// reusable entry under the old revision.
 			if surface == "chart" {
 				p, err := api.chart(t.Context(), 60, nil, "", now.UnixMilli())
-				if err != nil || cacheChartRequests(p) != 1 || api.chartMemo.entry != nil {
-					t.Fatalf("racing chart was memoized: %+v, %v", p, err)
+				if err != nil || cacheChartRequests(p) != 2 || api.chartMemo.entry != nil {
+					t.Fatalf("racing chart = %d requests, memoized=%v, err=%v",
+						cacheChartRequests(p), api.chartMemo.entry != nil, err)
 				}
 			} else {
 				p, err := api.explorer(t.Context(), "model", nil, "")
-				if err != nil || p.Total != 1 || api.explorerMemo.entry != nil {
-					t.Fatalf("racing explorer was memoized: %+v, %v", p, err)
+				if err != nil || p.Total != 2 || api.explorerMemo.entry != nil {
+					t.Fatalf("racing explorer = %d requests, memoized=%v, err=%v",
+						p.Total, api.explorerMemo.entry != nil, err)
 				}
 			}
 		})
@@ -250,18 +253,20 @@ func TestAggregateMemoSnapshotRulesAndMidScanMutation(t *testing.T) {
 	buf.Record(cacheRecord("a", now))
 	buf.PublishLive("begin", cacheRecord("pending", now))
 	api := NewAggAPI(buf, nil, time.Second)
-	calls := 0
+	lower := false
 	api.ModelCanon = func() config.ModelCanon {
-		calls++
-		if calls == 1 {
+		if !lower {
 			return config.ModelCanon{}
 		}
 		return config.ModelCanon{Rules: []config.ModelRule{{Mode: config.ModelRuleLower}}}
 	}
 	e, err := api.explorer(t.Context(), "model", nil, "")
-	if err != nil || len(e.Groups) != 1 || e.Groups[0].Name != "MODEL-A" || e.Total != 2 || api.explorerMemo.entry != nil {
+	// The fold and its key share one rules snapshot, so the result is the
+	// pre-change canonicalization and may be memoized under that key.
+	if err != nil || len(e.Groups) != 1 || e.Groups[0].Name != "MODEL-A" || e.Total != 2 || api.explorerMemo.entry == nil {
 		t.Fatalf("one fold mixed canonicalization snapshots: %+v, %v", e, err)
 	}
+	lower = true
 	e, err = api.explorer(t.Context(), "model", nil, "")
 	if err != nil || len(e.Groups) != 1 || e.Groups[0].Name != "model-a" || api.explorerMemo.entry == nil {
 		t.Fatalf("new canonicalization was not applied: %+v, %v", e, err)
@@ -360,13 +365,18 @@ func awaitFlightJoin(t *testing.T, probe *flightProbe, release func()) {
 	}
 }
 
-func assertFlightComplete[T any](t *testing.T, m *aggregateMemo[T]) {
+// assertFlightComplete proves the flight retired by asking the real entry
+// point again: a published entry serves without a fold, while a leftover
+// same-key flight would make this call wait for it. No private field is read.
+func assertFlightComplete(t *testing.T, refetch func() error, cold *atomic.Int64) {
 	t.Helper()
-	m.mu.Lock()
-	published, inFlight := m.entry != nil, m.flight != nil
-	m.mu.Unlock()
-	if !published || inFlight {
-		t.Fatalf("memo published/flight = %v/%v, want true/false", published, inFlight)
+	before := cold.Load()
+	if err := refetch(); err != nil {
+		t.Fatalf("post-flight refetch: %v", err)
+	}
+	if got := cold.Load(); got != before {
+		t.Fatalf("post-flight refetch recomputed (cold folds %d -> %d); the published entry must serve",
+			before, got)
 	}
 }
 
@@ -404,7 +414,10 @@ func TestAggregateFlightCoalescesChart(t *testing.T) {
 			if got := cacheChartRequests(payloads[1]); got != 1 {
 				t.Fatalf("chart requests = %d, want 1", got)
 			}
-			assertFlightComplete(t, &api.chartMemo)
+			assertFlightComplete(t, func() error {
+				_, err := api.chart(t.Context(), winMin, nil, "", now.UnixMilli())
+				return err
+			}, &probe.cold)
 		})
 	}
 }
@@ -438,7 +451,10 @@ func TestAggregateFlightCoalescesExplorer(t *testing.T) {
 	if payloads[0].Total != 1 || !reflect.DeepEqual(payloads[0], payloads[1]) {
 		t.Fatalf("coalesced explorers differ:\n%+v\n%+v", payloads[0], payloads[1])
 	}
-	assertFlightComplete(t, &api.explorerMemo)
+	assertFlightComplete(t, func() error {
+		_, err := api.explorer(t.Context(), "provider", nil, "")
+		return err
+	}, &probe.cold)
 }
 
 func TestAggregateFlightDifferentKeyDoesNotWait(t *testing.T) {
@@ -533,7 +549,10 @@ func TestAggregateFlightCanceledFollowerKeepsLeader(t *testing.T) {
 	if err := <-leaderErr; err != nil {
 		t.Fatalf("leader: %v", err)
 	}
-	assertFlightComplete(t, &api.chartMemo)
+	assertFlightComplete(t, func() error {
+		_, err := api.chart(t.Context(), 60, nil, "", now.UnixMilli())
+		return err
+	}, &probe.cold)
 }
 
 func TestAggregateFlightLeaderCanceledThenFollowerLeads(t *testing.T) {
@@ -579,7 +598,10 @@ func TestAggregateFlightLeaderCanceledThenFollowerLeads(t *testing.T) {
 	if got := probe.cold.Load(); got != 2 {
 		t.Fatalf("cold folds = %d, want 2 (canceled leader then follower)", got)
 	}
-	assertFlightComplete(t, &api.chartMemo)
+	assertFlightComplete(t, func() error {
+		_, err := api.chart(t.Context(), 60, nil, "", now.UnixMilli())
+		return err
+	}, &probe.cold)
 }
 
 func TestAggregateFlightChartGeometryRecomputes(t *testing.T) {
@@ -689,5 +711,8 @@ func TestAggregateFlightConcurrentCold(t *testing.T) {
 		t.Fatalf("waits = %d, want %d", got, callers-1)
 	}
 	t.Logf("callers=%d folds=%d waits=%d", callers, cold.Load(), waits.Load())
-	assertFlightComplete(t, &api.chartMemo)
+	assertFlightComplete(t, func() error {
+		_, err := api.chart(t.Context(), 60, nil, "", now.UnixMilli())
+		return err
+	}, &cold)
 }

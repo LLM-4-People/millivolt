@@ -239,7 +239,7 @@ module.exports = async function archiveScale(H) {
   check('day dividers: exactly one per local day', seps().length === 3);
   check('day dividers span the full request column count',
     seps()[0]?.querySelector('td')?.colSpan === w.eval('REQ_COLS'));
-  check('newest day divider is stamped TODAY', seps()[0]?.textContent?.includes('TODAY'));
+  check('newest day divider is stamped today', seps()[0]?.textContent?.includes('today'));
   check('each divider sits directly above its day opener',
     seps()[0]?.nextElementSibling?.dataset.id === 'day0' &&
     seps()[1]?.nextElementSibling?.dataset.id === 'day1' &&

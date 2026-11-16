@@ -9,6 +9,10 @@
 // ordered section modules under tests/ui_harness/sections/ run in registry
 // order. This file stays the single entry point (`npm test`).
 const harness = require('./ui_harness/harness');
+
+// A suite that never settles exits 0 with no verdict, which reads as a pass.
+// One hour is far beyond any healthy run and still ends a wedged one.
+const clearWatchdog = harness.watchdog(harness.WATCHDOG_MS, 'ui check');
 const sections = require('./ui_harness/sections');
 const {
   dom, w, d, check, sleep, loaded, installDiagnostics, checkEntityIdentity, reportFailures,
@@ -21,6 +25,21 @@ async function main() {
   await loaded(dom);
   installDiagnostics();
   checkEntityIdentity();
+  // escapeHtml belongs to core, the first module: core's own vt helper and
+  // modules that load before the row builders call it, so keeping it in
+  // log_rows made the load order, not the dependency, decide whether it exists.
+  {
+    const source = name => harness.fs.readFileSync(
+      harness.path.join(harness.STATIC, 'js', name), 'utf8');
+    const order = [...harness.fs.readFileSync(harness.path.join(harness.STATIC, 'index.html'), 'utf8')
+      .matchAll(/<script[^>]+src="\/dash\/js\/([^"?]+)/g)].map(match => match[1]);
+    const coreAt = order.indexOf('core.js');
+    check('escapeHtml is defined once, in core, after which every caller loads',
+      source('core.js').includes('function escapeHtml(') &&
+      !source('log_rows.js').includes('function escapeHtml(') &&
+      coreAt >= 0 && order.every((name, index) =>
+        name === 'core.js' || index > coreAt || !source(name).includes('escapeHtml')));
+  }
   // Shared CSS must preserve sentence case, including protocol acronyms and
   // user-authored names. Inspect every formerly forced-uppercase owner.
   {
@@ -37,15 +56,18 @@ async function main() {
     check('dashboard labels never force uppercase, including mobile media rules',
       !declarations.some(value => value === 'uppercase' || value === 'capitalize'));
     const host = d.createElement('section');
-    host.innerHTML = '<div class="pause-known-hd"></div><div class="lim-src"></div>' +
-      '<div class="clear-opts"><label></label></div><div class="kpi"><h2></h2></div>' +
+    host.innerHTML = '<div class="oc-label"></div><div class="oc-field-name"></div>' +
+      '<div class="oc-rule-budget"></div><div class="oc-pick-label"></div>' +
+      '<div class="oc-live"></div><div class="oc-note"></div>' +
+      '<div class="kpi"><h2></h2></div>' +
       '<span class="xp-dim-by"></span><div class="prov-lb"></div><div class="mr-what"></div>' +
       '<div class="mr-ex-hd"></div><div class="card"><h2></h2></div><div class="ct-h"></div>' +
       '<table><thead><tr><th></th></tr></thead></table><span class="day-chip"></span>' +
       '<div class="detail-section"><h4></h4></div>';
     d.body.appendChild(host);
     try {
-      for (const selector of ['.pause-known-hd', '.lim-src', '.clear-opts label', '.kpi h2',
+      for (const selector of ['.oc-label', '.oc-field-name', '.oc-rule-budget', '.oc-pick-label',
+        '.oc-live', '.oc-note', '.kpi h2',
         '.xp-dim-by', '.prov-lb', '.mr-what', '.mr-ex-hd', '.card h2', '.ct-h', 'th',
         '.day-chip', '.detail-section h4']) {
         const label = host.querySelector(selector);
@@ -61,6 +83,7 @@ async function main() {
   for (const run of sections) await run(harness);
 
   reportFailures(false);
+  clearWatchdog();
   process.exit(state.failures.length ? 1 : 0);
 }
 // A crashed run must not swallow what it already knows: without this

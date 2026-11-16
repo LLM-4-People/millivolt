@@ -26,8 +26,8 @@ from playwright.async_api import async_playwright
 from scripts.backup_db import verify_docs_copy
 from . import browser_check as guards
 from .browser_check import require
-from .support import (DOCS_CAPTURE_VIEWPORT, ROOT, operator_headers, operator_signin,
-                      pick_chart_control)
+from .support import (DOCS_CAPTURE_VIEWPORT, ROOT, clip_js, operator_headers,
+                      operator_signin, pick_chart_control)
 
 ORDER = ['provider', 'model', 'client', 'conversation', 'tool', 'time', 'status', 'error', 'key']
 KEY = 'local-lineage-fixture-only'
@@ -186,8 +186,12 @@ def publish_images(staging, output):
 
 async def history_route(route, base, errors):
     # Documentation capture cannot submit inference or operator mutations.
-    if route.request.method not in ('GET', 'HEAD'):
-        errors.append('documentation capture attempted a non-read request')
+    # The purge count preview is the one read-only POST: the console's export
+    # receipt asks for it whenever an export draft changes.
+    read_post = route.request.method == 'POST' and \
+        route.request.url.split('?', 1)[0].endswith('/admin/purge/count')
+    if route.request.method not in ('GET', 'HEAD') and not read_post:
+        errors.append(f'documentation capture attempted a non-read request: {route.request.method} {route.request.url}')
         await route.abort()
         return
     path = urlsplit(route.request.url).path
@@ -195,12 +199,13 @@ async def history_route(route, base, errors):
     # upstream. Only dashboard resources and the reads used by this workflow
     # are admitted. The shared guard still enforces origin/redirect/SSE rules.
     if path not in ('/', '/favicon.ico', '/admin/config', '/admin/restart',
+                    '/admin/purge/count',
                     '/metrics/bootstrap', '/metrics/agg/chart', '/metrics/agg/explorer',
                     '/metrics/agg/log', '/metrics/live/stream') and not (
             path.startswith('/dash/') and path.endswith(('.js', '.css'))
             and all(part not in ('', '.', '..') for part in path[1:].split('/'))
             and '%' not in path and '\\' not in path):
-        errors.append('documentation capture attempted a non-dashboard resource')
+        errors.append(f'documentation capture attempted a non-dashboard resource: {path}')
         await route.abort()
         return
     await guards.browser_route(route, base, errors)
@@ -256,9 +261,10 @@ async def capture_history(args):
                 await pick_chart_control(page, '#chart-window', 'all')
                 await ready('provider')
                 await capture_image(page, staging / 'overview/dashboard.png')
-                # The natural-height desktop layout leaves room for the full
-                # dimension rail in focused explorer captures.
-                await page.set_viewport_size({'width': 1440, 'height': 900})
+                # The rail scrolls inside a box capped by the viewport, so the
+                # capture viewport must be tall enough for all nine dimensions
+                # to be visible at once rather than clipped after four.
+                await page.set_viewport_size({'width': 1440, 'height': 1180})
                 await ready('provider')
                 await capture_image(page, staging / 'explorer/providers.png', '#explorer')
 
@@ -287,6 +293,22 @@ async def capture_history(args):
                         'request-table capture would clip columns')
                 await capture_image(page, staging / 'requests/table.png', '.grid-pair > .card:last-child')
                 await page.set_viewport_size({'width': 1180, 'height': 850})
+                # The newest rows may carry no usage or timing (aborted and
+                # retried turns); the detail capture needs a finalized row
+                # that has both. Page the archive until one is visible
+                # instead of pinning a fixture position.
+                for _ in range(30):
+                    if await page.evaluate('''() => logVisible().some(r => !r.live && !r.debug &&
+                        r.usage?.output_tokens > 0 && r.ttft_ms > 0)'''):
+                        break
+                    await page.evaluate('''() => {
+                        const table = document.getElementById('tbl-requests');
+                        table.scrollTop = table.scrollHeight;
+                        table.dispatchEvent(new Event('scroll'));
+                    }''')
+                    await page.wait_for_timeout(300)
+                await page.wait_for_function('''() => logVisible().some(r => !r.live && !r.debug &&
+                    r.usage?.output_tokens > 0 && r.ttft_ms > 0)''', timeout=30000)
                 request_id = await page.evaluate('''() => {
                     const candidates = logVisible().filter(r => !r.live && !r.debug &&
                         r.usage?.output_tokens > 0 && r.ttft_ms > 0);
@@ -311,25 +333,36 @@ async def capture_history(args):
                 await page.wait_for_function('() => drawerId === null')
 
                 await page.set_viewport_size({'width': 1440, 'height': 900})
-                # Opening these menus is read-only with empty filter controls.
-                # The mutation and external-origin guards remain unchanged.
-                for kind in ('pause', 'debug', 'limits', 'logs', 'restart'):
-                    prefix = {'logs': 'lf'}.get(kind)
-                    if prefix:
-                        require(await page.evaluate('''prefix =>
-                            [...document.querySelectorAll('[id^="' + prefix + '-"]')].every(el => !el.value)''',
-                            prefix), 'documentation filter menu must start empty')
-                    await page.locator('#btn-' + kind).click()
-                    await page.locator('#' + kind + '-menu').wait_for(state='visible')
-                    if prefix:
-                        require(await page.evaluate('''prefix => !clearFilterActive(filterFromUI(prefix))''', prefix),
-                                'documentation filter menu selected a scope')
-                    if kind == 'restart':
+                # The operator console is the one policy surface. Opening it and
+                # switching sections is read-only: no draft is committed and no
+                # filter is selected, so the capture stays a neutral starting
+                # state. The mutation and external-origin guards are unchanged.
+                for kind in ('overview', 'limits', 'pause', 'capture', 'export', 'system'):
+                    await page.locator('#btn-controls').click()
+                    await page.locator('#operator-console').wait_for(state='visible')
+                    await page.locator('.oc-rail-item[data-oc-section="' + kind + '"]').click()
+                    await page.wait_for_function('''kind => {
+                        const pane = document.getElementById('oc-pane');
+                        return pane && pane.dataset.section === kind && !document.querySelector('.oc-compose');
+                    }''', arg=kind)
+                    if kind == 'export':
+                        # The fact is the draft's mode, not a sentence the
+                        # receipt happens to paint: the receipt copy changed
+                        # when every export gained a count, and a captured
+                        # string pinned the old wording instead of the state.
+                        require(await page.evaluate('''() =>
+                            ocDrafts.export && ocDrafts.export.mode === 'all' '''),
+                                'documentation export section must start on all history')
+                        # The count is a read-only POST issued after a debounce;
+                        # capture the settled receipt, not "counting...".
+                        await page.wait_for_function('''() => ocDrafts.export &&
+                            !ocDrafts.export.counting''', timeout=15000)
+                    if kind == 'system':
                         await page.wait_for_function('() => typeof restartServerState.available === "boolean"')
                     await ready('model')
-                    await capture_image(page, staging / 'menus' / (kind + '.png'), '#' + kind + '-menu')
+                    await capture_image(page, staging / 'console' / (kind + '.png'), '#operator-console')
                     await page.keyboard.press('Escape')
-                    await page.locator('#' + kind + '-menu').wait_for(state='hidden')
+                    await page.locator('#operator-console').wait_for(state='hidden')
 
                 await page.set_viewport_size({'width': 1440, 'height': 720})
                 await page.locator('#btn-settings').click()
@@ -351,12 +384,12 @@ async def capture_history(args):
 
 
 async def layout(page):
-    return await page.evaluate('''async () => {
+    return await page.evaluate(clip_js('''async () => {
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const targets = ['#explorer','#xp-rail','#xp-dim-trigger','.xp-rail-item',
             '.xp-node','.xp-node-foot','.xp-node-signals','.xp-conversation-parent'];
-        const overflow = [...document.querySelectorAll(targets.join(','))]
-            .filter(e => e.clientWidth && e.scrollWidth > e.clientWidth + 2)
+        const overflow = clipped(document).filter(e =>
+            targets.some(sel => e.matches(sel)))
             .map(e => ({selector:e.id||e.className, width:e.clientWidth, scroll:e.scrollWidth}));
         const gallery = document.querySelector('#xp-gallery');
         const cards = gallery ? [...gallery.children] : [];
@@ -368,7 +401,7 @@ async def layout(page):
         });
         return {viewport:innerWidth, documentOverflow:document.documentElement.scrollWidth > innerWidth+2,
             overflow, rowFullyVisible};
-    }''')
+    }'''))
 
 
 async def check(args):
@@ -551,7 +584,7 @@ async def check(args):
         finally:
             try:
                 if cleanup_needed:
-                    response = await context.request.post(base + '/admin/purge', max_redirects=0, data={'client': label}, headers=operator_headers())
+                    response = await context.request.post(base + '/admin/purge', max_redirects=0, data={'filter': {'client': label}}, headers=operator_headers())
                     try:
                         require(response.status == 200, ('scoped fixture cleanup failed', response.status, label))
                     finally:

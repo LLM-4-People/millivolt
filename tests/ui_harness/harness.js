@@ -196,6 +196,23 @@ function checkEntityIdentity() {
     w.dimLabel('client', 'opencode/1.18.32') === 'opencode/1.18.32' &&
     w.entityBadge('client', 'opencode/1.18.32').includes('>opencode/1.18.32</span>') &&
     w.clientTipHTML('opencode/1.18.32').includes('>opencode/1.18.32</span>'));
+  // The client card is the only place identity and request config appear
+  // together, so it is a tooltip that assistive technology can reach, not
+  // decoration behind aria-hidden.
+  {
+    const tip = d.getElementById('client-tip');
+    const badge = d.createElement('span');
+    badge.dataset.client = 'opencode/1.18.32';
+    d.body.appendChild(badge);
+    w.showClientTip(badge);
+    check('the client card is a described tooltip, not hidden decoration',
+      tip.getAttribute('role') === 'tooltip' && !tip.hasAttribute('aria-hidden') &&
+      !tip.hidden && badge.getAttribute('aria-describedby') === 'client-tip');
+    w.hideClientTip();
+    check('hiding the client card drops the description edge',
+      tip.hidden && !badge.hasAttribute('aria-describedby'));
+    badge.remove();
+  }
 }
 // Fixed waits are the exception, not a scheduling shortcut. A wait may stay a
 // literal duration only when the duration itself is the asserted behavior or
@@ -211,6 +228,11 @@ function checkEntityIdentity() {
 // Everything else waits on the page's observable state via settleUntil so a
 // loaded runner cannot turn a slow fetch or render into a false failure.
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// The watchdog timer has one owner, tests/watchdog.js, because half of
+// package.json's entry points never load this harness. Re-exported here so the
+// jsdom suites keep requiring one module.
+const {watchdog, WATCHDOG_MS} = require('../watchdog');
 // Poll the page's own observable state instead of sleeping a fixed time: a
 // loaded runner can stretch a fetch/render round trip past any hard-coded
 // sleep. Returning false on timeout lets the caller's own check()s fail with
@@ -223,6 +245,33 @@ async function settleUntil(cond, timeoutMs = 2000) {
     await sleep(10);
   }
   return true;
+}
+
+// pauseAmbient/resumeAmbient own the page's self-armed timers for a section
+// that installs a fixture the page would otherwise overwrite. The page starts
+// its own poll, footer clock and explorer live timer at load, so a section that
+// repaints from a hand-built payload races them: the rail block in render_live
+// was reproducibly overwritten (rail-n 77 -> "-") by one stale-payload tick,
+// because the fixture it installed had no scopeKey and refreshExplorerIfStale
+// therefore refetched. Fifteen sections hand-spelled the clearInterval line
+// before this owner existed; each new section had to remember the full list.
+//
+// Pause stops every timer the page arms by itself. Resume only re-arms what the
+// page would have armed, by calling the page's own functions, so the cadence
+// stays owned by core.js/app state rather than by a second implementation here.
+const AMBIENT_TIMERS = ['_dashTickTimer', '_clockTimer'];
+const AMBIENT_TIMEOUTS = ['_xpLiveTimer', 'logRetryTimer'];
+function pauseAmbient() {
+  for (const name of AMBIENT_TIMERS) {
+    w.eval(`if (${name}) { clearInterval(${name}); ${name} = null; }`);
+  }
+  for (const name of AMBIENT_TIMEOUTS) {
+    w.eval(`if (${name}) { clearTimeout(${name}); ${name} = null; }`);
+  }
+}
+function resumeAmbient() {
+  // A hidden page arms neither; never force one on.
+  w.eval('if (!_wasHidden) { armDashboardTicks(); _armClock(); }');
 }
 
 
@@ -244,7 +293,8 @@ const fire = (type, data, lastEventId) => {
 module.exports = {
   dom, w, d, html, check, reportFailures, rows, fire, sleep, settleUntil,
   installDiagnostics, checkEntityIdentity, assembleHTML, dashboardDOM, loaded,
+  pauseAmbient, resumeAmbient,
   JSDOM, fs, path, STATIC,
   mkRec, LIST, BIG, CHART_FROM, BUCKET_MS, mkChart, modelFixture, observerFixture,
-  DEF_RULES, cfgDoc, TEST_DASHBOARD_VERSION, pageOptions, state,
+  DEF_RULES, cfgDoc, TEST_DASHBOARD_VERSION, pageOptions, state, watchdog, WATCHDOG_MS,
 };

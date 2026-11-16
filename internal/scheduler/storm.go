@@ -94,6 +94,16 @@ type stormState struct {
 	queued     int
 }
 
+// queuedCount is the one reading of how many requests the storm/quota gate is
+// parking. stormState.queued counts waiters, while each scope's own counter is
+// incremented once per matching scope, so summing scopes counts a model waiter
+// parked behind its provider twice.
+func (s *stormState) queuedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.queued
+}
+
 func (s *stormState) configure(opts StormOptions) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

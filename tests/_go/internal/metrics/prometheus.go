@@ -35,7 +35,7 @@ func TestHandlePrometheus(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	w := httptest.NewRecorder()
-	HandlePrometheus(w, req, buf)
+	HandlePrometheus(w, req, buf, nil)
 
 	body := w.Body.String()
 	for _, want := range []string{
@@ -55,7 +55,7 @@ func TestHandlePrometheus(t *testing.T) {
 
 	post := httptest.NewRequest(http.MethodPost, "/metrics", nil)
 	pw := httptest.NewRecorder()
-	HandlePrometheus(pw, post, buf)
+	HandlePrometheus(pw, post, buf, nil)
 	if pw.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /metrics → %d, want 405", pw.Code)
 	}
@@ -90,7 +90,7 @@ func TestHandlePrometheusExpositionParity(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil)
 	w := httptest.NewRecorder()
-	HandlePrometheus(w, req, buf)
+	HandlePrometheus(w, req, buf, nil)
 
 	if got, want := w.Code, http.StatusOK; got != want {
 		t.Fatalf("status = %d, want %d", got, want)
@@ -161,7 +161,7 @@ func TestHandlePrometheusTTFTSumOverflow(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil)
 	w := httptest.NewRecorder()
-	HandlePrometheus(w, req, buf)
+	HandlePrometheus(w, req, buf, nil)
 
 	if got, want := w.Code, http.StatusInternalServerError; got != want {
 		t.Fatalf("status = %d, want %d\n%s", got, want, w.Body.String())

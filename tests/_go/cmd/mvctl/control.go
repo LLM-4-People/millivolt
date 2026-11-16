@@ -133,7 +133,7 @@ func TestThrottleQuotaDrainDebug(t *testing.T) {
 func TestPurgeNarrowingAndPreview(t *testing.T) {
 	fixture := newProxy(t, map[string]http.HandlerFunc{
 		"/admin/purge/count": jsonHandler(t, `{"count":7}`),
-		"/admin/purge":       jsonHandler(t, `{"ok":true}`),
+		"/admin/purge":       jsonHandler(t, `{"deleted":7,"buffer_removed":7}`),
 	})
 	code, _, _ := runCLI(t, "--url", fixture.url(), "purge", "--client", "acme", "--before-ms", "123", "--has-error", "--yes")
 	if code != 0 {
@@ -141,8 +141,8 @@ func TestPurgeNarrowingAndPreview(t *testing.T) {
 	}
 	counts := fixture.callsFor("/admin/purge/count")
 	deletes := fixture.callsFor("/admin/purge")
-	assertJSONEqual(t, counts[len(counts)-1].Body, `{"client":"acme","before_ms":123,"has_error":true}`)
-	assertJSONEqual(t, deletes[len(deletes)-1].Body, `{"client":"acme","before_ms":123,"has_error":true}`)
+	assertJSONEqual(t, counts[len(counts)-1].Body, `{"filter":{"client":"acme","before_ms":123,"has_error":true}}`)
+	assertJSONEqual(t, deletes[len(deletes)-1].Body, `{"filter":{"client":"acme","before_ms":123,"has_error":true},"reviewed_count":7}`)
 
 	code, _, _ = runCLI(t, "--url", fixture.url(), "purge", "--all", "--yes")
 	if code != 0 {
@@ -240,7 +240,7 @@ func TestPurgeRefusesCountDriftAndInvalidCount(t *testing.T) {
 			}
 			_, _ = io.WriteString(w, `{"count":8}`)
 		},
-		"/admin/purge": jsonHandler(t, `{"ok":true}`),
+		"/admin/purge": jsonHandler(t, `{"deleted":7,"buffer_removed":7}`),
 	})
 	code, _, stderr := runCLI(t, "--url", fixture.url(), "purge", "--client", "acme", "--yes")
 	if code != 1 || !strings.Contains(stderr, "row count changed from 7 to 8") {
@@ -254,7 +254,7 @@ func TestPurgeRefusesCountDriftAndInvalidCount(t *testing.T) {
 		counts = -100 // make every count response the same invalid document
 		fixture := newProxy(t, map[string]http.HandlerFunc{
 			"/admin/purge/count": jsonHandler(t, payload),
-			"/admin/purge":       jsonHandler(t, `{"ok":true}`),
+			"/admin/purge":       jsonHandler(t, `{"deleted":7,"buffer_removed":7}`),
 		})
 		code, _, stderr := runCLI(t, "--url", fixture.url(), "purge", "--client", "acme", "--yes")
 		if code != 1 || stderr == "" {

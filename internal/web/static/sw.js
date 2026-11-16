@@ -24,14 +24,14 @@ const SHELL_ASSETS = [
   '/manifest.webmanifest',
 ];
 
+// The live paths are generated at load from internal/web/namespaces.go, the
+// canonical namespace table: exact paths plus the root+"/" prefix of every live
+// namespace. A live path is never answered from the shell cache.
+const LIVE_PATHS = __LIVE_PATHS__;
+
 function livePath(pathname) {
-  return pathname === '/' || pathname === '/index.html' ||
-    pathname === '/healthz' || pathname === '/models' ||
-    pathname === '/sw.js' ||
-    pathname === '/admin' || pathname.startsWith('/admin/') ||
-    pathname === '/session' || pathname.startsWith('/session/') ||
-    pathname === '/metrics' || pathname.startsWith('/metrics/') ||
-    pathname === '/v1' || pathname.startsWith('/v1/');
+  return LIVE_PATHS.includes(pathname) ||
+    LIVE_PATHS.some((p) => p !== '/' && pathname.startsWith(p));
 }
 
 function shellPath(pathname) {

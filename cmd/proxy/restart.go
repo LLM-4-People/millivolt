@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/atomicfile"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // The restart choreography (POST /admin/restart) performs a graceful binary
@@ -56,6 +58,11 @@ const (
 	// a crashed child closes the pipe immediately, so this deadline only
 	// bounds a hung boot, not a slow-but-healthy one.
 	restartReadyTimeout = 5 * time.Minute
+	// The durability barrier's own bound. The flush runs after the drain, so
+	// its context cannot be the (often already spent) drain deadline; a flush
+	// that overruns it aborts the handoff instead of holding the child back
+	// forever. Large write backlogs make this slower than a query timeout.
+	restartFlushTimeout = 30 * time.Second
 )
 
 // FD-handoff env keys. ExtraFiles start at fd 3: fd 3 is the listening
@@ -117,12 +124,20 @@ type restartDeps struct {
 	// and base context - used only by the failed-handoff resume path.
 	cloneServer func() *http.Server
 	closeFeeds  func()
-	flushStore  func() error
+	// flushStore is the durability barrier. It runs under its own bounded
+	// context (restartFlushTimeout), not the drain window, so a drain that
+	// spent its whole budget cannot cut the flush short.
+	flushStore func(context.Context) error
 	// drainTimeout reads the live config snapshot (restart_drain_timeout
 	// hot-reloads). 0 = wait indefinitely.
 	drainTimeout func() time.Duration
 	// args are the child's argv (the parent's own flags, verbatim).
 	args []string
+	// pidFile is the -pid-file path, empty when none was given. The child
+	// rewrites it before signalling readiness, so a child that dies before
+	// readiness leaves the file naming itself while the parent keeps serving;
+	// every resume path therefore rewrites it with the parent's own pid.
+	pidFile string
 }
 
 type restarter struct {
@@ -321,7 +336,19 @@ func (rs *restarter) statusLocked() map[string]any {
 		"rank":       phaseRank(rs.phase),
 	}
 	if rs.deps != nil && rs.deps.drainTimeout != nil {
-		st["drain_timeout_ms"] = rs.deps.drainTimeout().Milliseconds()
+		drain := rs.deps.drainTimeout()
+		st["drain_timeout_ms"] = drain.Milliseconds()
+		// budget_ms is the only deadline any client needs: the whole
+		// choreography bound, or 0 when the drain is unbounded. Publishing the
+		// sum here means the dashboard does not mirror restartBuildTimeout,
+		// restartFlushTimeout and restartReadyTimeout as literals across the
+		// language boundary; the server that enforces the bounds is the only
+		// place they exist.
+		if drain <= 0 {
+			st["budget_ms"] = int64(0)
+		} else {
+			st["budget_ms"] = (restartBuildTimeout + drain + restartFlushTimeout + restartReadyTimeout).Milliseconds()
+		}
 	}
 	if rs.phase == restartDraining && !rs.phaseAt.IsZero() {
 		st["drain_elapsed_ms"] = time.Since(rs.phaseAt).Milliseconds()
@@ -341,6 +368,18 @@ func (rs *restarter) request() (bool, string) {
 		rs.mu.Unlock()
 		return false, "restart already " + phaseName(rs.phase)
 	}
+	// The handoff later takes the reload lock for its whole store-flush fence,
+	// and a config transaction (reload, Settings save, backup restore) holds it
+	// for its own duration. Taking it here as a probe refuses the restart up
+	// front with the operation named, instead of letting the flush block
+	// unboundedly on it behind restartFlushTimeout. reloadMu -> rs.mu is the
+	// existing order (the handoff fence reads handoffDone under the lock), so
+	// the non-blocking probe cannot invert it.
+	if !reloadMu.TryLock() {
+		rs.mu.Unlock()
+		return false, "a config operation is in progress (reload, Settings save or backup restore)"
+	}
+	reloadMu.Unlock()
 	rs.phase = restartBuilding
 	rs.phaseAt = time.Now()
 	rs.errMsg = ""
@@ -377,15 +416,28 @@ func (rs *restarter) drain(ctx context.Context) error {
 	return nil
 }
 
-func (rs *restarter) prepareHandoff(ctx context.Context) error {
-	if err := rs.drain(ctx); err != nil {
-		return fmt.Errorf("drain failed; restart aborted: %w", err)
-	}
+// prepareHandoff is the commit-point sequence: stop in-flight work, then make
+// everything already finalized durable. The two steps have separate bounds. An
+// expired drain still flushes and hands off - the in-flight requests are cut,
+// not the durability of everything before them - while the flush gets its own
+// context because the drain deadline is usually spent by the time it returns.
+// drained reports which shape the drain had, so the commit log can word it.
+func (rs *restarter) prepareHandoff(ctx context.Context) (drained bool, err error) {
+	drainErr := rs.drain(ctx)
 	rs.setPhase(restartFlushing, "")
-	if err := rs.deps.flushStore(); err != nil {
-		return fmt.Errorf("metrics flush failed; restart aborted: %w", err)
+	flushCtx, cancel := context.WithTimeout(context.Background(), restartFlushTimeout)
+	defer cancel()
+	if err := rs.deps.flushStore(flushCtx); err != nil {
+		return false, fmt.Errorf("metrics flush failed; restart aborted: %w", err)
 	}
-	return nil
+	if drainErr != nil {
+		if errors.Is(drainErr, context.DeadlineExceeded) {
+			logging.Printf("", "restart: drain window expired with requests still in flight; handed off after a clean flush")
+			return false, nil
+		}
+		return false, fmt.Errorf("drain failed; restart aborted: %w", drainErr)
+	}
+	return true, nil
 }
 
 func (rs *restarter) run() {
@@ -393,7 +445,7 @@ func (rs *restarter) run() {
 	var bin string
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("restart: panic: %v", r)
+			logging.Printf("", "restart: panic: %v\n%s", r, debug.Stack())
 			rs.failAndResume(fmt.Errorf("panic: %v", r), listenFile, bin)
 		}
 		if listenFile != nil {
@@ -405,7 +457,7 @@ func (rs *restarter) run() {
 	var err error
 	bin, err = rs.build()
 	if err != nil {
-		log.Printf("restart: %v (proxy untouched, still serving)", err)
+		logging.Printf("", "restart: %v (proxy untouched, still serving)", err)
 		rs.finishFailure(err)
 		return
 	}
@@ -440,12 +492,16 @@ func (rs *restarter) run() {
 	//    accepting, but the already-hijacked watch connection can.
 	drainStart := time.Now()
 	drainTo := rs.deps.drainTimeout()
-	err = rs.prepareWithProgress(drainTo)
+	drained, err := rs.prepareWithProgress(drainTo)
 	if err != nil {
 		rs.failAndResume(err, listenFile, bin)
 		return
 	}
-	log.Printf("restart: drained in %s (in-flight streams finished; restart_drain_timeout=%s)", time.Since(drainStart).Round(time.Millisecond), drainTo)
+	if drained {
+		logging.Printf("", "restart: drained in %s (in-flight streams finished; restart_drain_timeout=%s)", time.Since(drainStart).Round(time.Millisecond), drainTo)
+	} else {
+		logging.Printf("", "restart: drained in %s (drain window expired; in-flight streams were cut after a clean flush; restart_drain_timeout=%s)", time.Since(drainStart).Round(time.Millisecond), drainTo)
+	}
 
 	// prepareHandoff already drained every server and flushed metrics. The
 	// child may now open the database without overlapping predecessor writes.
@@ -469,14 +525,14 @@ func (rs *restarter) run() {
 		return
 	}
 
-	log.Printf("restart: handed off to pid %d; old process (pid %d) exiting", cmd.Process.Pid, rs.pid)
+	logging.Printf("", "restart: handed off to pid %d; old process (pid %d) exiting", cmd.Process.Pid, rs.pid)
 	os.Remove(bin) // os.Exit skips defers; keep /tmp clean (safe: the child runs from its own inode)
 	os.Exit(0)
 }
 
 // A scoped lifetime guarantees ticker/context cleanup even when a dependency
 // panics and the outer restart recovery resumes serving.
-func (rs *restarter) prepareWithProgress(drainTo time.Duration) error {
+func (rs *restarter) prepareWithProgress(drainTo time.Duration) (drained bool, err error) {
 	stopTick := make(chan struct{})
 	tickDone := make(chan struct{})
 	go func() {
@@ -507,6 +563,11 @@ func (rs *restarter) prepareWithProgress(drainTo time.Duration) error {
 // build compiles ./cmd/proxy from the module root into a fresh temp binary.
 // The running binary is never touched, so a failed build leaves the proxy
 // untouched (the same fail-fast rule scripts/dev.sh applies).
+//
+// Two contracts ride here and are stated in the operations guide: the rebuild
+// compiles the working tree exactly as it is (uncommitted and untracked files
+// included, so a restart is not a review gate), and it writes the fresh binary
+// into the process temp directory, which must be writable.
 func (rs *restarter) build() (string, error) {
 	if rs.root == "" {
 		return "", fmt.Errorf("restart unavailable: %s", rs.rootWhy)
@@ -514,9 +575,13 @@ func (rs *restarter) build() (string, error) {
 	if rs.goBin == "" {
 		return "", errors.New("restart unavailable: go toolchain not found on PATH")
 	}
-	f, err := os.CreateTemp("", "millivolt-rebuild-*.bin")
+	tempDir := os.TempDir()
+	f, err := os.CreateTemp(tempDir, "millivolt-rebuild-*.bin")
 	if err != nil {
-		return "", fmt.Errorf("temp binary: %w", err)
+		// A read-only or missing TMPDIR used to surface as a bare "temp
+		// binary: ..." beside a successful compile, which reads like a build
+		// fault. Name the directory and the requirement instead.
+		return "", fmt.Errorf("temp binary in %s: %w (the rebuild needs a writable process temp directory; set TMPDIR)", tempDir, err)
 	}
 	path := f.Name()
 	f.Close()
@@ -577,6 +642,11 @@ func awaitReady(r *os.File, timeout time.Duration) error {
 // another attempt is possible. The store was only flushed, never closed, so
 // metrics keep working end to end.
 func (rs *restarter) failAndResume(err error, listenFile *os.File, bin string) {
+	// Restore the pid file identity first: the handoff child rewrote it before
+	// readiness, so whatever happens next the file must name the process that
+	// is still serving. This covers a killed child, a garbled readiness, a
+	// failed resume and a pre-commit abort alike.
+	rs.refreshPIDFile()
 	if bin != "" {
 		os.Remove(bin)
 	}
@@ -596,19 +666,19 @@ func (rs *restarter) failAndResume(err error, listenFile *os.File, bin string) {
 					// The resumed server is the process's only listener; a
 					// mid-life death must not leave a silent zombie - die
 					// loudly so the operator restarts manually.
-					log.Fatalf("restart: resumed server failed: %v", serr)
+					fatalDrain("restart: resumed server failed: %v", serr)
 				}
 			}()
-			log.Printf("restart: serving resumed on the inherited socket")
+			logging.Printf("", "restart: serving resumed on the inherited socket")
 		}
 	}
 	if resumeErr != nil {
 		// Nothing further can be done here - the process is alive but cannot
 		// accept; say so loudly and let the operator restart it manually.
-		log.Fatalf("restart: %v; resume failed: %v - manual restart required", err, resumeErr)
+		fatalDrain("restart: %v; resume failed: %v - manual restart required", err, resumeErr)
 	}
 	rs.finishFailure(err)
-	log.Printf("restart: FAILED: %v (proxy resumed; no requests lost)", err)
+	logging.Printf("", "restart: FAILED: %v (proxy resumed; no requests lost)", err)
 }
 
 // Both build failures and resumed handoffs retire the run atomically.
@@ -626,6 +696,18 @@ func (rs *restarter) finishFailure(err error) {
 	close(rs.resumed)
 	rs.resumed = make(chan struct{})
 	rs.mu.Unlock()
+}
+
+// refreshPIDFile is the one owner of every pid-file write: the boot write, the
+// handoff child's pre-readiness rewrite, and the resume rewrite. It is atomic
+// and follows a symlinked path, so a reader never sees a truncated pid.
+func (rs *restarter) refreshPIDFile() {
+	if rs.deps == nil || rs.deps.pidFile == "" {
+		return
+	}
+	if err := atomicfile.WriteFile(rs.deps.pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+		logging.Printf("", "restart: pid file: %v", err)
+	}
 }
 
 func (rs *restarter) handoffDone() <-chan struct{} {
@@ -791,15 +873,15 @@ func inheritedListener() (net.Listener, bool) {
 	}
 	fd, err := strconv.Atoi(v)
 	if err != nil {
-		log.Fatalf("restart: invalid %s=%q", envListenFD, v)
+		fatalDrain("restart: invalid %s=%q", envListenFD, v)
 	}
 	f := os.NewFile(uintptr(fd), "inherited-listen")
 	ln, err := net.FileListener(f)
 	if err != nil {
-		log.Fatalf("restart: inherited listener: %v", err)
+		fatalDrain("restart: inherited listener: %v", err)
 	}
 	f.Close() // FileListener owns a duplicate; do not leak the inherited FD.
-	log.Printf("restart: inherited listening socket (fd %d); claimPort bypassed", fd)
+	logging.Printf("", "restart: inherited listening socket (fd %d); claimPort bypassed", fd)
 	return ln, true
 }
 

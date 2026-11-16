@@ -1,12 +1,12 @@
 package web
 
 import (
-	"log"
 	"net/http"
 	"sort"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -60,7 +60,13 @@ type scopePayload struct {
 }
 
 type entAcc struct {
-	id                uint32
+	id uint32
+	// slot is this group's row-membership ordinal, 1..explorerGroupBudget for a
+	// tracked group and the reserved value for the synthetic other card.
+	// Dictionary ids are dimension-wide positions that can sit millions above
+	// the budget, so projected rows store the slot instead and the membership
+	// arrays stay 16-bit.
+	slot              uint16
 	name              string
 	n                 int
 	cost              float64
@@ -70,18 +76,22 @@ type entAcc struct {
 	tools             int64
 	errFin            int
 	rateLimitRequests int
-	lastRequest       string // first membership in the current row; no history-ID set
-	ttftS             []int64
-	tpsS              []float64
-	ttftN             int
-	tpsN              int
+	lastRequest       string // request owning the current run of visits
+	// affectedN is the error dim's distinct affected-request count. It is a
+	// counter, not a request-ID set: one row's visits are contiguous, so
+	// lastRequest above dedupes them, and the count stays bounded by the
+	// group budget instead of growing with history.
+	affectedN int
+	ttftS     []int64
+	tpsS      []float64
+	ttftN     int
+	tpsN      int
 	// cost-REPORTING in+out tokens: the blended-$ denominator (unpriced
 	// records add tokens but not cost, so they must not dilute).
 	costInOut float64
 	// error dim only
-	code     string
-	lastMs   int64
-	affected map[string]struct{}
+	code   string
+	lastMs int64
 }
 
 var validDims = func() map[string]bool {
@@ -106,13 +116,14 @@ var scopeDimBits = func() map[string]uint32 {
 func scopeDimBit(dim string) uint32 { return scopeDimBits[dim] }
 
 // A row may belong to multiple groups, including repeated tool/error
-// occurrences. Spans index one flat membership list without per-row slices.
+// occurrences. Spans index one flat membership list without per-row slices;
+// both lists store the group's compact slot, not its dictionary id.
 type explorerMemberSpan struct{ start, count uint32 }
 
 // explorerSelectedGroup pairs one returned card's dictionary id with its
 // percentile bucket (rank+1). A zero bucket marks an empty open-addressed slot.
 type explorerSelectedGroup struct {
-	id     uint32
+	slot   uint16
 	bucket uint8
 }
 
@@ -134,43 +145,41 @@ const (
 	explorerHighHash      = 2654435761 // Knuth multiplicative hash
 )
 
-// explorerHighSlot is the deterministic initial slot for one high id.
-func explorerHighSlot(id uint32) int {
-	return int((id * explorerHighHash) & (explorerHighSelection - 1))
+// explorerHighSlot is the deterministic initial slot for one high ordinal.
+func explorerHighSlot(slot uint16) int {
+	return int((uint32(slot) * explorerHighHash) & (explorerHighSelection - 1))
 }
 
 // explorerSelectedGroups is one payload request's compact selected-group
-// lookup, built from the returned top cards only. Dictionary ids are
-// dimension-wide positions that can sit far above the card count, so the
-// previous dense []uint8 sized by maxGroupID allocated kilobytes to megabytes
-// per request to represent at most xpNodeCap entries. Low ids stay in the fixed
-// dense table; high ids use one fixed-capacity open-addressed table, so both
-// lookups are constant-time probes without allocation or maxGroupID scaling.
-// Selections are never carried across requests.
+// lookup, built from the returned top cards only. Group slots are dense from 1,
+// so the fixed dense table serves ordinary cardinals and the fixed-capacity
+// open-addressed table serves slots past it: both lookups are constant-time
+// probes with no allocation and no scaling with the dictionary. Selections are
+// never carried across requests.
 type explorerSelectedGroups struct {
 	dense [explorerDenseSelection]uint8
 	high  [explorerHighSelection]explorerSelectedGroup
 }
 
 // newExplorerSelectedGroups ranks no groups of its own: the payload has already
-// capped top at xpNodeCap, and duplicate ids cannot occur because top holds one
-// entry per group map key. Every selected id populates exactly one table.
+// capped top at xpNodeCap, and duplicate slots cannot occur because top holds one
+// entry per group map key. Every selected group populates exactly one table.
 func newExplorerSelectedGroups(top []*entAcc) explorerSelectedGroups {
 	var s explorerSelectedGroups
 	for i, g := range top {
 		bucket := uint8(i + 1)
-		if g.id < explorerDenseSelection {
-			s.dense[g.id] = bucket
+		if g.slot < explorerDenseSelection {
+			s.dense[g.slot] = bucket
 			continue
 		}
-		slot := explorerHighSlot(g.id)
+		slot := explorerHighSlot(g.slot)
 		for probes := 0; probes < explorerHighSelection; probes++ {
 			entry := &s.high[slot]
 			if entry.bucket == 0 {
-				*entry = explorerSelectedGroup{id: g.id, bucket: bucket}
+				*entry = explorerSelectedGroup{slot: g.slot, bucket: bucket}
 				break
 			}
-			if entry.id == g.id {
+			if entry.slot == g.slot {
 				entry.bucket = bucket
 				break
 			}
@@ -180,30 +189,30 @@ func newExplorerSelectedGroups(top []*entAcc) explorerSelectedGroups {
 	return s
 }
 
-// bucket returns the group's percentile bucket, or zero when the id is not one
-// of the returned cards. Low ids are one array load; high ids probe the fixed
-// table until their exact id or an empty slot. The loop is bounded, so a missing
-// id can never spin even if the capacity invariant were broken.
-func (s *explorerSelectedGroups) bucket(id uint32) uint8 {
-	if id < explorerDenseSelection {
-		return s.dense[id]
+// bucket returns the group's percentile bucket, or zero when the slot is not one
+// of the returned cards. A dense slot is one array load; a high slot probes the
+// fixed table until its exact slot or an empty entry. The loop is bounded, so a
+// missing slot can never spin even if the capacity invariant were broken.
+func (s *explorerSelectedGroups) bucket(slot uint16) uint8 {
+	if slot < explorerDenseSelection {
+		return s.dense[slot]
 	}
-	slot := explorerHighSlot(id)
+	at := explorerHighSlot(slot)
 	for probes := 0; probes < explorerHighSelection; probes++ {
-		entry := &s.high[slot]
+		entry := &s.high[at]
 		if entry.bucket == 0 {
 			return 0
 		}
-		if entry.id == id {
+		if entry.slot == slot {
 			return entry.bucket
 		}
-		slot = (slot + 1) & (explorerHighSelection - 1)
+		at = (at + 1) & (explorerHighSelection - 1)
 	}
 	return 0
 }
 
 // explorerFold accumulates the per-dimension breakdown (groups, rail
-// distinct-value counts, full-scope footer counts, error-affected sets) over
+// distinct-value counts, full-scope footer counts, error-affected counts) over
 // one stream of contributions. The footer never needs a second history scan.
 type explorerFold struct {
 	lineage       conversationLineage
@@ -221,17 +230,16 @@ type explorerFold struct {
 	// participates in ranking like a card but owns no per-value map: an error
 	// row's affected-request count comes from lastRequest, which is exact
 	// because one row's occurrences arrive contiguously.
-	other         entAcc
-	otherAffected int
-	overflow      bool
-	order         metricOrderSource
-	rowCount      int
-	// Single-valued dimensions store one group id per projected row (4 bytes).
-	// Only tool/error need the flat multi-membership list + spans.
-	singleMember []uint32
+	other    entAcc
+	overflow bool
+	order    metricOrderSource
+	rowCount int
+	// Single-valued dimensions store one group slot per projected row (2
+	// bytes). Only tool/error need the flat multi-membership list + spans.
+	singleMember []uint16
 	multiMember  bool
 	memberSpans  []explorerMemberSpan
-	members      []uint32
+	members      []uint16
 	pendingIDs   map[string]struct{}
 	seen         map[string]struct{}
 	total        int64
@@ -257,7 +265,7 @@ func newExplorerFold(dim, statusCode string, allFS []scopeFilter) *explorerFold 
 	e := &explorerFold{
 		dim: dim, statusCode: statusCode, allFS: allFS, grpFS: grpFS,
 		groups: make(map[uint32]*entAcc),
-		other:  entAcc{id: explorerOtherID, name: explorerOtherName},
+		other:  entAcc{id: explorerOtherID, name: explorerOtherName, slot: explorerGroupBudget + 1},
 		seen:   make(map[string]struct{}),
 	}
 	// Unprepared folds (direct fixtures) still need a names source for the
@@ -443,7 +451,9 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 			e.overflow = true
 			g = &e.other
 		} else {
-			g = &entAcc{id: dimKey, name: e.dims.name(e.dimIndex, dimKey)}
+			// len(groups) is the next free ordinal; the other card reserves the
+			// past-budget slot, so a slot is always unique and non-zero.
+			g = &entAcc{id: dimKey, name: e.dims.name(e.dimIndex, dimKey), slot: uint16(len(e.groups) + 1)}
 			e.groups[dimKey] = g
 		}
 	}
@@ -452,26 +462,15 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 	// the distinct affected-request count. Tool cards fold one contribution
 	// per request per tool name (a nonstream response repeats a name once per
 	// call), so their N, share and request-level accumulators are
-	// request-based while the calls KPI still sums ToolCalls. Error groups need
-	// the affected-ID set for their headline; the overflow bucket only needs
-	// the last ID because one row's visits are contiguous. Tool duplicates are
-	// contiguous too, so the same last-ID guard dedupes them.
-	var firstRequest bool
-	if e.dimIndex == dimError && g != &e.other {
-		if g.affected == nil {
-			g.affected = make(map[string]struct{})
-		}
-		_, duplicate := g.affected[c.id]
-		firstRequest = !duplicate
-		if firstRequest {
-			g.affected[c.id] = struct{}{}
-		}
-	} else {
-		firstRequest = g.n == 0 || g.lastRequest != c.id
-		g.lastRequest = c.id
-		if e.dimIndex == dimError && firstRequest {
-			e.otherAffected++
-		}
+	// request-based while the calls KPI still sums ToolCalls. One row's visits
+	// are contiguous, so the per-card last-request id is the whole dedupe
+	// state: it matches the old per-card request-ID set without holding a
+	// history-proportional map, and it is the SAME guard the overflow bucket
+	// uses.
+	firstRequest := g.n == 0 || g.lastRequest != c.id
+	g.lastRequest = c.id
+	if e.dimIndex == dimError && firstRequest {
+		g.affectedN++
 	}
 	if e.dimIndex == dimTool && !firstRequest {
 		return g, nil
@@ -518,9 +517,9 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 			// every explorer request allocated a span and a membership slot
 			// per projected row even for these.
 			if e.singleMember == nil {
-				e.singleMember = make([]uint32, e.rowCount)
+				e.singleMember = make([]uint16, e.rowCount)
 			}
-			e.singleMember[c.rowIndex-1] = g.id
+			e.singleMember[c.rowIndex-1] = g.slot
 		} else {
 			if e.memberSpans == nil {
 				e.memberSpans = make([]explorerMemberSpan, e.rowCount)
@@ -530,7 +529,7 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 				span.start = uint32(len(e.members))
 			}
 			span.count++
-			e.members = append(e.members, g.id)
+			e.members = append(e.members, g.slot)
 		}
 	}
 	// Durable samples stay in immutable metric order. Only raw ring/pending
@@ -556,10 +555,7 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 // separately in ErrEvents. Ranking and the wire N field read the same owner.
 func (e *explorerFold) groupCount(g *entAcc) int {
 	if e.dimIndex == dimError {
-		if g == &e.other {
-			return e.otherAffected
-		}
-		return len(g.affected)
+		return g.affectedN
 	}
 	return g.n
 }
@@ -603,8 +599,8 @@ func (e *explorerFold) rankedGroups() []*entAcc {
 // selectedVisitor maps projection rows to compact selected-group buckets for
 // the metric rank visitors. Multi-valued dimensions walk the row's occurrence
 // span and emit one bucket per selected occurrence in source order, preserving
-// duplicate tool/error multiplicity; single-valued dimensions keep one group id
-// per row. Unselected ids emit nothing.
+// duplicate tool/error multiplicity; single-valued dimensions keep one group
+// slot per row. Unselected slots emit nothing.
 func (e *explorerFold) selectedVisitor(selected *explorerSelectedGroups) func(row uint32, emit func(uint8)) {
 	if e.multiMember {
 		return func(row uint32, emit func(uint8)) {
@@ -612,8 +608,8 @@ func (e *explorerFold) selectedVisitor(selected *explorerSelectedGroups) func(ro
 				return
 			}
 			span := e.memberSpans[row]
-			for _, id := range e.members[span.start : span.start+span.count] {
-				if bucket := selected.bucket(id); bucket != 0 {
+			for _, slot := range e.members[span.start : span.start+span.count] {
+				if bucket := selected.bucket(slot); bucket != 0 {
 					emit(bucket)
 				}
 			}
@@ -737,7 +733,7 @@ func (a *AggAPI) HandleAggExplorer(w http.ResponseWriter, r *http.Request) {
 
 	payload, err := a.explorer(ctx, dim, allFS, statusCode)
 	if err != nil {
-		log.Printf("agg explorer: %v", err)
+		logging.Printf("", "agg explorer: %v", err)
 		adminjson.WriteError(w, http.StatusInternalServerError, "aggregate failed")
 		return
 	}

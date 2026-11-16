@@ -160,11 +160,17 @@ const KNOWN_CLIENTS_KEY = 'known_clients';
 const KNOWN_PROVIDERS_KEY = 'known_providers';
 const KNOWN_MODELS_KEY = 'known_models';
 let streamLive = false;
-let pauseState = { paused: false, clients: [], providers: [], holds: [], [KNOWN_CLIENTS_KEY]: [], [KNOWN_PROVIDERS_KEY]: [], until: null, queued: 0, default_max_queued: 0 };
-let pauseEditID = '';
+// streamSeen records whether this page ever opened the live stream. Before
+// that first open the dashboard is still connecting, which is not the same
+// fact as a dropped connection: only the latter makes state stale.
+let streamSeen = false;
+// pauseState is the applied pause document. Liveness is not mirrored here:
+// a hold expires on the server's clock, and `liveHolds()` derives that from
+// `holds` against the anchored clock, so a stored `paused` boolean would be a
+// second answer that goes stale between polls.
+let pauseState = { clients: [], providers: [], holds: [], [KNOWN_CLIENTS_KEY]: [], [KNOWN_PROVIDERS_KEY]: [], until: null, queued: 0, storm_waiters: 0, default_max_queued: 0 };
 let throttleState = { throttles: [], [KNOWN_PROVIDERS_KEY]: [], active: false };
 let debugState = { enabled: false, sessions: [], [KNOWN_CLIENTS_KEY]: [], [KNOWN_PROVIDERS_KEY]: [], [KNOWN_MODELS_KEY]: [], until: null, ttl: '', max_bytes: '' };
-let debugEditID = '';
 // localStorage key for the persisted status filter. One owner: the write
 // path in chrome_lists.js (doFilter) references the same constant.
 const FILTERS_STORAGE_KEY = 'dash.filters';
@@ -307,6 +313,22 @@ const fmt = n => {
 };
 // fmtFull is the exact grouped form (698479531 → "698,479,531") for tooltips.
 const fmtFull = n => n == null ? '-' : Number(n).toLocaleString();
+// agree is the dashboard's one count-agreement rule: a count of exactly one
+// takes the singular form, anything else the plural. Ten console phrases and
+// two module helpers each spelled this ternary themselves, so "1 request is"
+// and "2 requests are" could drift from "1 request" and "2 requests".
+const agree = (n, singular, plural) => Number(n) === 1 ? singular : plural;
+// isCount is the dashboard's one "non-negative whole number" test: a request
+// count, a sequence number, a cursor, a queue depth. Ten sites spelled the same
+// safe-integer and sign check by hand, and two of them were the same predicate
+// differing only in what they return on failure. The failure value stays with
+// the caller, because a draft field needs NaN to report a rejected edit while a
+// missing document field needs 0; the test itself lives here once.
+const isCount = n => Number.isSafeInteger(n) && n >= 0;
+// countPhrase is the frequent "1 record" / "2 records" shape over fmt, so a
+// count is formatted and agreed in one call instead of two conventions.
+const countPhrase = (n, singular, plural) =>
+  fmt(n) + ' ' + agree(n, singular, plural === undefined ? singular + 's' : plural);
 // fmtBytes is the single byte-size formatter for captured wire sizes and
 // long-text readouts. Exact below 1 KB, then the decimal KB/MB/GB ladder with
 // at most two decimals (1234 → "1.23 KB"). Exact counts stay recoverable
@@ -330,6 +352,12 @@ const fmtBytes = n => {
   }
   return neg + Math.round(a) + ' B';
 };
+// TIME_MS is the one table of millisecond units. Five modules divided by a
+// bare 60000, 3600000 or 86400000 and two of them declared their own constant
+// for the same minute, so a reader that needed seconds-per-minute had to know
+// the number rather than name it. Durations stay milliseconds everywhere; this
+// is the vocabulary for converting them.
+const TIME_MS = { second: 1000, minute: 60000, hour: 3600000, day: 86400000 };
 // fmtDur is the single duration formatter for every ms value, compact and
 // readable at any scale: ms below 1s, seconds below 1m, then minutes, then
 // hours and days - always with the unit so it never overflows (450 → "450ms",
@@ -339,15 +367,15 @@ const fmtDur = ms => {
   if (ms == null || !isFinite(ms)) return '-';
   const neg = ms < 0 ? '-' : '';
   const a = Math.abs(Number(ms));
-  if (a < 1000) {
+  if (a < TIME_MS.second) {
     const rounded = Math.round(a * 1000) / 1000;
     return neg + (rounded >= 1000 ? '1s' : (rounded || a) + 'ms');
   }
   const r2 = v => Math.round(v * 100) / 100;
-  if (a < 60000) { const s = r2(a / 1000); return s >= 60 ? neg + '1m' : neg + s + 's'; }   // 1.26s
-  if (a < 3600000) { const m = r2(a / 60000); return m >= 60 ? neg + '1h' : neg + m + 'm'; } // 1.50m
-  if (a < 86400000) { const h = r2(a / 3600000); return h >= 24 ? neg + '1d' : neg + h + 'h'; }
-  return neg + r2(a / 86400000) + 'd';
+  if (a < TIME_MS.minute) { const s = r2(a / TIME_MS.second); return s >= 60 ? neg + '1m' : neg + s + 's'; }   // 1.26s
+  if (a < TIME_MS.hour) { const m = r2(a / TIME_MS.minute); return m >= 60 ? neg + '1h' : neg + m + 'm'; } // 1.50m
+  if (a < TIME_MS.day) { const h = r2(a / TIME_MS.hour); return h >= 24 ? neg + '1d' : neg + h + 'h'; }
+  return neg + r2(a / TIME_MS.day) + 'd';
 };
 // fmtTTFT is TTFT's display owner. Server ttft_ms is 0 when no token arrived,
 // when the request never sent an upstream attempt (a parked cursor resume) or
@@ -355,6 +383,55 @@ const fmtDur = ms => {
 // positives are rounded up to 1ms.
 // fmtDur(0) stays "0ms" for real durations (axes, elapsed time).
 const fmtTTFT = ms => ms ? fmtDur(ms) : '-';
+// pad2 is the one zero-pad for a clock or date field. Four surfaces joined
+// two padded numbers into HH:MM and two more padded date parts by hand, so a
+// change to the padding reached one surface at a time.
+const pad2 = n => String(n).padStart(2, '0');
+// fmtClock is the one HH:MM form, given the two fields. Callers own how they
+// derive them, because a schedule holds minutes since midnight while a chart
+// tick and a log stamp hold an instant; the join and the width are shared.
+const fmtClock = (h, m) => pad2(h) + ':' + pad2(m);
+// fmtClockMs renders an epoch-ms instant as local HH:MM.
+const fmtClockMs = ms => {
+  const d = new Date(ms);
+  return fmtClock(d.getHours(), d.getMinutes());
+};
+// fmtClockOfDay renders minutes since local midnight as HH:MM.
+const fmtClockOfDay = minutes => fmtClock(Math.floor(minutes / 60), minutes % 60);
+// fmtClockRange is the one start-end form for a clock range. The en dash is
+// the instrument's range glyph: a schedule window, the chart's bucket range
+// and the explorer's time buckets all read with it, so a hyphen in one surface
+// could make the same window look like subtraction.
+const fmtClockRange = (start, end) => start + '–' + end;
+// CAL_DAYS is the one weekday table, indexed to the server's day numbering
+// (0 = Sunday). Each row carries the three spellings the dashboard actually
+// shows: the one letter a schedule chip paints, the three-letter stamp a log
+// divider prints, and the full name a screen reader hears. Two tables existed
+// before it - a letter/name table for the schedule chips and a separate short
+// table for log dividers - so a weekday rename reached one surface at a time.
+const CAL_DAYS = [
+  { letter: 'S', short: 'SUN', name: 'Sunday' },
+  { letter: 'M', short: 'MON', name: 'Monday' },
+  { letter: 'T', short: 'TUE', name: 'Tuesday' },
+  { letter: 'W', short: 'WED', name: 'Wednesday' },
+  { letter: 'T', short: 'THU', name: 'Thursday' },
+  { letter: 'F', short: 'FRI', name: 'Friday' },
+  { letter: 'S', short: 'SAT', name: 'Saturday' },
+];
+const CAL_MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+  'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+// sameLocalDay answers the one calendar question the dashboard asks: do these
+// two instants fall on the same local day? It compares the fields rather than
+// a formatted string so the answer cannot depend on the format. log_rows.js
+// answered it twice - once as this comparison and once by building an
+// unpadded key - so the two could disagree about which day a row belongs to.
+const sameLocalDay = (a, b) =>
+  a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() &&
+  a.getDate() === b.getDate();
+// fmtDateKey is the one local calendar-day key, zero-padded so a key also
+// sorts chronologically. Three surfaces built it by hand and one of them left
+// the month and day unpadded, which made "2026-11-2" sort after "2026-11-14".
+const fmtDateKey = d => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
 // TPS_UNIT is the one compact generation-speed unit for narrow surfaces (the
 // KPI band and the summary timing tile). Chart axes, legends and tooltips keep
 // the full "tok/s" label where there is room.
@@ -424,6 +501,64 @@ const pct2 = (a, b) => b ? pctCap(a, b, 2) : '-';
 // fully recoverable on hover. Use for any value that can exceed its container.
 const vt = (display, full) => `<span class="vt" title="${escapeHtml(String(full ?? display))}">${escapeHtml(String(display))}</span>`;
 const $ = id => document.getElementById(id);
+
+// setText is the one writer for a live region's text. An identical assignment
+// still replaces the text node, and a screen reader announces the same status
+// again on every repaint: a console left open would repeat the last change, and
+// a settings field would repeat "1 unsaved" on every keystroke. Comparing first
+// makes the announcement mean that the words actually changed.
+//
+// It lives here rather than beside any one surface because live regions exist
+// in several modules and the guard is worthless if a writer can reach a bare
+// assignment instead.
+function setText(element, text) {
+  if (element && element.textContent !== text) element.textContent = text;
+}
+
+// escapeHtml is the one HTML-string sink. It lives beside setText in the first
+// module every page loads, because callers in core itself (vt) and in modules
+// that load before the table rows innerHTML builders all depend on it.
+function escapeHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// reportProblem is the one place a client-side failure is made visible to
+// whoever debugs the dashboard. The browser console is the only sink the page
+// has: there is no server route for a client log, and inventing one would put
+// an unauthenticated write path in front of the operator plane. What matters is
+// that a swallowed failure is not silent - a malformed stream frame, a payload
+// that fails validation, or a module that will not load all land here with the
+// same shape, so a field report has one place to look.
+//
+// `label` names the surface, `err` is whatever was thrown. The message is
+// included but no payload contents are: a frame may carry request metadata.
+function reportProblem(label, err) {
+  const detail = err && err.message ? err.message : String(err || 'unknown error');
+  console.error(label + ':', detail);
+}
+
+// skipToMain is the skip link's activation. The link keeps href="#main" for
+// the browser's own affordances, but the press must not write the hash: every
+// hash the router sees is parsed as explorer scope, so "#main" reads as an
+// unknown dimension and would drop the operator's filters. <main> carries the
+// tabindex=-1 focus target instead.
+function skipToMain(event) {
+  const main = $('main');
+  if (!main) return;
+  if (event) event.preventDefault();
+  main.focus();
+}
+
+// keyModified reports whether a key event belongs to the browser or the OS
+// rather than to a widget's own navigation: Alt+Left is Back, Cmd+Up is the top
+// of the document, Ctrl+Home is the same. A roving handler that preventDefaults
+// one of those takes the shortcut away from the operator, so every handler that
+// claims arrows or Home/End asks this first. It is one function because the
+// rule is easy to state and easy to forget, and five handlers already did.
+function keyModified(event) {
+  return !!(event.altKey || event.ctrlKey || event.metaKey);
+}
 
 // ---------- focus preservation across repaints ----------
 // Redraws that replace innerHTML (request rows, gallery cards, chart legend,
@@ -528,5 +663,5 @@ function setupCanvas(box) {
   if (cv.height !== ph) cv.height = ph;
   const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return { ctx, w, h };
+  return { ctx, cv, w, h };
 }

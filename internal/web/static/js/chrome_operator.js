@@ -9,8 +9,11 @@
 // never outlives the browser session, and it is dropped as soon as the
 // server rejects it.
 const OPERATOR_KEY = 'millivolt.operatorToken';
+// The server compares the bearer byte for byte and a paste carries the
+// surrounding whitespace: the storage owner trims once, on read and on write,
+// so no call site has to.
 let operatorCredential = '';
-try { operatorCredential = sessionStorage.getItem(OPERATOR_KEY) || ''; } catch (e) { operatorCredential = ''; }
+try { operatorCredential = (sessionStorage.getItem(OPERATOR_KEY) || '').trim(); } catch (e) { operatorCredential = ''; }
 // Bumped on every stored/cleared credential so an in-flight request can tell
 // that another call's unlock landed while it was waiting for its response.
 let operatorCredentialEpoch = 0;
@@ -24,12 +27,54 @@ let operatorPrompt = null;
 let operatorDismiss = () => {};
 
 function storeOperatorCredential(value) {
-  operatorCredential = value;
+  const trimmed = (value || '').trim();
+  operatorCredential = trimmed;
   ++operatorCredentialEpoch;
   try {
-    if (value) sessionStorage.setItem(OPERATOR_KEY, value);
+    if (trimmed) sessionStorage.setItem(OPERATOR_KEY, trimmed);
     else sessionStorage.removeItem(OPERATOR_KEY);
   } catch (e) { /* storage denied: tab-only credential */ }
+}
+
+// signOutOperator is the operator's explicit exit. It drops BOTH halves of the
+// session: the tab credential and the signed cookie. Clearing only the
+// credential leaves a reload riding the 12-hour cookie straight back in, and
+// deleting only the cookie lets the still-present bearer re-mint on the next
+// gated call. The DELETE is unauthenticated by design (the route is the
+// session owner); a failed one still leaves the credential gone, so the prompt
+// stays the honest next step and the cookie expires on its own.
+async function signOutOperator() {
+  storeOperatorCredential('');
+  operatorRejected = false;
+  // A gated call that already left with the bearer makes the server mint a new
+  // cookie on its way back, so expiring first would lose the race and a reload
+  // would ride straight back in. Let the in-flight wave land, then expire.
+  await operatorDrain();
+  try { await fetch('/session', { method: 'DELETE', credentials: 'same-origin' }); } catch (e) { /* cookie stays until TTL */ }
+  // The prompt it opens belongs to this call: an answered token must be stored
+  // here, or the sign-in after a sign-out would validate nothing.
+  const token = await askOperatorToken();
+  if (token) storeOperatorCredential(token);
+}
+
+// OPERATOR_SIGNOUT_DRAIN_MS bounds the sign-out wait: a prompt held open by an
+// already-401ed call must not block the exit.
+const OPERATOR_SIGNOUT_DRAIN_MS = 1500;
+// operatorGated counts the gated calls the page has in flight. Every gated
+// call goes through operatorFetch, so this is the one place that knows.
+let operatorGated = 0;
+
+// operatorDrain resolves once no gated call is outstanding, or at the bound.
+function operatorDrain() {
+  if (!operatorGated) return Promise.resolve();
+  return new Promise(resolve => {
+    const started = Date.now();
+    const tick = () => {
+      if (!operatorGated || Date.now() - started >= OPERATOR_SIGNOUT_DRAIN_MS) resolve();
+      else setTimeout(tick, 25);
+    };
+    setTimeout(tick, 25);
+  });
 }
 
 // One owner for gated-plane calls: attach the stored credential, and on 401
@@ -38,6 +83,11 @@ function storeOperatorCredential(value) {
 // (MILLIVOLT_OPERATOR_TOKEN); prompting cannot help, so the response is
 // returned for the caller's error surface.
 async function operatorFetch(url, options = {}) {
+  operatorGated++;
+  try { return await operatorFetchInner(url, options); } finally { operatorGated--; }
+}
+
+async function operatorFetchInner(url, options) {
   const attempt = () => {
     const headers = Object.assign({}, options.headers || {});
     if (operatorCredential) headers['Authorization'] = 'Bearer ' + operatorCredential;
@@ -84,8 +134,19 @@ async function operatorFetch(url, options = {}) {
 // operatorJson is the one GET-and-parse owner for operator-state JSON
 // fetches: it resolves the parsed document only for a 2xx response and
 // rejects otherwise, so every caller shares one failure contract.
+//
+// The rejection is a real Error carrying the status, not a bare
+// Promise.reject(). A reasonless rejection reached the ledger as
+// "could not undo: undefined", which tells the operator nothing and hides
+// the one fact that would help - whether the proxy refused or was
+// unreachable.
 function operatorJson(url, options = {}) {
-  return operatorFetch(url, options).then(r => r.ok ? r.json() : Promise.reject());
+  return operatorFetch(url, options).then(r => {
+    if (r.ok) return r.json();
+    const err = new Error('request failed (' + r.status + ')');
+    err.status = r.status;
+    return Promise.reject(err);
+  });
 }
 
 // operatorErrorBody is the shared failure read for an operator JSON call:
@@ -99,6 +160,10 @@ async function operatorErrorBody(r, fallback) {
   try { msg = (await r.json()).error || msg; } catch (e) {}
   const err = new Error(msg);
   err.operatorBody = true;
+  // The status rides along: a 404 on a stored rule means the rule was removed
+  // under the edit, which the console answers with save-as-new rather than a
+  // repeated failure.
+  err.status = r.status;
   throw err;
 }
 
@@ -148,19 +213,27 @@ function askOperatorToken() {
   operatorPrompt = new Promise(resolve => {
     let dialog = $('operator-dialog');
     if (!dialog) {
-      dialog = buildModalDialog('operator-dialog', 'operator-dialog', 'operator-dialog-title', `<div class="operator-dialog-panel"><div class="operator-dialog-brand"><div class="brand-logo" aria-hidden="true">${brandLogoSVG('mv-login')}</div><h3 id="operator-dialog-title">millivolt</h3></div><p class="operator-dialog-note">${OPERATOR_DIALOG_NOTE}</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="current-password" spellcheck="false" aria-label="Operator token" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="button" data-operator-auth="cancel">Cancel</button><button class="btn btn-accent" type="submit">Sign in</button></div></form></div>`);
+      dialog = buildModalDialog('operator-dialog', 'operator-dialog', 'operator-dialog-title', `<div class="operator-dialog-panel"><div class="operator-dialog-brand"><div class="brand-logo" aria-hidden="true">${brandLogoSVG('mv-login')}</div><h3 id="operator-dialog-title">millivolt</h3></div><p class="operator-dialog-note" id="operator-dialog-note">${OPERATOR_DIALOG_NOTE}</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="current-password" spellcheck="false" aria-label="Operator token" aria-describedby="operator-dialog-note" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="button" data-operator-auth="cancel">Cancel</button><button class="btn btn-accent" type="submit">Sign in</button></div></form></div>`);
       wireDialogDismiss(dialog, () => operatorDismiss(''));
     }
     const input = $('operator-dialog-input');
     const note = dialog.querySelector('.operator-dialog-note');
     if (operatorRejected) {
       operatorRejected = false;
-      // Same lead sentence as the server login page's rejection notice.
+      // Same lead sentence as the server login page's rejection notice. The
+      // note is the field's description, so the reason is read with the field
+      // instead of only repainting above it.
       note.textContent = 'That token was rejected. Enter the current MILLIVOLT_OPERATOR_TOKEN value and try again.';
       note.setAttribute('data-err', '');
+      // An alert while the field holds focus; the neutral sentence is a static
+      // hint, so the role goes away with the reason.
+      note.setAttribute('role', 'alert');
+      input.setAttribute('aria-invalid', 'true');
     } else {
       note.textContent = OPERATOR_DIALOG_NOTE;
       note.removeAttribute('data-err');
+      note.removeAttribute('role');
+      input.removeAttribute('aria-invalid');
     }
     // The dialog owns its promise. If anything else closes it (another modal
     // opening calls closeModal directly and resolves nothing), resolve '' -
@@ -180,8 +253,8 @@ function askOperatorToken() {
     dialog.querySelector('[data-operator-auth="cancel"]').onclick = () => finish('');
     $('operator-dialog-form').onsubmit = e => {
       e.preventDefault();
-      // Verbatim, like every other presentation path (bearerToken and the
-      // login form never trim): a credential with edge whitespace is valid.
+      // Raw here: storeOperatorCredential owns the one trim, so a pasted
+      // token with edge whitespace still stores the exact bearer value.
       finish(input.value);
     };
     closeHeaderMenus();
@@ -199,16 +272,15 @@ function askOperatorToken() {
 
 // All operator mutations share confirmation, busy and issue-order gates.
 const operatorState = {
-  pause: { revision: 0, busy: false, menu: 'pause-menu', count: 'pause-count', valid: st => st?.ok === true && Array.isArray(st.holds), apply: applyPauseState, sync: syncPauseMenuState, refresh: refreshPauseMenuDisplay },
-  debug: { revision: 0, busy: false, menu: 'debug-menu', count: 'debug-count', valid: st => st?.ok === true && Array.isArray(st.sessions), apply: applyDebugState, sync: syncDebugMenuState, refresh: refreshDebugMenuDisplay },
-  throttle: { revision: 0, busy: false, menu: 'limits-menu', count: 'lim-count', valid: st => st?.ok === true && Array.isArray(st.throttles), apply: applyThrottleState, sync: syncLimitsMenuState, refresh: refreshLimitsMenuDisplay },
+  pause: { revision: 0, busy: false, valid: st => st?.ok === true && Array.isArray(st.holds), apply: applyPauseState },
+  debug: { revision: 0, busy: false, valid: st => st?.ok === true && Array.isArray(st.sessions), apply: applyDebugState },
+  throttle: { revision: 0, busy: false, valid: st => st?.ok === true && Array.isArray(st.throttles), apply: applyThrottleState },
 };
 document.addEventListener('click', e => {
   const button = e.target.closest('[data-operator]');
   if (!button || button.disabled) return;
-  const actions = { 'pause-edit': editPauseHold, 'pause-resume': resumePauseHold,
-    'debug-edit': editDebugSession, 'debug-stop': stopDebugSession, 'limit-edit': editLimitProvider,
-    'storm-open': openStormDetails, 'storm-close': closeStormDetails, 'quota-resume': resumeQuotaProvider };
+  const actions = { 'storm-open': openStormDetails, 'storm-close': closeStormDetails,
+    'quota-resume': resumeQuotaProvider };
   const action = actions[button.dataset.operator];
   if (action) { e.stopPropagation(); action(button.dataset.value); }
 });
@@ -217,47 +289,55 @@ function captureOperatorRevisions() {
 }
 function acceptOperator(kind, st, revision) {
   const gate = operatorState[kind];
-  return !gate.busy && revision === gate.revision && gate.valid(st);
+  const accepted = !gate.busy && revision === gate.revision && gate.valid(st);
+  // Every operator document carries the server instant its deadlines are
+  // measured against, and this is the one gate the bootstrap and every poll
+  // pass through. Anchoring here means no surface can read a server-owned
+  // deadline with the workstation clock.
+  if (accepted) anchorOperatorClock(st?.server_ms);
+  return accepted;
 }
+// operatorError is the one rejected-write surface. The console names the
+// rejection in the pane the operator is working in; when it is not loaded (a
+// partial harness), the toast is the fallback.
 function operatorError(kind, message) {
-  const el = $(operatorState[kind].count);
-  if (el) { el.textContent = message; el.dataset.err = '1'; }
+  if (typeof ocOperatorError === 'function') { ocOperatorError(message); return; }
+  toast(String(message || 'the change was rejected'), 'err');
 }
-// operatorCountClear is operatorError's reset counterpart: one owner for the
-// count-line clear (text + error flag), keyed by kind. The limits sites'
-// text clear alone would be behavior-neutral (updateLimitCount repaints the
-// line immediately after them, and mutateOperator's gate.sync() repaints it
-// for every kind), but the ERROR-FLAG clear is load-bearing:
-// updateLimitCount early-returns while dataset.err is set, so without this
-// clear a provider edit after a failed limits write would leave the stale
-// error on the line instead of repainting the live facts (jsdom-pinned).
-function operatorCountClear(kind) {
-  const el = $(operatorState[kind].count);
-  if (el) { el.textContent = ''; delete el.dataset.err; }
+// operatorClearError drops the previous rejection before a new write starts,
+// so a stale banner cannot outlive the condition that produced it.
+function operatorClearError() {
+  if (typeof ocOperatorErrorClear === 'function') ocOperatorErrorClear();
 }
-// resyncOperatorSurfaces is the shared apply-state epilogue: re-sync the
-// kind's header menu when it is open, then schedule a live repaint when a
-// snapshot exists. displayOnly polls (occupancy, elapsed and capture counts)
-// take the kind's refresh path, which updates the affected text without
-// touching the form or checklist nodes. The per-kind pre-work (footer
-// refresh, pressed bits) stays at its apply site.
-function resyncOperatorSurfaces(kind, displayOnly = false) {
-  const menu = $(operatorState[kind].menu);
-  if (menu && !menu.hidden) {
-    if (displayOnly && operatorState[kind].refresh) operatorState[kind].refresh();
-    else operatorState[kind].sync();
-  }
+// resyncOperatorSurfaces is the shared apply-state epilogue: repaint the
+// console when it is mounted, then schedule a live repaint when a snapshot
+// exists. The console owns focus-preserving rerenders, so a display-only
+// poll needs no separate path.
+function resyncOperatorSurfaces(kind) {
+  if (typeof operatorConsoleSync === 'function') operatorConsoleSync(kind);
   if (lastData) scheduleRenderLive();
 }
+// operatorNoun is the console's own word for a kind. The wire route is
+// throttle/pause/debug; the operator reads limit/hold/capture and never sees
+// the route name anywhere else, so a failure must not answer in it.
+const OPERATOR_NOUNS = { throttle: 'limit', pause: 'hold', debug: 'capture' };
+function operatorNoun(kind) { return OPERATOR_NOUNS[kind] || kind; }
+
 async function mutateOperator(kind, body, after) {
   const gate = operatorState[kind];
-  if (gate.busy) return;
+  const noun = operatorNoun(kind);
+  // A second action while the first is in flight is a real double click, not
+  // a command. Answering it with silence made the click look ignored.
+  if (gate.busy) {
+    operatorError(kind, 'the ' + noun + ' change is still in flight');
+    return false;
+  }
   gate.busy = true;
   ++gate.revision;
-  operatorCountClear(kind);
-  gate.sync();
+  operatorClearError();
+  if (typeof operatorConsoleSync === 'function') operatorConsoleSync(kind);
   let confirmed;
-  const fail = 'could not change ' + kind;
+  const fail = 'could not change the ' + noun;
   try {
     const st = await operatorJsonBody('/admin/' + kind, {
       method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body),
@@ -265,43 +345,57 @@ async function mutateOperator(kind, body, after) {
     if (!gate.valid(st)) throw new Error(st?.error || fail);
     confirmed = st;
   } catch (err) {
-    operatorError(kind, String(err.message || fail));
+    // A transport failure surfaces the browser's own "Failed to fetch"; the
+    // server's answer carries the operatorBody marker. Only the transport case
+    // needs the console's context prepended, so the operator learns what was
+    // not changed as well as why.
+    const message = String(err.message || fail);
+    operatorError(kind, err.operatorBody ? message : fail + ' - ' + message);
+    if (err.status === 404 && typeof ocMarkRuleGone === 'function') ocMarkRuleGone(kind);
   } finally {
     gate.busy = false;
     ++gate.revision;
     if (confirmed) {
+      // The gate's revision was advanced above and again before this call, so
+      // the defaulted revision is the one acceptOperator expects.
       gate.apply(confirmed);
-      if (after) after();
+      // The confirmed document is the server's own answer for this write. A
+      // callback that needs the identity the write created reads it from
+      // here (the capture route returns created_id) instead of inferring it
+      // from a before/after list difference, which picks the wrong object
+      // when someone else creates one at the same time.
+      if (after) after(confirmed);
       if (confirmed.warning) {
+        // Persistence warnings are non-fatal: the runtime state is confirmed,
+        // so the console names the warning in place and stays exactly where
+        // the operator left it.
         operatorError(kind, confirmed.warning);
-        $(gate.menu).hidden = false;
-        syncHdrMenuExpanded();
       }
     }
-    gate.sync();
+    if (typeof operatorConsoleSync === 'function') operatorConsoleSync(kind);
     refreshFooterState();
   }
+  // Confirmed means the server's own snapshot arrived and passed the gate.
+  // Callers that must know (the undo path above all) read this instead of
+  // assuming success: the rejection above is shown in the banner and never
+  // thrown, so a caller that ignored the result reported a change that was
+  // refused. Returning a value is additive - every direct caller still just
+  // fires and lets the banner speak.
+  return !!confirmed;
 }
 
 let _pauseStateSig = '';
 let _throttleStateSig = '';
 let _debugStateSig = '';
-// Structural menu signatures exclude display-only poll fields (queue
-// occupancy, elapsed run time and capture counts). They are refreshed in
-// place by each kind's refresh function; everything that changes rows,
-// checklist vocabulary, selection or take-ability still runs the full sync.
-let _pauseMenuSig = '';
-let _debugMenuSig = '';
-let _limitsMenuSig = '';
-let _limitsProviderSig = '';
-let _limitsPolicySig = '';
+// Each accepted snapshot is deduped by its full document signature, so an
+// unchanged poll does no paint work. The console repaints the open pane and
+// preserves focus itself when the signature does change.
 function applyPauseState(st, revision = operatorState.pause.revision) {
   if (!acceptOperator('pause', st, revision)) return;
   const sig = JSON.stringify(st);
   if (sig === _pauseStateSig) return;
   _pauseStateSig = sig;
   pauseState = {
-    paused: !!st.paused,
     clients: Array.isArray(st.clients) ? st.clients : [],
     providers: Array.isArray(st.providers) ? st.providers : [],
     holds: Array.isArray(st.holds) ? st.holds : [],
@@ -309,11 +403,15 @@ function applyPauseState(st, revision = operatorState.pause.revision) {
     [KNOWN_PROVIDERS_KEY]: Array.isArray(st[KNOWN_PROVIDERS_KEY]) ? st[KNOWN_PROVIDERS_KEY] : [],
     until: st.until || null,
     queued: typeof st.queued === 'number' ? st.queued : 0,
+    storm_waiters: typeof st.storm_waiters === 'number' ? st.storm_waiters : 0,
     default_max_queued: typeof st.default_max_queued === 'number' ? st.default_max_queued : 0,
+    // A durable hold document existed but could not be read, so holds saved
+    // before this restart are not in force. It stays on the state rather than
+    // becoming a toast: the fact holds until the operator acts.
+    restore_degraded: st.restore_degraded === true,
   };
-  const displayOnly = pauseMenuStructuralSig() === _pauseMenuSig;
   refreshFooterState();
-  resyncOperatorSurfaces('pause', displayOnly);
+  resyncOperatorSurfaces('pause');
 }
 
 function applyThrottleState(st, revision = operatorState.throttle.revision) {
@@ -324,10 +422,15 @@ function applyThrottleState(st, revision = operatorState.throttle.revision) {
   throttleState = {
     throttles: Array.isArray(st.throttles) ? st.throttles : [],
     [KNOWN_PROVIDERS_KEY]: Array.isArray(st[KNOWN_PROVIDERS_KEY]) ? st[KNOWN_PROVIDERS_KEY] : [],
+    [KNOWN_CLIENTS_KEY]: Array.isArray(st[KNOWN_CLIENTS_KEY]) ? st[KNOWN_CLIENTS_KEY] : [],
+    [KNOWN_MODELS_KEY]: Array.isArray(st[KNOWN_MODELS_KEY]) ? st[KNOWN_MODELS_KEY] : [],
     active: !!st.active,
+    // The cap document's half of the same degraded restore.
+    restore_degraded: st.restore_degraded === true,
   };
-  const displayOnly = limitsMenuStructuralSig() === _limitsMenuSig;
-  const btn = $('btn-limits');
-  if (btn) btn.setAttribute('aria-pressed', throttleState.active ? 'true' : 'false');
-  resyncOperatorSurfaces('throttle', displayOnly);
+  // The footer names both degraded documents, so it repaints from either
+  // snapshot. The cap arm used to skip this, so a throttle-only change left the
+  // footer showing the previous state until some unrelated live render ran.
+  refreshFooterState();
+  resyncOperatorSurfaces('throttle');
 }

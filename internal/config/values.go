@@ -9,24 +9,14 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 // PayloadMemo is the one-entry cache for one live config's exported payload.
-// The dashboard bootstrap polls every few seconds per open tab and Map() walks
-// the whole schema through reflection on every call; that payload changes only
-// when an accepted reload swaps the live *Config. Pointer identity is the exact
-// invalidation: boot and every reload publish a NEW *Config and never mutate
-// the old one, so a cached payload cannot outlive its config. The retained
-// source pointer also keeps that address from being reused by a later
-// allocation, so an address match is never a false hit. Never key on a time
-// window or on content equality.
-type PayloadMemo struct {
-	mu      sync.Mutex
-	source  *Config
-	payload map[string]any
-}
+// Map() walks the whole schema through reflection on every call, so the payload
+// is built once per live *Config and shared after that (see pointerMemo for the
+// invalidation contract).
+type PayloadMemo struct{ pointerMemo[map[string]any] }
 
 // Map returns the exported payload for cfg, computing it at most once per
 // distinct *Config. The result is SHARED with every caller until the live
@@ -35,20 +25,9 @@ type PayloadMemo struct {
 // the one computation (a bootstrap burst per tab, not a hot path) and then
 // reuse the stored payload.
 func (m *PayloadMemo) Map(cfg *Config) map[string]any {
-	if cfg == nil {
-		// No silent empty payload: a nil live config is a wiring defect.
-		panic("config: PayloadMemo.Map called with a nil config")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.source == cfg && m.payload != nil {
-		return m.payload
-	}
 	// Clone first, exactly like the pre-memo bootstrap did: the payload is
 	// shared beyond this call, so it must not alias the live snapshot.
-	payload := cfg.Clone().Map()
-	m.source, m.payload = cfg, payload
-	return payload
+	return m.get(cfg, func(c *Config) map[string]any { return c.Clone().Map() })
 }
 
 // Map exports every schema field as a JSON-friendly value: durations are Go
@@ -70,6 +49,14 @@ func (c *Config) Apply(values map[string]any) error {
 	if values == nil {
 		return fmt.Errorf("values is required")
 	}
+	// Config_get redacts credential-class provider headers to RedactionMarker
+	// before the document reaches a model. Posting that document back unchanged
+	// must keep the loaded secrets, not install the marker as the value. The
+	// pre-apply maps stay valid: setField replaces the whole Providers field.
+	previousHeaders := make(map[string]map[string]string, len(c.Providers))
+	for label, provider := range c.Providers {
+		previousHeaders[label] = provider.Headers
+	}
 	for k, v := range values {
 		f := FieldByKey(k)
 		if f == nil {
@@ -81,8 +68,28 @@ func (c *Config) Apply(values map[string]any) error {
 		if err := c.setField(*f, v); err != nil {
 			return fmt.Errorf("%s: %w", k, err)
 		}
+		if f.Kind == KindProviders {
+			c.restoreRedactedProviderHeaders(previousHeaders)
+		}
 	}
 	return nil
+}
+
+// restoreRedactedProviderHeaders replaces a marker header with the value the
+// pre-apply config held for the same provider label and header name. A marker
+// with no prior value stays as-is: the operator sees that a secret is missing
+// rather than a silently empty header. A genuinely new value is untouched.
+func (c *Config) restoreRedactedProviderHeaders(previous map[string]map[string]string) {
+	for label, provider := range c.Providers {
+		for name, value := range provider.Headers {
+			if value != RedactionMarker {
+				continue
+			}
+			if prior, ok := previous[label][name]; ok {
+				provider.Headers[name] = prior
+			}
+		}
+	}
 }
 
 // StartupBoundChanges returns yaml keys that differ between cur and next and

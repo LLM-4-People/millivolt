@@ -33,6 +33,19 @@ module.exports = async function operatorUnlock(H) {
     };
     try {
       await settleUntil(() => w.eval('!!lastData'));
+      // The storage owner trims: a pasted token arrives with edge whitespace
+      // and the server compares the bearer byte for byte. Only one trim
+      // happens, here, so the dialog and every other caller stay verbatim.
+      {
+        w.storeOperatorCredential('  padded-token  ');
+        check('a pasted credential is trimmed once at the storage owner',
+          w.eval('operatorCredential') === 'padded-token' &&
+          w.sessionStorage.getItem(w.eval('OPERATOR_KEY')) === 'padded-token');
+        w.storeOperatorCredential('   ');
+        check('a whitespace-only entry stores nothing',
+          w.eval('operatorCredential') === '' &&
+          w.sessionStorage.getItem(w.eval('OPERATOR_KEY')) === null);
+      }
       // Freeze the page's own timers so only test-driven calls hit fetch.
       w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null; clearInterval(_clockTimer); _clockTimer = null;');
       w.eval('storeOperatorCredential("")');
@@ -137,8 +150,8 @@ module.exports = async function operatorUnlock(H) {
         await settleUntil(() => w.eval('operatorCredential') === 'op-token-correct' && w.eval('operatorRejected === true')));
       check('the raced post-prompt caller returns its 401', (await gen).status === 401);
 
-      // The dialog presents the entered value VERBATIM (the server never
-      // trims credentials): edge whitespace must reach the wire untouched.
+      // The dialog pastes whatever arrived; the storage owner is the one trim,
+      // so a token copied with edge whitespace reaches the wire clean.
       w.eval('storeOperatorCredential("")');
       const padded = ' padded-token ';
       const paddedCall = w.operatorFetch('/metrics/bootstrap'); // 401 (no credential) -> dialog
@@ -147,13 +160,13 @@ module.exports = async function operatorUnlock(H) {
       w.fetch = (url, options) => {
         const auth = options && options.headers ? (options.headers.Authorization || '') : '';
         calls.push({url: String(url), auth});
-        if (auth === 'Bearer ' + padded) return Promise.resolve({ok: true, status: 200, json: async () => ({})});
+        if (auth === 'Bearer padded-token') return Promise.resolve({ok: true, status: 200, json: async () => ({})});
         return Promise.resolve({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
       };
       submitDialog(padded);
-      check('the dialog presents the token verbatim without trimming',
-        (await paddedCall).status === 200 && w.eval('operatorCredential') === padded &&
-        calls.some(c => c.auth === 'Bearer ' + padded));
+      check('the dialog trims a pasted token once, before the wire',
+        (await paddedCall).status === 200 && w.eval('operatorCredential') === 'padded-token' &&
+        calls.some(c => c.auth === 'Bearer padded-token'));
       w.fetch = savedPadFetch;
 
       // A rejected entry is visible on the next prompt instead of a silent
@@ -191,6 +204,53 @@ module.exports = async function operatorUnlock(H) {
       submitDialog('op-token-correct');
       check('one entry resolves every joined caller with the credential',
         (await a).status === 200 && (await b).status === 200 && modalOpens === opensBefore + 1);
+
+      // Sign-out clears both halves: the tab credential and the signed cookie
+      // (the DELETE), then asks again. Clearing only the credential would let
+      // a reload ride the cookie straight back in. A gated call that already
+      // left with the bearer re-mints the cookie on its way back, so the
+      // expiry has to wait for that wave instead of racing it.
+      {
+        const savedSignOutFetch = w.fetch;
+        const deletes = [];
+        let releaseHeld = null;
+        w.fetch = (url, options) => {
+          const u = String(url);
+          if (u === '/session' && options && options.method === 'DELETE') {
+            deletes.push({credentials: options.credentials});
+            return Promise.resolve({ok: true, status: 204, json: async () => ({})});
+          }
+          if (u.includes('/metrics/bootstrap') && !releaseHeld) {
+            return new Promise(resolve => { releaseHeld = () => resolve({ok: true, status: 200, json: async () => ({})}); });
+          }
+          return savedSignOutFetch(url, options);
+        };
+        try {
+          check('the sign-out control is bound in the one id table',
+            !!w.eval("STATIC_BINDINGS['btn-signout']"));
+          w.storeOperatorCredential('op-token-correct');
+          const held = w.operatorFetch('/metrics/bootstrap');
+          await settleUntil(() => !!releaseHeld);
+          d.getElementById('btn-signout').click();
+          await new Promise(resolve => setTimeout(resolve, 80));
+          check('sign-out saves the cookie expiry for in-flight gated work', deletes.length === 0);
+          releaseHeld();
+          await held;
+          check('sign-out deletes the session with the cookie attached',
+            await settleUntil(() => deletes.length === 1) &&
+            deletes[0].credentials === 'same-origin');
+          check('sign-out clears the stored credential and asks again',
+            await settleUntil(() => dialogOpen()) && w.eval('operatorCredential') === '' &&
+            w.sessionStorage.getItem(w.eval('OPERATOR_KEY')) === null);
+          // The prompt sign-out opened is its own: an answer has to be stored,
+          // so the dialog it shows is a real way back in.
+          submitDialog('op-token-after-signout');
+          check('the answer to the sign-out prompt is stored',
+            await settleUntil(() => w.eval('operatorCredential') === 'op-token-after-signout'));
+        } finally {
+          w.fetch = savedSignOutFetch;
+        }
+      }
     } finally {w.close();}
   }
 

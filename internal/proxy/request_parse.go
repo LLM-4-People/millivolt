@@ -49,10 +49,16 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool, 
 	if requestStringExpansionExceeded(body) {
 		return fmt.Errorf("request body contains invalid UTF-8 that expands beyond the request size")
 	}
+	// caps carries the token-ceiling occurrences the preflight's own top-level
+	// walk already visited, so the record stamp below needs no second walk of
+	// the body. A generated body skips the preflight and scans here.
+	var caps tokenCapScan
 	if bound {
-		if err := boundRequestMetadata(body, cfg); err != nil {
+		if err := boundRequestMetadata(body, cfg, &caps); err != nil {
 			return err
 		}
+	} else {
+		caps = scanTokenCaps(body)
 	}
 	var req struct {
 		requestRouting
@@ -73,11 +79,11 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool, 
 			// (hostileTokenCap reads rec.ReqMaxTokens): a type error anywhere
 			// else in the parameters block - including tool parameters carried
 			// as raw JSON by the Anthropic translator - must not blind that
-			// check. Recover the cap alone with applyTokenCaps' minimal decode
+			// check. Recover the cap alone with scanTokenCaps' minimal decode
 			// of the same body, applying the same max_completion_tokens-wins
 			// precedence as the clean merge below (a cap pair that still does
 			// not decode leaves the record's cap untouched).
-			applyTokenCaps(body, rec)
+			caps.apply(rec)
 			rec.Model, rec.Stream = retainedText(req.Model, retainedLabelMax), req.Stream
 			return nil
 		}
@@ -86,7 +92,7 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool, 
 	// The occurrence scan owns the cap value, so the record describes the same
 	// occurrence the trust boundary validated. Prefer max_completion_tokens,
 	// matching the Anthropic translator's pick.
-	applyTokenCaps(body, rec)
+	caps.apply(rec)
 	// Integral spellings (1.0, 1e1) are accepted by every codec and relayed
 	// verbatim, but a typed int decode fails them and erased the rest of the
 	// record with it. Carry these three members as raw JSON and decode them

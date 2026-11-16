@@ -540,7 +540,7 @@ func encodeChatTools(in []ir.Tool, warns *ir.Warnings) []map[string]any {
 		if t.CacheControl != nil && warns != nil {
 			warns.Add(ir.WarningDropped, "tools.cache_control", "Chat Completions has no tool cache breakpoints")
 		}
-		fn := map[string]any{"name": t.Name}
+		fn := map[string]any{"name": t.ModelName()}
 		if t.Description != "" {
 			fn["description"] = t.Description
 		}

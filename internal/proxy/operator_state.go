@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // Runtime policy already changed before durable I/O. It cannot safely be
@@ -28,7 +28,7 @@ func writeOperatorState(w http.ResponseWriter, state map[string]any, persistErr 
 	}
 	enc, err := json.Marshal(state)
 	if err != nil {
-		log.Printf("operator state: encode failed: %v", err)
+		logging.Printf("", "operator state: encode failed: %v", err)
 		adminjson.WriteError(w, http.StatusInternalServerError, "could not encode operator state")
 		return
 	}
@@ -61,18 +61,18 @@ const operatorPersistDocMaxBytes = 8 << 20
 func (s *Server) persistOperatorDocCtx(ctx context.Context, prefix string, doc any, maxBytes int, save func(context.Context, []byte) error) error {
 	raw, err := json.Marshal(doc)
 	if err != nil {
-		log.Printf("%s: persist: %v", prefix, err)
+		logging.Printf("", "%s: persist: %v", prefix, err)
 		return err
 	}
 	if maxBytes > 0 && len(raw) > maxBytes {
 		err := fmt.Errorf("document exceeds %d bytes", maxBytes)
-		log.Printf("%s: persist: %v", prefix, err)
+		logging.Printf("", "%s: persist: %v", prefix, err)
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.cfg().StorageQueryTimeout)
 	defer cancel()
 	if err := save(ctx, raw); err != nil {
-		log.Printf("%s: persist: %v", prefix, err)
+		logging.Printf("", "%s: persist: %v", prefix, err)
 		return err
 	}
 	return nil
@@ -122,7 +122,7 @@ func (s *Server) operatorStateGet(w http.ResponseWriter, r *http.Request, snapsh
 // means - one id, the whole feature, or one provider's cap.
 func (s *Server) resetOperatorState(w http.ResponseWriter, snapshot func() map[string]any, clear func() error, logMsg string, logArgs ...any) {
 	persistErr := clear()
-	log.Printf(logMsg, logArgs...)
+	logging.Printf("", logMsg, logArgs...)
 	writeOperatorState(w, snapshot(), persistErr)
 }
 
@@ -146,6 +146,14 @@ func (s *Server) writeOperatorEditError(w http.ResponseWriter, err, overlap, not
 	}
 	adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 }
+
+// serverClockMs is the operator documents' clock anchor: this server's own
+// instant, in epoch milliseconds. Every hold and capture deadline is absolute
+// server time, so a browser that evaluated it with its own clock could hide a
+// live hold (and then report "steady" while traffic was parked) or claim an
+// expired one. Epoch milliseconds is the one wire form every JS engine parses
+// without ambiguity; RFC 3339 with sub-second digits is not.
+func serverClockMs() int64 { return time.Now().UnixMilli() }
 
 // rfc3339OrNil renders an operator-state timestamp: RFC 3339 UTC, or nil for
 // the zero value. The snapshot maps are marshalled directly, so a nil value

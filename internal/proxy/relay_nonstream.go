@@ -136,10 +136,12 @@ const errStreamRead = metrics.TypeStreamReadError
 // error outcome was decided yet; a decided error status stays, per
 // markClientGone) and NOT as an error. Anything else is genuine upstream
 // trouble (or a translation failure) and gets the stream-read error type
-// stamped (the already-committed upstream status stays on the record). The
-// single choke point for every relay loop; Cursor paths keep their own
-// documented exception (TurnResult.ClientAbort in cursor_bidi.go - the
-// upstream DID answer, so the 200 stays).
+// stamped (the already-committed upstream status stays on the record) - unless
+// the provider already decided the type, which a failed body read must not
+// erase: a 429 whose rate-limit envelope parsed keeps its rate-limit class and
+// series entry. The single choke point for every relay loop; Cursor paths keep
+// their own documented exception (TurnResult.ClientAbort in cursor_bidi.go -
+// the upstream DID answer, so the 200 stays).
 func markStreamErr(ctx context.Context, rec *metrics.Record, err error) {
 	if ctx.Err() == context.Canceled {
 		markClientGone(rec)
@@ -150,6 +152,9 @@ func markStreamErr(ctx context.Context, rec *metrics.Record, err error) {
 		// leaving (a 499/plain disconnect). The same error must not be
 		// re-stamped as an upstream read failure just because a write-progress
 		// deadline, rather than the request context, surfaced it.
+		return
+	}
+	if metrics.IsProviderErrorType(rec.ErrorType) {
 		return
 	}
 	rec.ErrorType = errStreamRead

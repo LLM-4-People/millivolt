@@ -39,6 +39,75 @@ func TestLoadFileRepairDropsBrokenKeys(t *testing.T) {
 	}
 }
 
+// TestLoadFileRepairSalvagesFailClosedKeys pins the repair of a document the
+// YAML parser rejected: the bind address and the origin allowlist are the two
+// boundaries whose loss silently widens exposure, so they are salvaged from
+// the debris and applied over the defaults, and the boot log names them.
+func TestLoadFileRepairSalvagesFailClosedKeys(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	raw := "listen: \"127.0.0.1:9090\"\nallowed_base_urls:\n  - https://api.example.com\n  - https://alt.example.com:8443\nmax_retries: [broken\n"
+	if err := os.WriteFile(p, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, skipped, err := LoadFileRepair(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != "127.0.0.1:9090" {
+		t.Fatalf("salvaged listen = %q, want 127.0.0.1:9090", c.Listen)
+	}
+	want := []string{"https://api.example.com", "https://alt.example.com:8443"}
+	if !reflect.DeepEqual(c.AllowedBaseURLs, want) {
+		t.Fatalf("salvaged allowlist = %v, want %v", c.AllowedBaseURLs, want)
+	}
+	joined := strings.Join(skipped, ",")
+	if !strings.Contains(joined, skippedUnparseable) || !strings.Contains(joined, "listen"+skippedSalvaged) ||
+		!strings.Contains(joined, "allowed_base_urls"+skippedSalvaged) {
+		t.Fatalf("skipped = %v, want the unparseable marker and both salvaged keys", skipped)
+	}
+	// The rewritten document is valid and carries both boundaries.
+	got, err := LoadFile(p)
+	if err != nil {
+		t.Fatalf("rewritten config is unreadable: %v", err)
+	}
+	if got.Listen != c.Listen || !reflect.DeepEqual(got.AllowedBaseURLs, want) {
+		t.Fatalf("rewritten config lost the salvaged boundaries: %+v", got)
+	}
+	if _, err := os.Stat(p + invalidConfigSuffix); err != nil {
+		t.Fatalf("quarantined source missing: %v", err)
+	}
+}
+
+// TestLoadFileRepairUnsalvageableFailClosedKeyFailsBoot pins the other half: a
+// fail-closed key the debris names but cannot yield fails boot instead of
+// widening to the default, and the source stays in place for the operator.
+func TestLoadFileRepairUnsalvageableFailClosedKeyFailsBoot(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"listen without a value", "listen:\nmax_retries: [broken\n"},
+		{"allowlist without a value", "allowed_base_urls:\nmax_retries: [broken\n"},
+		{"listen of the wrong type", "listen: [127.0.0.1, 9090]\nmax_retries: [broken\n"},
+		{"invalid allowlist entry", "allowed_base_urls:\n  - api.openai.com\nmax_retries: [broken\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "c.yaml")
+			if err := os.WriteFile(p, []byte(tc.raw), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, skipped, err := LoadFileRepair(p)
+			if err == nil || cfg != nil || skipped != nil {
+				t.Fatalf("LoadFileRepair() = %+v, %v, %v; want the failed salvage rejected", cfg, skipped, err)
+			}
+			got, rerr := os.ReadFile(p)
+			if rerr != nil || !bytes.Equal(got, []byte(tc.raw)) {
+				t.Fatalf("failed salvage rewrote the source: %v %q", rerr, got)
+			}
+			if _, serr := os.Stat(p + invalidConfigSuffix); !errors.Is(serr, os.ErrNotExist) {
+				t.Fatalf("failed salvage moved the source aside: %v", serr)
+			}
+		})
+	}
+}
+
 // Boot repair must not manufacture a default for an invalid recognized value:
 // that is policy, not debris. The source stays byte-identical for the operator
 // to fix, including a mixed valid/invalid SSRF allowlist (the whole field is

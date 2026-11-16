@@ -254,6 +254,41 @@ func TestDecodeFileOverCapCleansStaging(t *testing.T) {
 	assertNoRestoreStaging(t, stage)
 }
 
+// TestDecodeFileReaderCapsTheDecodedPayload pins the request-cap ceiling: the
+// decoder is held to the caller's backup_max_bytes, not only the schema
+// maximum, so a small compressed upload cannot publish an uncompressed member
+// far past what the operator configured. Both the streaming limit and the
+// framing size check use min(cap, payloadMax).
+func TestDecodeFileReaderCapsTheDecodedPayload(t *testing.T) {
+	const capBytes = 1 << 20
+	for _, tc := range []struct {
+		name    string
+		archive Archive
+	}{
+		{"database member", Archive{Database: packedRequestsDBBlob(t, 3<<19)}},
+		{"config member", Archive{Config: bytes.Repeat([]byte{'#'}, 2<<20)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := Encode(t.TempDir(), tc.archive)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if int64(len(raw)) >= capBytes {
+				t.Fatalf("fixture upload is %d bytes, not under the %d cap", len(raw), capBytes)
+			}
+			stage := t.TempDir()
+			if _, err := DecodeFileReader(stage, bytes.NewReader(raw), true, capBytes); !errors.Is(err, ErrPayloadTooLarge) {
+				t.Fatalf("over-cap payload = %v, want ErrPayloadTooLarge", err)
+			}
+			assertNoRestoreStaging(t, stage)
+			// The same bytes still decode when the caller admits the payload.
+			if _, err := DecodeFileReader(stage, bytes.NewReader(raw), true, payloadMax); err != nil {
+				t.Fatalf("payload within the schema maximum was refused: %v", err)
+			}
+		})
+	}
+}
+
 // TestDecodeFileRequiresDatabaseStaging pins the file decoder's capacity
 // owner: a database member cannot be decoded without the live database's
 // staging volume, while a config-only archive needs none.

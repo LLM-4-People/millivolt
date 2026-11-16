@@ -253,14 +253,50 @@ type Message struct {
 
 // Tool is one function tool definition.
 type Tool struct {
-	Name         string          `json:"name"`
+	// Name is the tool name the client declared, scoped by Namespace when the
+	// Responses request grouped it.
+	Name string `json:"name"`
+	// Namespace is the Responses namespace group name, empty for a plain
+	// function tool. A target without namespace support receives WireName.
+	Namespace string `json:"namespace,omitempty"`
+	// WireName is the unique flat name the outbound target sees. A request
+	// decoder fills it for every namespaced tool so the inbound encoder can
+	// resolve a returned call back to its namespace; empty means Name.
+	WireName     string          `json:"wire_name,omitempty"`
 	Description  string          `json:"description,omitempty"`
 	Parameters   json.RawMessage `json:"parameters,omitempty"`
 	Strict       *bool           `json:"strict,omitempty"`
 	CacheControl *CacheControl   `json:"cache_control,omitempty"`
-	// Type is "function" for ordinary tools. Provider-specific tool types are
-	// rejected by cross-protocol encoders.
+	// Type is "function" for ordinary tools. A request decoder resolves a
+	// provider-specific wire type before the IR: a namespace becomes its
+	// members and an unrepresentable tool is dropped or rejected, so an
+	// encoder never sees one.
 	Type string `json:"type,omitempty"`
+}
+
+// ModelName is the flat spelling an outbound target receives for this tool.
+func (t Tool) ModelName() string {
+	if t.WireName != "" {
+		return t.WireName
+	}
+	return t.Name
+}
+
+// ToolNamesByWireName builds the request-scoped reverse map the inbound
+// Responses encoder uses to name a tool call's namespace again. Plain tools are
+// omitted because a call without a map entry is already a plain function.
+func ToolNamesByWireName(tools []Tool) map[string]Tool {
+	var out map[string]Tool
+	for _, t := range tools {
+		if t.Namespace == "" {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]Tool, len(tools))
+		}
+		out[t.ModelName()] = t
+	}
+	return out
 }
 
 // ToolChoiceMode is the normalized tool-selection mode.
@@ -450,6 +486,12 @@ type Response struct {
 	// already ir.BlockToolCall entries. The record and finish classification
 	// count both forms as tool activity.
 	ProviderToolCalls int `json:"provider_tool_calls,omitempty"`
+
+	// ToolNames is the request-scoped map from a flat wire name back to the
+	// tool the client declared. The translation facade fills it before the
+	// inbound encoder runs so a namespaced Responses tool call can name its
+	// group again. It is never part of a wire document.
+	ToolNames map[string]Tool `json:"-"`
 
 	Warnings Warnings `json:"warnings,omitempty"`
 }

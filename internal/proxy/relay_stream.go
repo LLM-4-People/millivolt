@@ -119,37 +119,81 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		return code != "" && !a.HasInBandError() && !rec.ClientDisconnected &&
 			a.ChatLike() && !holdAborted
 	}
-	// appendHeld frames one complete line into the withheld region. A second
-	// data line in the same event would concatenate onto the first payload
-	// (the SSE client joins data lines with a newline), so start a new event
-	// before it. A field line stays with the data line it introduces.
+	// dataHead is the joined data payload of the event currently on the wire:
+	// every data line since the last blank boundary, still held or already
+	// flushed. SSE joins the data lines of one event with a newline, so a
+	// synthetic separator before a further data line is only correct once the
+	// head is already one whole document. A pretty-printed terminal event
+	// (several data lines making one JSON document) must continue its own
+	// event; a second single-line event must not concatenate onto the first.
+	// headFull marks a head past the source-line bound: it is truncated, so it
+	// can no longer prove a complete document and the lines join verbatim.
+	var dataHead []byte
+	var headFull bool
+	// head spans the same bytes as dataHead for the completeness verdict.
+	var head headScan
+	resetHead := func() {
+		dataHead = dataHead[:0]
+		headFull = false
+		head = headScan{}
+	}
+	// noteDataHead records one complete client-visible line. A blank line
+	// closes the event and clears the head; a field line is not payload.
+	noteDataHead := func(line []byte) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			resetHead()
+			return
+		}
+		payload, isData := sse.DataPayload(line)
+		if !isData {
+			return
+		}
+		if headFull {
+			return
+		}
+		if len(dataHead) > 0 {
+			dataHead = append(dataHead, '\n')
+		}
+		if len(dataHead)+len(payload) > eventMax {
+			headFull = true
+			return
+		}
+		dataHead = append(dataHead, payload...)
+		head.add(payload)
+	}
+	// separateBefore is the one separator predicate: a data line gets a
+	// synthetic blank boundary only when the current head is already a
+	// complete document or the line is the [DONE] sentinel. Otherwise it is a
+	// continuation line of a multi-line payload. A separator retires the
+	// completed head, so the next note starts the new event instead of
+	// accumulating a second document onto the old one.
+	separateBefore := func(line []byte) bool {
+		payload, isData := sse.DataPayload(line)
+		if !isData {
+			return false
+		}
+		// An empty head means a blank boundary just closed the event, so the
+		// separator is already there - including before [DONE], which only
+		// needs one when it is joined onto an open event.
+		if headFull || len(dataHead) == 0 {
+			return false
+		}
+		if !sse.DonePayload(payload) && !head.complete() {
+			return false
+		}
+		resetHead()
+		return true
+	}
+	// appendHeld frames one complete line into the withheld region, starting a
+	// new event first when the head already carries a complete document. A
+	// field line stays with the data line it introduces.
 	appendHeld := func(line []byte) {
-		if _, isData := sse.DataPayload(line); isData && endsWithUnframedDataLine(hold) {
+		if separateBefore(line) {
 			hold = append(hold, '\n')
 		}
+		noteDataHead(line)
 		hold = append(hold, line...)
 		hold = append(hold, '\n')
-	}
-	// lastLineIsData reports whether the next data line would join an open
-	// event's existing data line, whether that line is still buffered in out
-	// or was already flushed to the client.
-	lastLineIsData := func() bool {
-		if out.Len() > 0 {
-			return endsWithUnframedDataLine(out.Bytes())
-		}
-		return wireDataOpen
-	}
-	// clientGone records a write-detected abort: the disconnect stamps
-	// the 499, and the analyzer's in-band error - when one reached the
-	// wire - still fills the record, so the abort counts like its 200
-	// twin exactly as the read-detected paths do. Every caller returns
-	// immediately, so the fill runs at most once; a stream without an
-	// in-band error keeps the plain disconnect accounting.
-	clientGone := func() {
-		markClientGone(rec)
-		if a.HasInBandError() {
-			fillRecord(&a, rec)
-		}
 	}
 	writeOut := func() bool {
 		if out.Len() == 0 {
@@ -157,7 +201,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		}
 		o := out.Bytes()
 		if _, werr := writeCounted(w, rec, o); werr != nil {
-			clientGone()
+			clientGone(&a, rec)
 			return false
 		}
 		wireDataOpen = endsWithUnframedDataLine(o)
@@ -183,15 +227,16 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		}
 		if len(o) > 0 {
 			if _, werr := writeCounted(w, rec, o); werr != nil {
-				clientGone()
+				clientGone(&a, rec)
 				return false
 			}
 		}
 		out.Reset()
 		hold = hold[:0]
+		resetHead()
 		holding = false
 		if _, werr := writeCounted(w, rec, []byte("\n")); werr != nil {
-			clientGone()
+			clientGone(&a, rec)
 			return false
 		}
 		wireDataOpen = false
@@ -220,8 +265,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// left here is flusher.Flush, whose error net/http discards - so
 			// the disconnect is stamped here (the write-detected abort's
 			// exact accounting, in-band error kept) instead of finalizing the
-			// abort away as a clean 200.
-			clientGone()
+			// abort away as a clean 200. clientGone also stamps the class the
+			// analyzer decided: the same 499 must not read as healthy just
+			// because a truncation arrived with the abort.
+			clientGone(&a, rec)
 			return false
 		}
 		code := a.OutcomeCode()
@@ -259,7 +306,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// still part of the verbatim stream.
 			if len(hold) > 0 {
 				if _, werr := writeCounted(w, rec, hold); werr != nil {
-					clientGone()
+					clientGone(&a, rec)
 					return false
 				}
 				wireDataOpen = endsWithUnframedDataLine(hold)
@@ -296,7 +343,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				hold = append(hold, '\n')
 			}
 			if _, werr := writeCounted(w, rec, hold); werr != nil {
-				clientGone()
+				clientGone(&a, rec)
 				return false
 			}
 			wireDataOpen = endsWithUnframedDataLine(hold)
@@ -309,7 +356,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		// wrote their own boundary above.
 		if code == "" && wireDataOpen {
 			if _, werr := writeCounted(w, rec, []byte("\n")); werr != nil {
-				clientGone()
+				clientGone(&a, rec)
 				return false
 			}
 			wireDataOpen = false
@@ -336,6 +383,9 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			}
 			event = append(event, eventBody...)
 			holding = true
+			for _, line := range bytes.Split(event, []byte("\n")) {
+				noteDataHead(line)
+			}
 			hold = append(hold, event...)
 			eventName = eventName[:0]
 			eventBody = eventBody[:0]
@@ -356,6 +406,9 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		// still sees the complete event exactly once.
 		if len(data) > 0 {
 			a.FeedEvent("", data, now)
+		}
+		for _, line := range bytes.Split(eventBody, []byte("\n")) {
+			noteDataHead(line)
 		}
 		out.Write(eventBody)
 		eventName = eventName[:0]
@@ -384,6 +437,12 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		raw := make([]byte, 0, len(eventName)+len(eventBody))
 		raw = append(raw, eventName...)
 		raw = append(raw, eventBody...)
+		// Every buffered line ends with its newline; trim the final one so the
+		// split yields lines only. A trailing empty element would read as a
+		// blank boundary and reset the head the document is still inside.
+		for _, line := range bytes.Split(bytes.TrimSuffix(raw, []byte("\n")), []byte("\n")) {
+			noteDataHead(line)
+		}
 		out.Write(raw)
 		pendingName = string(sse.EventName(eventName))
 		eventHasData = true
@@ -524,9 +583,6 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					// line already flushed in out is its own event; separate
 					// it before the held event starts.
 					holding = true
-					if lastLineIsData() {
-						hold = append(hold, '\n')
-					}
 					appendHeld(line)
 					if sse.DoneLine(line) && a.DoneTerminates() {
 						hold = append(hold, '\n')
@@ -578,6 +634,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						uerr.typ, uerr.code, uerr.msg, uerr.reasoning = typ, code, msg, reasoning
 						return rescueUpstreamError
 					}
+					if separateBefore(line) {
+						out.WriteByte('\n')
+					}
+					noteDataHead(line)
 					out.Write(line)
 					out.WriteByte('\n')
 				}
@@ -591,7 +651,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					hold = append(hold, lineBuf.Bytes()...)
 					lineBuf.Reset()
 					if _, werr := writeCounted(w, rec, hold); werr != nil {
-						clientGone()
+						clientGone(&a, rec)
 						return rescueNone
 					}
 					wireDataOpen = endsWithUnframedDataLine(hold)
@@ -667,19 +727,21 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 							hold = append(hold, '\n')
 						}
 						hold = append(hold, '\n')
-					} else if len(hold) == 0 && lastLineIsData() {
+					} else if len(hold) == 0 && separateBefore(tail) {
 						// The content line was already flushed into its own
 						// event. Start the held tail with a separator; a plain
 						// if followed by the boundary block would add a third
 						// newline.
 						hold = append(hold, '\n')
 					}
+					noteDataHead(tail)
 					hold = append(hold, tail...)
 					hold = append(hold, '\n', '\n')
 				} else {
-					if _, isData := sse.DataPayload(tail); isData && lastLineIsData() {
+					if separateBefore(tail) {
 						out.WriteByte('\n')
 					}
+					noteDataHead(tail)
 					out.Write(tail)
 				}
 				tail = nil
@@ -733,13 +795,19 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// would write it without a trailing blank and the client would
 				// discard it at EOF.
 				markStreamErr(ctx, rec, err)
+				if rec.ClientDisconnected {
+					// A canceled local context took markStreamErr's disconnect
+					// path: classify the aborted attempt by the outcome it
+					// reached, exactly like the other abort shapes.
+					abortOutcome(&a, rec)
+				}
 				if tailTerminates {
 					holding = true
 				}
 				releaseTail()
 				if holding {
 					if _, werr := writeCounted(w, rec, hold); werr != nil {
-						clientGone()
+						clientGone(&a, rec)
 						return rescueNone
 					}
 					wireDataOpen = endsWithUnframedDataLine(hold)
@@ -821,6 +889,276 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			return rescueNone
 		}
 	}
+}
+
+// headScan tracks whether the data head accumulated for the event on the wire
+// is already one complete JSON document. separateBefore runs for every data
+// line, so re-validating the whole head each time is quadratic in the line
+// count; the scan instead costs linear time over each new payload and keeps a
+// constant-size state: structural depth, open string, escape (a raw quote
+// inside a string value must not look like a document boundary) and the scalar
+// recognizer. It replaces the earlier json.Valid call, whose verdict it reaches
+// for a closed document and for a bare scalar, without its per-line rescan.
+type headScan struct {
+	depth    int
+	inString bool
+	escape   bool
+	content  bool
+	// starter is the first significant byte of the head: only a JSON value
+	// begins with one, so a plain-text head never proves complete and its data
+	// lines always join.
+	starter byte
+	// last is the last significant byte outside whitespace: a head ending in
+	// ',' or ':' is still a member fragment, not a document, however balanced
+	// its brackets are.
+	last byte
+	// scalar recognizes the only two JSON value families that carry no
+	// bracket or quote: the true/false/null literals and numbers. A starter
+	// byte alone is not enough ("the cat" and "3 apples" begin like a
+	// literal and a number), so the family is matched byte by byte and any
+	// mismatch parks the head as non-JSON for good.
+	scalar scalarScan
+}
+
+// numState tracks how far the bytes after a number's starter still match the
+// JSON number grammar. Only numZero, numInt, numFrac and numExpDigits may end
+// the head; every other state is a prefix.
+type numState uint8
+
+const (
+	numNone      numState = iota
+	numSign               // '-' seen alone
+	numZero               // the integer part is exactly '0'
+	numInt                // nonzero integer digits
+	numDot                // '.' after the integer part
+	numFrac               // fraction digits
+	numExp                // 'e' or 'E'
+	numExpSign            // exponent sign
+	numExpDigits          // exponent digits
+	numBad                // the bytes left the grammar
+)
+
+// scalarScan is the incremental recognizer for a scalar head. A JSON scalar has
+// no interior whitespace: a space after an accepted prefix seals it, so any
+// later significant byte makes the head prose, while trailing whitespace keeps
+// the verdict.
+type scalarScan struct {
+	// kind is the family the head started as; scalarNone for other starters.
+	kind scalarKind
+	// lit is the unmatched remainder of the expected literal, empty once the
+	// literal is whole.
+	lit string
+	// num is the number grammar state; numNone for a literal head.
+	num numState
+	// sealed marks whitespace seen inside the scalar.
+	sealed bool
+	// bad marks a byte that left every accepted form.
+	bad bool
+}
+
+type scalarKind uint8
+
+const (
+	scalarNone scalarKind = iota
+	scalarLiteral
+	scalarNumber
+)
+
+// on reports whether the head is a literal or number, so the other structural
+// states must stay untouched.
+func (s *scalarScan) on() bool { return s.kind != scalarNone }
+
+// feed consumes one significant byte of the scalar.
+func (s *scalarScan) feed(c byte) {
+	if s.bad {
+		return
+	}
+	if s.sealed {
+		s.bad = true
+		return
+	}
+	if s.lit != "" {
+		if c != s.lit[0] {
+			s.bad = true
+			return
+		}
+		s.lit = s.lit[1:]
+		return
+	}
+	if s.num != numNone {
+		s.num = s.num.step(c)
+		return
+	}
+	s.bad = true
+}
+
+// step advances the number grammar; an unlisted byte leaves it for good.
+func (n numState) step(c byte) numState {
+	digit := c >= '0' && c <= '9'
+	switch n {
+	case numSign:
+		if c == '0' {
+			return numZero
+		}
+		if digit {
+			return numInt
+		}
+	case numZero:
+		switch c {
+		case '.':
+			return numDot
+		case 'e', 'E':
+			return numExp
+		}
+	case numInt:
+		if digit {
+			return numInt
+		}
+		switch c {
+		case '.':
+			return numDot
+		case 'e', 'E':
+			return numExp
+		}
+	case numDot:
+		if digit {
+			return numFrac
+		}
+	case numFrac:
+		if digit {
+			return numFrac
+		}
+		if c == 'e' || c == 'E' {
+			return numExp
+		}
+	case numExp:
+		if digit {
+			return numExpDigits
+		}
+		if c == '+' || c == '-' {
+			return numExpSign
+		}
+	case numExpSign:
+		if digit {
+			return numExpDigits
+		}
+	case numExpDigits:
+		if digit {
+			return numExpDigits
+		}
+	}
+	return numBad
+}
+
+// accepting reports whether the scalar seen so far is one whole value: a
+// complete literal, or a number in a state that may end.
+func (s *scalarScan) accepting() bool {
+	if s.bad {
+		return false
+	}
+	if s.kind == scalarLiteral {
+		return s.lit == ""
+	}
+	return s.num == numZero || s.num == numInt || s.num == numFrac || s.num == numExpDigits
+}
+
+// add feeds the bytes of one complete data payload.
+func (h *headScan) add(b []byte) {
+	for _, c := range b {
+		if h.escape {
+			h.escape = false
+			h.last = c
+			continue
+		}
+		if h.inString {
+			switch c {
+			case '\\':
+				h.escape = true
+			case '"':
+				h.inString = false
+			}
+			h.last = c
+			continue
+		}
+		if isJSONSpace(c) {
+			if h.scalar.on() {
+				h.scalar.sealed = true
+			}
+			continue
+		}
+		if h.starter == 0 {
+			h.starter = c
+			h.content = true
+			switch c {
+			case '"':
+				h.inString = true
+			case '{', '[':
+				h.depth++
+			case 't':
+				h.scalar.kind, h.scalar.lit = scalarLiteral, "rue"
+			case 'f':
+				h.scalar.kind, h.scalar.lit = scalarLiteral, "alse"
+			case 'n':
+				h.scalar.kind, h.scalar.lit = scalarLiteral, "ull"
+			case '0':
+				h.scalar.kind, h.scalar.num = scalarNumber, numZero
+			case '-':
+				h.scalar.kind, h.scalar.num = scalarNumber, numSign
+			default:
+				if c >= '1' && c <= '9' {
+					h.scalar.kind, h.scalar.num = scalarNumber, numInt
+				}
+			}
+		} else if h.scalar.on() {
+			h.scalar.feed(c)
+		} else {
+			switch c {
+			case '"':
+				h.inString = true
+			case '{', '[':
+				h.depth++
+			case '}', ']':
+				if h.depth > 0 {
+					h.depth--
+				}
+			}
+		}
+		h.last = c
+	}
+}
+
+func isJSONSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
+}
+
+// jsonStarter reports whether b can begin a JSON value: an object or array
+// opener, a number's sign or first digit, a string quote, or the first letter
+// of the true/false/null literals.
+func jsonStarter(b byte) bool {
+	switch b {
+	case '{', '[', '-', '"', 't', 'f', 'n':
+		return true
+	}
+	return b >= '0' && b <= '9'
+}
+
+// complete reports whether the head ends as one closed document: content seen
+// behind a JSON starter byte, no open string, every structural bracket closed,
+// and a final significant byte that ends a value rather than a member
+// separator. A mismatched bracket pair still counts as closed, which
+// over-separates rather than joining two documents into one payload a parser
+// would drop. A scalar head must be the whole literal or number it started as,
+// so "the cat" and "3 apples" stay open; a plain-text head (any other starter
+// byte) answers false. Both are the same verdict json.Valid reaches, so their
+// lines stay one event.
+func (h *headScan) complete() bool {
+	if h.starter == 0 || !jsonStarter(h.starter) || !h.content || h.depth != 0 || h.inString {
+		return false
+	}
+	if h.scalar.on() {
+		return h.scalar.accepting()
+	}
+	return h.last != ',' && h.last != ':'
 }
 
 // emitDegenerateResponses replaces a withheld Responses terminal region with a

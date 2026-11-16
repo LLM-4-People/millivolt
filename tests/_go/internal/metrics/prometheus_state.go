@@ -27,7 +27,7 @@ func prometheusScrapeBody(t *testing.T, buf *Buffer) string {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil)
 	w := httptest.NewRecorder()
-	HandlePrometheus(w, req, buf)
+	HandlePrometheus(w, req, buf, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET /metrics/prometheus = %d, want 200: %s", w.Code, w.Body.String())
 	}

@@ -23,18 +23,19 @@ package main
 //     the parked reader's clock through the pool lock - the race detector
 //     then sees the publication write as ordered. The body park performs
 //     the same unlocked config reads with no transport interaction at all.
-//   - The reloader waits out a fixed sleep, never a handshake with the
-//     request goroutine. Any reader-to-reloader channel would hand the
-//     reader's clock to the reloader and order the very accesses under
-//     test. The sleep only needs the request to have STARTED - its entry
-//     config reads happen microseconds after launch - so the wide margin
-//     cannot mask the race.
+//   - The reloader observes the reader's stack instead of taking a
+//     reader-to-reloader channel handshake. A channel would hand the reader's
+//     clock to the reloader and order the very accesses under test; reading
+//     the stack does not. The probe waits for the park, which is already past
+//     every entry read.
 
 import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,6 +48,22 @@ type parkedBody struct{ release <-chan struct{} }
 func (b parkedBody) Read([]byte) (int, error) {
 	<-b.release
 	return 0, errors.New("client body never finished")
+}
+
+// awaitParked blocks until the request goroutine is durably parked inside
+// parkedBody.Read, past every unlocked entry config read. The stack probe is
+// the ordering-neutral signal described in the file comment.
+func awaitParked(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	buf := make([]byte, 1<<20)
+	for time.Now().Before(deadline) {
+		if n := runtime.Stack(buf, true); strings.Contains(string(buf[:n]), "/cmd/proxy.parkedBody.Read(") {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("parked request never reached its body read")
 }
 
 // TestReloadPublishesNewConfigObject drives the production wiring end to
@@ -85,9 +102,11 @@ func TestReloadPublishesNewConfigObject(t *testing.T) {
 		done <- w
 	}()
 
-	// No handshake with the parked goroutine (see the file comment): let it
-	// reach its entry config reads and park, then publish past them.
-	time.Sleep(300 * time.Millisecond)
+	// No channel handshake with the parked goroutine (see the file comment):
+	// observe its stack instead. Reading the stack does not hand the reader's
+	// clock to the reloader, so the publication write still meets the unlocked
+	// entry reads unordered; a channel would order them and hide the race.
+	awaitParked(t)
 	if _, err := reloadConfig(); err != nil {
 		t.Fatal(err)
 	}

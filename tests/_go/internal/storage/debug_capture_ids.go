@@ -58,7 +58,7 @@ func TestRestoreRejectsUnfetchableDebugCaptureIDs(t *testing.T) {
 			if err := StageSnapshot(path, snapshotWithDebugRow(t, tc.row)); err != nil {
 				t.Fatal(err)
 			}
-			if err := ValidatePendingSnapshot(path); err == nil {
+			if err := ValidatePendingSnapshot(t.Context(), path); err == nil {
 				t.Fatalf("%s capture row was admitted", tc.name)
 			} else if !strings.Contains(err.Error(), "capture") {
 				t.Fatalf("rejection = %v", err)

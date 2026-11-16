@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -246,6 +248,49 @@ func TestSimpleReadCommands(t *testing.T) {
 	code, _, _ = runCLI(t, "--url", fixture.url(), "restart", "--yes")
 	if code != 0 || fixture.callCount("/admin/restart") != 1 {
 		t.Fatalf("restart apply = %d, calls %d", code, fixture.callCount("/admin/restart"))
+	}
+}
+
+// TestChartReadsTheFoldThroughTheQueryBound: the CLI's one fold command must
+// use the client-bound query path, so the read is bounded by the config-derived
+// query timeout instead of the generic --timeout deadline, and it must send the
+// fold scope.
+func TestChartReadsTheFoldThroughTheQueryBound(t *testing.T) {
+	var mu sync.Mutex
+	var queries []string
+	fixture := newProxy(t, map[string]http.HandlerFunc{
+		"/metrics/agg/chart": func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			queries = append(queries, r.URL.RawQuery)
+			mu.Unlock()
+			time.Sleep(700 * time.Millisecond)
+			_, _ = io.WriteString(w, `{"now_ms":2,"from_ms":1,"bucket_ms":60000,"buckets":[{"t":1}]}`)
+		},
+	})
+	// --timeout is far below the handler's answer: only the fold bound lives.
+	code, stdout, stderr := runCLI(t, "--url", fixture.url(), "--timeout", "100ms",
+		"chart", "--window", "5", "--query-timeout", "5s", "--filter", "provider:alpha,model:m")
+	if code != 0 || stderr != "" {
+		t.Fatalf("chart = %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "buckets") || !strings.Contains(stdout, "1") {
+		t.Fatalf("chart output = %q", stdout)
+	}
+	mu.Lock()
+	sent := queries[len(queries)-1]
+	mu.Unlock()
+	want := url.Values{"window": {"5"}, "f": {"provider:alpha", "model:m"}}.Encode()
+	if sent != want {
+		t.Fatalf("chart query = %q, want %q", sent, want)
+	}
+	// The fold timeout is the command's bound, so a tighter one cuts the read.
+	code, _, stderr = runCLI(t, "--url", fixture.url(), "chart", "--query-timeout", "100ms")
+	if code == 0 || stderr == "" {
+		t.Fatalf("tight fold bound = %d, stderr %q", code, stderr)
+	}
+	code, _, stderr = runCLI(t, "--url", fixture.url(), "chart", "--filter", "provider")
+	if code == 0 || !strings.Contains(stderr, "--filter") {
+		t.Fatalf("malformed filter = %d, stderr %q", code, stderr)
 	}
 }
 

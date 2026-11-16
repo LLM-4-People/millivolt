@@ -466,6 +466,45 @@ func TestDebugCaptureSaveFailureResolvesPendingMarker(t *testing.T) {
 	}
 }
 
+// captureLoadPersist serves a capture document and fails like a real reader
+// once its context is done.
+type captureLoadPersist struct{ pausePersist }
+
+func (captureLoadPersist) LoadDebugCapture(ctx context.Context, id string) ([]byte, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	return []byte(`{"id":"` + id + `"}`), nil
+}
+
+// TestDebugCapturePendingWaitDoesNotSpendTheQueryBudget: the storage-read
+// budget must start after the client-bounded pending wait. A capture whose
+// sidecar save lands after the configured query timeout is still served, so
+// the wait length never turns a stored capture into a 500.
+func TestDebugCapturePendingWaitDoesNotSpendTheQueryBudget(t *testing.T) {
+	cfg := config.Default()
+	cfg.StorageQueryTimeout = 50 * time.Millisecond
+	p := New(cfg, metrics.Noop{})
+	p.pause.persist = captureLoadPersist{}
+
+	release := p.registerPendingCapture("slow")
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		release()
+	}()
+
+	w := httptest.NewRecorder()
+	p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=slow", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("fetch after a slow pending wait = %d %s, want the 200 capture", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"id":"slow"`) {
+		t.Fatalf("fetch body = %q, want the stored capture", w.Body.String())
+	}
+}
+
 // TestDebugCaptureWaitStopsWithRequestContext pins the disconnect contract:
 // a drawer fetch waiting on an in-flight sidecar save stops when its request
 // context ends instead of outliving the client.
@@ -485,6 +524,25 @@ func TestDebugCaptureWaitStopsWithRequestContext(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("wait ignored request context cancellation")
+	}
+}
+
+// A fetch whose wait is cut short by its own request context must still answer:
+// once the wait ends, storage is the authority, so a missing capture is the
+// ordinary 404 JSON instead of an empty 200 with nothing written.
+func TestDebugCaptureCanceledWaitStillAnswers(t *testing.T) {
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-cancel.db"))
+	p := New(config.Default(), metrics.Noop{})
+	p.AttachPausePersist(store)
+	release := p.registerPendingCapture("ctx-capture")
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := httptest.NewRecorder()
+	p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=ctx-capture", nil).WithContext(ctx))
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "debug capture not found") {
+		t.Fatalf("canceled wait answered %d %q, want the 404 JSON", w.Code, w.Body.String())
 	}
 }
 
@@ -644,5 +702,57 @@ func TestDebugCaptureFetchesBeforeAndAfterMarkerResolve(t *testing.T) {
 	after := fetchDebugCapture(t, p, id)
 	if !bytes.Equal(stored, after) {
 		t.Fatal("fetch after marker removal differs from the waiting fetches")
+	}
+}
+
+// TestDebugCaptureChargesHeadersAgainstTheCap pins H23: the configured capture
+// cap is one document budget. Retained headers are charged against it before
+// the bodies get the remainder, so a hostile header set cannot multiply the
+// stored document past the cap while each body stays at half.
+func TestDebugCaptureChargesHeadersAgainstTheCap(t *testing.T) {
+	const captureCap = 4 << 10
+	spy := &liveSpy{}
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-cap.db"))
+	t.Cleanup(func() { store.Close() })
+	cfg := config.Default()
+	cfg.DebugCaptureMaxBytes = captureCap
+	p := New(cfg, spy)
+	p.AttachPausePersist(store)
+	startDebugSession(t, p)
+
+	extra := http.Header{}
+	for i := range 3 {
+		extra.Set(fmt.Sprintf("X-Fill-%d", i), strings.Repeat("h", 1<<10))
+	}
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(strings.Repeat("r", 4<<10)))
+	})
+	rec := runDebugCaptureRequest(t, p, spy, upstream, `{"model":"m","messages":[]}`, extra)
+	raw := fetchDebugCapture(t, p, rec.ID)
+
+	var doc struct {
+		Request struct {
+			Headers []harNV   `json:"headers"`
+			Body    debugBody `json:"body"`
+		} `json:"request"`
+		Response struct {
+			Headers []harNV   `json:"headers"`
+			Body    debugBody `json:"body"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Request.Headers) < 3 {
+		t.Fatalf("retained %d request headers, want the charged set", len(doc.Request.Headers))
+	}
+	if !doc.Response.Body.Truncated {
+		t.Fatal("oversized response body was not truncated by the shared budget")
+	}
+	total := harBytes(doc.Request.Headers) + harBytes(doc.Response.Headers) +
+		len(doc.Request.Body.Raw) + len(doc.Response.Body.Raw)
+	if total > captureCap {
+		t.Fatalf("retained capture content = %d bytes, want within the %d cap", total, captureCap)
 	}
 }

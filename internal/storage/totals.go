@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -385,7 +385,7 @@ func loadTotals(ctx context.Context, db interface {
 	}
 	var d totalsDoc
 	if err := json.Unmarshal([]byte(raw), &d); err != nil {
-		log.Printf("storage: persisted totals malformed (%v); rebuilding", err)
+		logging.Printf("", "storage: persisted totals malformed (%v); rebuilding", err)
 		return Totals{}, totalsWitness{}, false, nil
 	}
 	if d.V != totalsMetaVersion || d.Invalid {
@@ -398,7 +398,7 @@ func loadTotals(ctx context.Context, db interface {
 	}
 	t = d.totals()
 	if !t.valid() {
-		log.Printf("storage: persisted totals outside their representable range; rebuilding")
+		logging.Printf("", "storage: persisted totals outside their representable range; rebuilding")
 		return Totals{}, totalsWitness{}, false, nil
 	}
 	return t, totalsWitness{epoch: epoch, highRowID: highRowID}, true, nil
@@ -440,7 +440,7 @@ func readTotals(ctx context.Context, db interface {
 	for rows.Next() {
 		var status, ttft int64
 		var errorType string
-		var attemptsJSON []byte
+		var attemptsJSON string
 		var in, out, cacheR, reason int64
 		var cost, gen float64
 		if err := rows.Scan(&status, &errorType, &attemptsJSON,
@@ -449,7 +449,7 @@ func readTotals(ctx context.Context, db interface {
 		}
 		atts, err := DecodeAttemptsColumn(attemptsJSON)
 		if err != nil {
-			log.Printf("storage: totals: decode attempts: %v", err)
+			logging.Printf("", "storage: totals: decode attempts: %v", err)
 		}
 		r := metrics.Record{StatusCode: int(status), ErrorType: errorType, Attempts: atts,
 			TTFTMs: ttft, DecodeTPS: gen,

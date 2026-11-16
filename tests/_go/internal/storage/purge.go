@@ -56,6 +56,81 @@ func TestWriterDrainsWithoutProducerLock(t *testing.T) {
 	}
 }
 
+// TestPurgePreviewCountsTheQueuedBatch pins R1-4: the delete preview must see
+// the writer's still-queued batch. The confirmation travels back with the
+// preview, so a count that misses accepted-but-unflushed rows makes the delete
+// transaction refuse the very population the operator saw (409 on a store the
+// preview reported as empty). CountWhere barriers the batch into the read view
+// before counting.
+func TestPurgePreviewCountsTheQueuedBatch(t *testing.T) {
+	opts := testOpts
+	opts.FlushInterval = time.Hour // only the barrier can commit this batch
+	s := openPurgeTestStore(t, opts)
+	s.Record(&metrics.Record{ID: "a", Provider: "alpha", Model: "m", Start: time.Now(), StatusCode: 200})
+	s.Record(&metrics.Record{ID: "b", Provider: "alpha", Model: "m", Start: time.Now(), StatusCode: 200})
+
+	f := PurgeFilter{Provider: "alpha"}
+	reviewed, err := s.CountWhere(t.Context(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviewed != 2 {
+		t.Fatalf("preview count = %d, want the two queued matching rows", reviewed)
+	}
+	if _, err := s.Clear(t.Context(), &f, &reviewed, nil); err != nil {
+		t.Fatalf("the delete refused the previewed population: %v", err)
+	}
+}
+
+// TestPurgePreviewCountsThroughAWedgedWriter pins CR-2: the barrier has no
+// progress signal of its own once the writer is stuck on the sole connection,
+// so the settings sheet used to spin forever where the pre-barrier read-only
+// preview answered. The barrier runs on the interactive budget and gives up
+// into the count when it expires; the delete re-checks the population inside
+// its transaction, so a missed queued batch only costs a stale preview.
+func TestPurgePreviewCountsThroughAWedgedWriter(t *testing.T) {
+	opts := testOpts
+	opts.QueryTimeout = 100 * time.Millisecond
+	s := openPurgeTestStore(t, opts)
+	s.Record(&metrics.Record{ID: "committed", Start: time.Now(), StatusCode: 200})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// Holding the sole writer connection wedges the writer goroutine.
+	conn, err := s.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	s.Record(&metrics.Record{ID: "queued", Start: time.Now(), StatusCode: 200})
+
+	done := make(chan struct {
+		n   int64
+		err error
+	}, 1)
+	go func() {
+		n, err := s.CountWhere(t.Context(), PurgeFilter{})
+		done <- struct {
+			n   int64
+			err error
+		}{n, err}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("preview behind a wedged writer: %v", got.err)
+		}
+		// The queued record never reached the database, so only the committed
+		// row is visible. A short count is exactly the stale preview the
+		// delete's transactional re-check covers.
+		if got.n != 1 {
+			t.Fatalf("preview count = %d, want the one committed row", got.n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("preview blocked on the wedged writer")
+	}
+}
+
 func TestPendingPurgeFenceAcrossWriterDrains(t *testing.T) {
 	for _, mode := range []string{"normal", "flush", "close"} {
 		t.Run(mode, func(t *testing.T) {
@@ -80,7 +155,7 @@ func TestPendingPurgeFenceAcrossWriterDrains(t *testing.T) {
 			waitPurgeCondition(t, func() bool { return s.db.Stats().WaitCount > waits })
 			recorder.Record(&metrics.Record{ID: "old-queued", Start: time.Now()})
 			purged := make(chan purgeOutcome, 1)
-			go func() { got, err := s.Clear(t.Context(), nil, b); purged <- purgeOutcome{got, err} }()
+			go func() { got, err := s.Clear(t.Context(), nil, nil, b); purged <- purgeOutcome{got, err} }()
 			waitPurgeCondition(t, func() bool { return s.pendingPurge.Load() != nil })
 			recorder.Record(&metrics.Record{ID: "new", Start: time.Now()})
 			finished := make(chan error, 1)
@@ -150,7 +225,7 @@ func TestOverlappingPurgesKeepSeparateAcceptedBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := make(chan purgeOutcome, 1)
-	go func() { got, err := s.Clear(t.Context(), nil, b); first <- purgeOutcome{got, err} }()
+	go func() { got, err := s.Clear(t.Context(), nil, nil, b); first <- purgeOutcome{got, err} }()
 	select {
 	case <-entered:
 	case out := <-first:
@@ -161,7 +236,11 @@ func TestOverlappingPurgesKeepSeparateAcceptedBoundaries(t *testing.T) {
 	write("between")
 	second := make(chan purgeOutcome, 1)
 	starting := make(chan struct{})
-	go func() { close(starting); got, err := s.Clear(t.Context(), nil, b); second <- purgeOutcome{got, err} }()
+	go func() {
+		close(starting)
+		got, err := s.Clear(t.Context(), nil, nil, b)
+		second <- purgeOutcome{got, err}
+	}()
 	<-starting
 	unblock()
 	for _, out := range []purgeOutcome{<-first, <-second} {
@@ -249,7 +328,7 @@ func TestClearFencePreservesNewCompletionsAndDebugCaptures(t *testing.T) {
 				filter = &PurgeFilter{Provider: "target"}
 			}
 			result := make(chan purgeOutcome, 1)
-			go func() { got, err := s.Clear(t.Context(), filter, b); result <- purgeOutcome{got, err} }()
+			go func() { got, err := s.Clear(t.Context(), filter, nil, b); result <- purgeOutcome{got, err} }()
 			select {
 			case <-entered:
 			case <-time.After(5 * time.Second):
@@ -335,7 +414,7 @@ func TestClearFenceDrainsQueuedWritesAndDroppedRingRows(t *testing.T) {
 		t.Fatalf("expected one overflow, got %d", s.Dropped())
 	}
 	result := make(chan purgeOutcome, 1)
-	go func() { got, err := s.Clear(t.Context(), nil, b); result <- purgeOutcome{got, err} }()
+	go func() { got, err := s.Clear(t.Context(), nil, nil, b); result <- purgeOutcome{got, err} }()
 	waitPurgeCondition(t, func() bool { return s.pendingPurge.Load() != nil })
 	write("new-dropped")
 	if err := conn.Close(); err != nil {
@@ -372,7 +451,7 @@ func TestClearFailedDeleteRollsBackSidecarsAndRing(t *testing.T) {
 	if _, err := s.db.Exec(`CREATE TRIGGER deny_delete BEFORE DELETE ON requests BEGIN SELECT RAISE(ABORT, 'denied'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Clear(t.Context(), nil, b); err == nil {
+	if _, err := s.Clear(t.Context(), nil, nil, b); err == nil {
 		t.Fatal("failed DELETE reported success")
 	}
 	if b.Len() != 1 || b.Counters().TotalReq != 1 || s.Totals().Requests != 1 {
@@ -383,7 +462,7 @@ func TestClearFailedDeleteRollsBackSidecarsAndRing(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := s.Clear(ctx, nil, b); !errors.Is(err, context.Canceled) {
+	if _, err := s.Clear(ctx, nil, nil, b); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled clear: %v", err)
 	}
 }
@@ -475,7 +554,7 @@ func TestPurgeRollbackKeepsDebugBytesAccounted(t *testing.T) {
 	if _, err := s.db.Exec(`CREATE TRIGGER deny_purge BEFORE DELETE ON requests BEGIN SELECT RAISE(ABORT, 'denied'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Clear(t.Context(), nil, b); err == nil {
+	if _, err := s.Clear(t.Context(), nil, nil, b); err == nil {
 		t.Fatal("purge succeeded while its request delete was rejected")
 	}
 	if got := debugAccounting(t, s); got != payloadSize {
@@ -519,7 +598,7 @@ func TestClearCancellationDuringDeleteRollsBack(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	result := make(chan error, 1)
-	go func() { _, err := s.Clear(ctx, nil, b); result <- err }()
+	go func() { _, err := s.Clear(ctx, nil, nil, b); result <- err }()
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
@@ -604,7 +683,7 @@ func TestPurgeLeavesNoRowContentInFreedPages(t *testing.T) {
 	if err := s.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Clear(t.Context(), nil, b); err != nil {
+	if _, err := s.Clear(t.Context(), nil, nil, b); err != nil {
 		t.Fatal(err)
 	}
 	// Checkpoint so the pages are in the main file rather than the WAL: the

@@ -3,8 +3,8 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,8 +13,10 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
+	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
 // Persistent provider-wide caps. Set from the dashboard or from
@@ -27,18 +29,19 @@ const (
 	hdrLimitTokens      = "X-Proxy-Limit-Tokens"
 )
 
-// Safety guardrails on a header/UI-supplied cap. Not user-tunable: they
-// bound a hostile or typo'd value so it cannot stall the provider forever
-// or overflow the token bucket. Window is 1s..24h (same ceiling as
-// scheduler.MaxRetryHint - a daily quota window). The anti-burst ramp
-// duration reuses that same band, so both share one grammar and one range
-// check.
+// Safety guardrails on a header/UI-supplied cap. Not user-tunable: they bound a
+// hostile or typo'd value so it cannot stall the provider forever or overflow
+// the token bucket. The bands themselves live in scheduler, which this package
+// and the MCP validation surface both import, so there is one declaration
+// rather than a copy per consumer. The window ceiling is MaxRetryHint's: a daily
+// quota window is the longest span either feature reasons about, and the
+// anti-burst ramp reuses the same band.
 const (
-	maxLimitConcurrency = 100_000
-	maxLimitRequests    = 1_000_000_000
-	maxLimitTokens      = 1_000_000_000_000
-	minLimitWindow      = time.Second
-	maxLimitWindow      = 24 * time.Hour
+	maxLimitConcurrency = scheduler.LimitConcurrencyMax
+	maxLimitRequests    = scheduler.LimitRequestsMax
+	maxLimitTokens      = scheduler.LimitTokensMax
+	minLimitWindow      = scheduler.LimitWindowMin
+	maxLimitWindow      = scheduler.LimitWindowMax
 )
 
 // Durable throttle-policy bounds and background-writer cadence. These are
@@ -67,20 +70,39 @@ type throttlePersist interface {
 }
 
 type persistedThrottle struct {
-	Provider     string    `json:"provider"`
-	Concurrency  int       `json:"concurrency,omitempty"`
-	Requests     int64     `json:"requests,omitempty"`
-	ReqWindow    string    `json:"request_window,omitempty"`
-	Tokens       int64     `json:"tokens,omitempty"`
-	TokWindow    string    `json:"token_window,omitempty"`
-	AntiBurst    bool      `json:"anti_burst,omitempty"`
-	RampDuration string    `json:"ramp_duration,omitempty"`
-	Source       string    `json:"source,omitempty"`
-	UpdatedBy    string    `json:"updated_by,omitempty"`
-	UpdatedAt    time.Time `json:"updated_at,omitempty"`
+	// Provider is the legacy single-provider mirror. It is written only for a
+	// provider-only scope and read as that scope's provider when Providers is
+	// absent, so a document written before scoped policies still restores.
+	Provider      string    `json:"provider,omitempty"`
+	Providers     []string  `json:"providers,omitempty"`
+	Models        []string  `json:"models,omitempty"`
+	Clients       []string  `json:"clients,omitempty"`
+	KeyHashes     []string  `json:"key_hashes,omitempty"`
+	Conversations []string  `json:"conversations,omitempty"`
+	Days          []int     `json:"days,omitempty"`
+	StartMinute   int       `json:"start_minute,omitempty"`
+	EndMinute     int       `json:"end_minute,omitempty"`
+	Concurrency   int       `json:"concurrency,omitempty"`
+	Requests      int64     `json:"requests,omitempty"`
+	ReqWindow     string    `json:"request_window,omitempty"`
+	Tokens        int64     `json:"tokens,omitempty"`
+	TokWindow     string    `json:"token_window,omitempty"`
+	AntiBurst     bool      `json:"anti_burst,omitempty"`
+	RampDuration  string    `json:"ramp_duration,omitempty"`
+	Source        string    `json:"source,omitempty"`
+	UpdatedBy     string    `json:"updated_by,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at,omitempty"`
 }
 
+// throttleDocVersion is the persisted document's schema version. Version 1
+// held provider-only policies; version 2 adds selector and schedule fields.
+// A version 1 document restores unchanged, and a version 2 document read by a
+// version 1 binary would silently drop its scopes, so downgrading with scoped
+// policies installed requires clearing them first.
+const throttleDocVersion = 2
+
 type persistedThrottleDoc struct {
+	Version   int                 `json:"version,omitempty"`
 	Throttles []persistedThrottle `json:"throttles,omitempty"`
 }
 
@@ -94,6 +116,12 @@ type throttleRuntime struct {
 	persistedGen uint64
 	started      bool
 	closed       bool
+
+	// restoreDegraded records that a durable cap document existed but could not
+	// be decoded, so this process booted with none of the caps it had before the
+	// restart. Reported rather than only logged: a silently empty cap list reads
+	// as "no provider is capped", which is the opposite of what happened.
+	restoreDegraded bool
 
 	// persistMu lets concurrent persistence loops (operator edits and the one
 	// background writer) overlap, while a flush takes the exclusive side so no
@@ -156,10 +184,15 @@ func (s *Server) restoreThrottlePolicies(p throttlePersist) {
 	defer cancel()
 	raw, err := p.LoadThrottle(ctx)
 	if err != nil {
-		log.Printf("throttle: load: %v", err)
+		logging.Printf("", "throttle: load: %v", err)
 		return
 	}
-	items := decodeThrottles(raw)
+	items, degraded := decodeThrottles(raw)
+	if degraded {
+		s.throttle.mu.Lock()
+		s.throttle.restoreDegraded = true
+		s.throttle.mu.Unlock()
+	}
 	if len(items) == 0 {
 		return
 	}
@@ -167,37 +200,61 @@ func (s *Server) restoreThrottlePolicies(p throttlePersist) {
 	for _, it := range items {
 		t, err := persistedToThrottle(it)
 		if err != nil {
-			log.Printf("throttle: skip %s: %v", it.Provider, err)
+			logging.Printf("", "throttle: skip %s: %v", it.Provider, err)
 			continue
 		}
-		s.pause.providers.add(t.Provider)
+		s.notePolicyScope(t)
 		ts = append(ts, t)
 	}
 	s.scheduler.RestoreThrottles(ts)
+	// A restored policy scopes its names before any traffic, so pin them now
+	// instead of waiting for the next operator write.
+	s.syncNamePins()
 	if len(ts) > 0 {
-		log.Printf("throttle restored (%d provider caps)", len(ts))
+		logging.Printf("", "throttle restored (%d provider caps)", len(ts))
 	}
 }
 
-func decodeThrottles(raw []byte) []persistedThrottle {
+// decodeThrottles reads the persisted cap document. The second result reports a
+// document that existed but could not be decoded: an empty store and a corrupt
+// one both yield no caps, and only the caller can tell the operator that the
+// difference means caps were lost rather than never installed.
+func decodeThrottles(raw []byte) (items []persistedThrottle, degraded bool) {
 	if len(raw) == 0 {
-		return nil
+		return nil, false
 	}
 	var doc persistedThrottleDoc
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		log.Printf("throttle: decode: %v", err)
-		return nil
+		logging.Printf("", "throttle: decode: %v", err)
+		return nil, true
 	}
-	return doc.Throttles
+	return doc.Throttles, false
 }
 
 func persistedToThrottle(it persistedThrottle) (scheduler.Throttle, error) {
-	if strings.TrimSpace(it.Provider) == "" {
-		return scheduler.Throttle{}, fmt.Errorf("provider required")
+	providers := it.Providers
+	if len(providers) == 0 && strings.TrimSpace(it.Provider) != "" {
+		providers = []string{it.Provider}
 	}
-	if err := validateThrottleProvider(it.Provider); err != nil {
+	scope := scheduler.NormalizeLimitScope(scheduler.LimitScope{
+		Providers:     providers,
+		Models:        it.Models,
+		Clients:       it.Clients,
+		KeyHashes:     it.KeyHashes,
+		Conversations: it.Conversations,
+	})
+	if err := validateThrottleScope(scope); err != nil {
 		return scheduler.Throttle{}, err
 	}
+	schedule := scheduler.LimitSchedule{
+		Days:     it.Days,
+		StartMin: it.StartMinute,
+		EndMin:   it.EndMinute,
+	}
+	if err := scheduler.ValidateLimitSchedule(schedule); err != nil {
+		return scheduler.Throttle{}, err
+	}
+	schedule = scheduler.NormalizeLimitSchedule(schedule)
 	lim := scheduler.Limit{
 		Concurrency: it.Concurrency,
 		Requests:    it.Requests,
@@ -228,8 +285,13 @@ func persistedToThrottle(it persistedThrottle) (scheduler.Throttle, error) {
 	if err := validateLimit(lim); err != nil {
 		return scheduler.Throttle{}, err
 	}
+	if (lim.AntiBurst || lim.RampDuration > 0) && (!scope.ProviderOnly() || !schedule.Empty()) {
+		return scheduler.Throttle{}, fmt.Errorf("anti_burst requires a single-provider policy without a schedule")
+	}
 	return scheduler.Throttle{
-		Provider:  it.Provider,
+		ID:        scheduler.PolicyID(scope, schedule),
+		Scope:     scope,
+		Schedule:  schedule,
 		Limit:     lim,
 		Source:    it.Source,
 		UpdatedBy: it.UpdatedBy,
@@ -239,7 +301,9 @@ func persistedToThrottle(it persistedThrottle) (scheduler.Throttle, error) {
 
 func throttleToPersisted(t scheduler.Throttle) persistedThrottle {
 	it := persistedThrottle{
-		Provider:    t.Provider,
+		Days:        t.Schedule.Days,
+		StartMinute: t.Schedule.StartMin,
+		EndMinute:   t.Schedule.EndMin,
 		Concurrency: t.Limit.Concurrency,
 		Requests:    t.Limit.Requests,
 		Tokens:      t.Limit.Tokens,
@@ -247,6 +311,20 @@ func throttleToPersisted(t scheduler.Throttle) persistedThrottle {
 		Source:      t.Source,
 		UpdatedBy:   t.UpdatedBy,
 		UpdatedAt:   t.UpdatedAt,
+	}
+	// A provider-only policy keeps the version 1 shape: one provider field and
+	// no selector arrays. That makes an unchanged policy byte-identical to the
+	// document a previous binary wrote, and the legacy field is a projection of
+	// the scope, never a second fact. Every other selector shape writes the
+	// explicit arrays.
+	if t.Scope.ProviderOnly() {
+		it.Provider = t.Scope.PrimaryProvider()
+	} else {
+		it.Providers = t.Scope.Providers
+		it.Models = t.Scope.Models
+		it.Clients = t.Scope.Clients
+		it.KeyHashes = t.Scope.KeyHashes
+		it.Conversations = t.Scope.Conversations
 	}
 	if t.Limit.ReqWindow > 0 {
 		it.ReqWindow = config.FormatDuration(t.Limit.ReqWindow)
@@ -260,44 +338,109 @@ func throttleToPersisted(t scheduler.Throttle) persistedThrottle {
 	return it
 }
 
+// validateThrottleScope is the proxy-side owner of selector bounds. A provider
+// label keeps the routing boundary's DNS bound; every value is bounded so one
+// policy cannot consume the operator document budget.
+func validateThrottleScope(scope scheduler.LimitScope) error {
+	if err := scheduler.ValidateLimitScope(scope); err != nil {
+		return err
+	}
+	for _, provider := range scope.Providers {
+		if err := validateThrottleProvider(provider); err != nil {
+			return err
+		}
+	}
+	for _, group := range [][]string{scope.Models, scope.Clients, scope.Conversations} {
+		for _, value := range group {
+			if len(value) > throttleScopeValueMaxBytes {
+				return fmt.Errorf("scope value must be at most %d bytes", throttleScopeValueMaxBytes)
+			}
+		}
+	}
+	return nil
+}
+
+const throttleScopeValueMaxBytes = 512
+
 func validateThrottleProvider(provider string) error {
+	if strings.TrimSpace(provider) == "" {
+		return fmt.Errorf("provider required")
+	}
 	if len(provider) > throttleProviderLabelMaxBytes {
 		return fmt.Errorf("provider label must be at most %d bytes", throttleProviderLabelMaxBytes)
 	}
 	return nil
 }
 
-func (s *Server) applyThrottle(t scheduler.Throttle) error {
-	return s.updateThrottle(t.Provider, func(scheduler.Throttle) scheduler.Throttle { return t })
-}
+// errThrottleConflict reports an edit whose new selector already belongs to
+// another policy. Deny by default: replacing a neighbour would lose its
+// counters and metadata.
+var errThrottleConflict = fmt.Errorf("a limit with this selector already exists")
 
 // updateThrottle is the synchronous operator edit path. It applies the policy,
 // then waits for the write that covers that policy generation so the endpoint
 // can report a persistence warning against live state.
-func (s *Server) updateThrottle(provider string, update func(scheduler.Throttle) scheduler.Throttle) error {
-	if err := validateThrottleProvider(provider); err != nil {
-		return err
+func (s *Server) updateThrottle(id string, update func(scheduler.Throttle) scheduler.Throttle) error {
+	var applied scheduler.Throttle
+	changed, conflict := s.scheduler.UpdatePolicy(id, func(cur scheduler.Throttle) scheduler.Throttle {
+		applied = update(cur)
+		return applied
+	})
+	if conflict {
+		return errThrottleConflict
 	}
-	if !s.scheduler.UpdateThrottle(provider, update) {
+	if !changed {
 		return nil
 	}
-	s.pause.providers.add(provider)
+	if applied.Limit.Active() {
+		s.notePolicyScope(applied)
+	}
+	s.syncNamePins()
 	return s.persistThrottleSync()
 }
 
 // updateThrottleFromHeaders applies a validated client header patch without
-// durable I/O. The coalescing writer owns persistence, so inference latency is
-// independent of the number of gates and of the store.
+// durable I/O. The Coalescing writer owns persistence, so inference latency is
+// independent of the number of policies and of the store. Header limits are
+// always the provider-wide, unscheduled policy: a header cannot name a model,
+// client, key or conversation, and silently overwriting an operator's scoped
+// rules would be a wider change than the caller asked for.
 func (s *Server) updateThrottleFromHeaders(provider string, update func(scheduler.Throttle) scheduler.Throttle) error {
 	if err := validateThrottleProvider(provider); err != nil {
 		return err
 	}
-	if !s.scheduler.UpdateThrottle(provider, update) {
+	id := scheduler.PolicyID(scheduler.LimitScope{Providers: []string{provider}}, scheduler.LimitSchedule{})
+	changed, _ := s.scheduler.UpdatePolicy(id, func(cur scheduler.Throttle) scheduler.Throttle {
+		if cur.Scope.Empty() {
+			cur.Scope = scheduler.LimitScope{Providers: []string{provider}}
+		}
+		return update(cur)
+	})
+	if !changed {
 		return nil
 	}
+	// The provider is a live operator-document scope, so it must be pinned,
+	// not only observed: an observed name is evictable from the bounded
+	// vocabulary while the header limit still scopes it.
 	s.pause.providers.add(provider)
+	s.syncNamePins()
 	s.markThrottleDirty()
 	return nil
+}
+
+// notePolicyScope records every operator-chosen name in the shared known-name
+// vocabularies, so a policy's scope stays selectable in the console even after
+// its traffic stops.
+func (s *Server) notePolicyScope(t scheduler.Throttle) {
+	for _, provider := range t.Scope.Providers {
+		s.pause.providers.add(provider)
+	}
+	for _, client := range t.Scope.Clients {
+		s.pause.clients.add(client)
+	}
+	for _, model := range t.Scope.Models {
+		s.pause.models.add(canonicalModel(model))
+	}
 }
 
 // latestThrottleSnap captures the scheduler's provider caps in the persisted
@@ -361,6 +504,65 @@ func (t *throttleRuntime) signal() {
 	}
 }
 
+// persistThrottleSnapshot writes the policy generation it observed, exactly
+// once, and never chases a newer one.
+//
+// This is the background writer's owner. The converging loop below is for
+// callers that need a barrier - an operator edit that must be durable before it
+// returns, or a restart handoff that must flush before the child opens the
+// database. A background writer has no such caller: chasing a moving generation
+// means one whole-document write per change that lands during a write, so under
+// sustained header traffic it wrote as fast as traffic arrived and, because it
+// ran on context.Background(), had no bound at all. A newer change now leaves
+// the generation dirty and its own wake signal drives the next write, so one
+// wake produces at most one document.
+// persistThrottleSnapshot writes the policy generation it observed, exactly
+// once, and never chases a newer one.
+//
+// It takes the EXCLUSIVE side of persistMu, not the shared one, because the
+// document must never land out of order. With a shared lock a background write
+// that started before an operator edit could land after it: measured with a
+// held first write, the operator's second policy was overwritten by the stale
+// snapshot, persistedGen still named the newer generation, so neither a retry
+// nor the shutdown flush rewrote it and the edit was lost for good. Serializing
+// the two paths costs one wait bounded by StorageQueryTimeout and keeps the
+// one-document-per-wake bound, because the generation is read under the same
+// lock that orders the writes.
+func (s *Server) persistThrottleSnapshot(ctx context.Context) error {
+	s.throttle.persistMu.Lock()
+	defer s.throttle.persistMu.Unlock()
+	t := &s.throttle
+	t.mu.Lock()
+	gen := t.persistGen
+	if gen == t.persistedGen {
+		t.mu.Unlock()
+		return nil
+	}
+	target := t.persist
+	t.mu.Unlock()
+	if target == nil {
+		// Memory-only policy: leave the generation dirty so a later attach can
+		// persist it, and report success to callers.
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	snap := s.latestThrottleSnap()
+	if err := s.writeThrottleSnap(ctx, target, snap); err != nil {
+		return err
+	}
+	t.mu.Lock()
+	// Only claim the generation this write actually captured. A change that
+	// landed mid-write keeps the generation dirty and is picked up by the wake
+	// it raised.
+	if t.persistGen == gen {
+		t.persistedGen = gen
+	}
+	t.mu.Unlock()
+	return nil
+}
+
 // persistThrottleLatest writes the newest policy generation. Concurrent
 // loops may overlap; the generation check after each write means a stale
 // snapshot is always followed by the latest policy before that loop returns.
@@ -418,10 +620,18 @@ func (s *Server) persistThrottleLatestLocked(ctx context.Context) error {
 }
 
 // runThrottlePersister is the single background writer. It waits for a dirty
-// signal, coalesces a burst for the debounce window, then persists until the
-// latest generation is durable. A failed write is retried with exponential
-// backoff; the dirty generation is never cleared by a failure. The stop
-// channel is the only exit path, so Close can join it without a busy loop.
+// signal, coalesces a burst for the debounce window, then writes the policy
+// generation it then observes - one document per wake. A failed write is
+// retried with exponential backoff; the dirty generation is never cleared by a
+// failure. The stop channel is the only exit path, so Close can join it
+// without a busy loop.
+//
+// It writes through persistThrottleSnapshot, not persistThrottleLatest: the
+// converging loop belongs to callers that need a barrier (an operator edit, a
+// restart handoff), while a background writer that chased a moving generation
+// wrote one whole document per change arriving mid-write and had no bound. A
+// change that lands during a write raises its own wake, so the next pass picks
+// it up and a quiet policy still ends durable.
 func (s *Server) runThrottlePersister() {
 	t := &s.throttle
 	defer close(t.done)
@@ -436,9 +646,17 @@ func (s *Server) runThrottlePersister() {
 		}
 		backoff := t.retryMin
 		for {
-			err := s.persistThrottleLatest(context.Background())
+			err := s.persistThrottleSnapshot(context.Background())
 			if err == nil {
 				break
+			}
+			// A closed database cannot answer again in this process, so the
+			// ladder is pointless: leave the generation dirty and stop instead
+			// of hammering the dead handle until shutdown. A busy store stays
+			// on the ladder.
+			if throttleStoreGone(err) {
+				logging.Printf("", "throttle: persist stopped, store is closed: %v", err)
+				return
 			}
 			// persistOperatorDocCtx already logged the store failure. Wait the
 			// full backoff even when new changes wake us, so a failing store
@@ -448,6 +666,14 @@ func (s *Server) runThrottlePersister() {
 			}
 		}
 	}
+}
+
+// throttleStoreGone reports the closed-handle class through the storage owner:
+// a closed *sql.DB answers with database/sql's own "database is closed" error,
+// which is not sql.ErrConnDone, so only the shared classifier stops the ladder
+// on it. A busy store keeps its transient error and keeps retrying.
+func throttleStoreGone(err error) bool {
+	return storage.IsClosed(err)
 }
 
 // waitThrottleQuiet restarts the debounce window on every dirty signal and
@@ -495,7 +721,7 @@ func (s *Server) waitThrottleRetry(backoff *time.Duration) bool {
 
 func (s *Server) writeThrottleSnap(ctx context.Context, p throttlePersist, items []persistedThrottle) error {
 	return s.persistOperatorDocCtx(ctx, "throttle",
-		persistedThrottleDoc{Throttles: items}, operatorPersistDocMaxBytes, p.SaveThrottle)
+		persistedThrottleDoc{Version: throttleDocVersion, Throttles: items}, operatorPersistDocMaxBytes, p.SaveThrottle)
 }
 
 // FlushThrottles persists the latest policy within the bounded storage
@@ -812,28 +1038,96 @@ func localErrorType(t string) bool {
 	return metrics.IsLocalErrorType(t)
 }
 
-// HandleThrottle is GET/POST /admin/throttle. GET returns every active
-// cap plus known providers (history ∪ current caps) so the dashboard can
-// set a limit on a seen provider. POST requires {"provider"} (deny by
-// default). clear:true drops the cap. Otherwise any supplied dimension
-// merges; omitted dimensions keep their current value; 0 / empty window
-// turns that dimension off. The anti-burst flag and ramp duration must land
-// on a policy that stays active, since an inactive limit stores nothing.
+// throttleBody is the strict POST /admin/throttle document. Pointer fields
+// distinguish "not supplied" (keep the stored value) from an explicit empty
+// value (clear it); slice fields make the same distinction through nil versus
+// an empty array.
+type throttleBody struct {
+	ID            *string  `json:"id"`
+	Provider      *string  `json:"provider"`
+	Providers     []string `json:"providers"`
+	Models        []string `json:"models"`
+	Clients       []string `json:"clients"`
+	KeyHashes     []string `json:"key_hashes"`
+	Conversations []string `json:"conversations"`
+	Days          []int    `json:"days"`
+	StartMinute   *int     `json:"start_minute"`
+	EndMinute     *int     `json:"end_minute"`
+	Clear         bool     `json:"clear"`
+	Concurrency   *int     `json:"concurrency"`
+	Requests      *int64   `json:"requests"`
+	ReqWindow     *string  `json:"request_window"`
+	Tokens        *int64   `json:"tokens"`
+	TokWindow     *string  `json:"token_window"`
+	AntiBurst     *bool    `json:"anti_burst"`
+	RampDuration  *string  `json:"ramp_duration"`
+}
+
+func (b *throttleBody) hasScope() bool {
+	return b.Provider != nil || b.Providers != nil || b.Models != nil ||
+		b.Clients != nil || b.KeyHashes != nil || b.Conversations != nil ||
+		b.Days != nil || b.StartMinute != nil || b.EndMinute != nil
+}
+
+func (b *throttleBody) hasLimit() bool {
+	return b.Concurrency != nil || b.Requests != nil || b.ReqWindow != nil ||
+		b.Tokens != nil || b.TokWindow != nil || b.AntiBurst != nil || b.RampDuration != nil
+}
+
+// mergeThrottleScope applies a body's selector fields to a base. Omitted
+// dimensions keep the stored value; an explicit empty array clears it.
+func mergeThrottleScope(base scheduler.LimitScope, body *throttleBody) scheduler.LimitScope {
+	if body.Provider != nil {
+		base.Providers = []string{*body.Provider}
+	}
+	if body.Providers != nil {
+		base.Providers = body.Providers
+	}
+	if body.Models != nil {
+		base.Models = body.Models
+	}
+	if body.Clients != nil {
+		base.Clients = body.Clients
+	}
+	if body.KeyHashes != nil {
+		base.KeyHashes = body.KeyHashes
+	}
+	if body.Conversations != nil {
+		base.Conversations = body.Conversations
+	}
+	return scheduler.NormalizeLimitScope(base)
+}
+
+// mergeThrottleSchedule applies the optional window to a base. Days and the
+// minute pair are independent so a caller can re-time a rule without resending
+// its days, or re-day it without resending the clock. It deliberately does not
+// normalize: validation must see the raw values, and normalization would
+// silently clamp an out-of-band day or minute into a different window.
+func mergeThrottleSchedule(base scheduler.LimitSchedule, body *throttleBody) scheduler.LimitSchedule {
+	if body.Days != nil {
+		base.Days = body.Days
+	}
+	if body.StartMinute != nil {
+		base.StartMin = *body.StartMinute
+	}
+	if body.EndMinute != nil {
+		base.EndMin = *body.EndMinute
+	}
+	return base
+}
+
+// HandleThrottle is GET/POST /admin/throttle. GET returns every active policy
+// plus the known selector vocabularies. POST requires an id or a selector
+// (deny by default). clear:true removes the resolved policy. Otherwise any
+// supplied limit dimension merges; omitted dimensions keep their current
+// value; 0 / empty window turns that dimension off. The anti-burst flag and
+// ramp duration require a single-provider policy without a schedule, because
+// a ramp is defined over the provider-plus-key groups the scheduler owns.
 func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 	if !s.operatorStateGet(w, r, s.ThrottleSnapshot) {
 		return
 	}
-	var body struct {
-		Provider     string  `json:"provider"`
-		Clear        bool    `json:"clear"`
-		Concurrency  *int    `json:"concurrency"`
-		Requests     *int64  `json:"requests"`
-		ReqWindow    *string `json:"request_window"`
-		Tokens       *int64  `json:"tokens"`
-		TokWindow    *string `json:"token_window"`
-		AntiBurst    *bool   `json:"anti_burst"`
-		RampDuration *string `json:"ramp_duration"`
-	}
+	var body throttleBody
 	if err := adminjson.Decode(w, r, &body); err != nil {
 		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -849,41 +1143,73 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	provider := strings.TrimSpace(body.Provider)
-	if provider == "" {
-		adminjson.WriteError(w, http.StatusBadRequest, "provider required")
+	if body.Provider != nil && body.Providers != nil {
+		adminjson.WriteError(w, http.StatusBadRequest,
+			"provider and providers cannot both be supplied")
 		return
 	}
-	if err := validateThrottleProvider(provider); err != nil {
-		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+	if body.ID == nil && !body.hasScope() {
+		adminjson.WriteError(w, http.StatusBadRequest, "id or selector required")
 		return
+	}
+	// Resolve the policy being edited. An id names it exactly. Otherwise the
+	// supplied selector names it: re-applying the same scope is an edit, not a
+	// second rule with the same meaning.
+	targetID := ""
+	if body.ID != nil {
+		targetID = strings.TrimSpace(*body.ID)
+		if targetID == "" {
+			adminjson.WriteError(w, http.StatusBadRequest, "id must not be empty")
+			return
+		}
+		if _, ok := s.scheduler.PolicyByID(targetID); !ok {
+			adminjson.WriteError(w, http.StatusNotFound, "limit not found")
+			return
+		}
+	} else {
+		preview := mergeThrottleScope(scheduler.LimitScope{}, &body)
+		previewSchedule := mergeThrottleSchedule(scheduler.LimitSchedule{}, &body)
+		if !preview.Empty() || !previewSchedule.Empty() {
+			targetID = scheduler.PolicyID(preview, previewSchedule)
+		}
 	}
 	if body.Clear {
 		// Clear is a whole-policy action. Accepting a dimension beside it
 		// would drop the field and report success, so the caller could
 		// believe a cap is active when none is.
-		if body.Concurrency != nil || body.Requests != nil || body.ReqWindow != nil ||
-			body.Tokens != nil || body.TokWindow != nil || body.AntiBurst != nil ||
-			body.RampDuration != nil {
+		if body.hasLimit() {
 			adminjson.WriteError(w, http.StatusBadRequest,
 				"clear cannot be combined with limit dimensions")
 			return
 		}
+		if targetID == "" {
+			adminjson.WriteError(w, http.StatusBadRequest, "selector required to clear")
+			return
+		}
 		s.resetOperatorState(w, s.ThrottleSnapshot,
-			func() error { return s.applyThrottle(scheduler.Throttle{Provider: provider}) },
-			"throttle cleared (%s)", provider)
+			func() error { return s.removeThrottle(targetID) },
+			"throttle cleared (%s)", targetID)
 		return
 	}
-	if body.Concurrency == nil && body.Requests == nil && body.Tokens == nil &&
-		body.ReqWindow == nil && body.TokWindow == nil &&
-		body.AntiBurst == nil && body.RampDuration == nil {
+	if !body.hasLimit() {
 		adminjson.WriteError(w, http.StatusBadRequest,
 			"concurrency, requests, tokens, anti_burst, or ramp_duration required")
 		return
 	}
 	var next scheduler.Limit
 	var updateErr error
-	persistErr := s.updateThrottle(provider, func(cur scheduler.Throttle) scheduler.Throttle {
+	var applied scheduler.Throttle
+	persistErr := s.updateThrottle(targetID, func(cur scheduler.Throttle) scheduler.Throttle {
+		scope := mergeThrottleScope(cur.Scope, &body)
+		schedule := mergeThrottleSchedule(cur.Schedule, &body)
+		if err := validateThrottleScope(scope); err != nil {
+			updateErr = err
+			return cur
+		}
+		if err := scheduler.ValidateLimitSchedule(schedule); err != nil {
+			updateErr = err
+			return cur
+		}
 		next = cur.Limit
 		if body.Concurrency != nil {
 			if *body.Concurrency < 0 {
@@ -904,6 +1230,13 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 				return cur
 			}
 			if n == 0 {
+				// The window had no count to bound: storing it would answer
+				// 200 with an inactive policy, so name the missing half. The
+				// same rule the ramp below follows.
+				if body.Requests == nil {
+					updateErr = fmt.Errorf("request_window requires requests")
+					return cur
+				}
 				next.Requests = 0
 				next.ReqWindow = 0
 			} else {
@@ -936,6 +1269,10 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 				return cur
 			}
 			if n == 0 {
+				if body.Tokens == nil {
+					updateErr = fmt.Errorf("token_window requires tokens")
+					return cur
+				}
 				next.Tokens = 0
 				next.TokWindow = 0
 			} else {
@@ -974,29 +1311,50 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 		rampOn := (body.AntiBurst != nil && *body.AntiBurst) ||
 			(body.RampDuration != nil && next.RampDuration > 0)
 		if !next.Active() && rampOn {
-			updateErr = fmt.Errorf("anti_burst and ramp_duration require an active provider limit")
+			updateErr = fmt.Errorf("anti_burst and ramp_duration require an active limit")
+			return cur
+		}
+		if rampOn && (!scope.ProviderOnly() || !schedule.Empty()) {
+			updateErr = fmt.Errorf("anti_burst requires a single-provider limit without a schedule")
 			return cur
 		}
 		if err := validateLimit(next); err != nil {
 			updateErr = err
 			return cur
 		}
-		return scheduler.Throttle{
-			Provider:  provider,
+		applied = scheduler.Throttle{
+			Scope:     scope,
+			Schedule:  schedule,
 			Limit:     next,
 			Source:    scheduler.ThrottleSourceUI,
 			UpdatedBy: "dashboard",
 		}
+		return applied
 	})
 	if updateErr != nil {
 		adminjson.WriteError(w, http.StatusBadRequest, updateErr.Error())
 		return
 	}
-	log.Printf("throttle set (%s conc=%d req=%d/%s tok=%d/%s burst=%t ramp=%s)", provider,
-		next.Concurrency, next.Requests, config.FormatDuration(next.ReqWindow),
-		next.Tokens, config.FormatDuration(next.TokWindow),
-		next.AntiBurst, config.FormatDuration(next.RampDuration))
+	if errors.Is(persistErr, errThrottleConflict) {
+		adminjson.WriteError(w, http.StatusConflict, persistErr.Error())
+		return
+	}
+	if applied.Limit.Active() {
+		logging.Printf("", "throttle set (%s conc=%d req=%d/%s tok=%d/%s burst=%t ramp=%s)", applied.ID,
+			next.Concurrency, next.Requests, config.FormatDuration(next.ReqWindow),
+			next.Tokens, config.FormatDuration(next.TokWindow),
+			next.AntiBurst, config.FormatDuration(next.RampDuration))
+	}
 	writeOperatorState(w, s.ThrottleSnapshot(), persistErr)
+}
+
+// removeThrottle clears one policy by identity and persists the new document.
+func (s *Server) removeThrottle(id string) error {
+	if !s.scheduler.RemovePolicy(id) {
+		return nil
+	}
+	s.syncNamePins()
+	return s.persistThrottleSync()
 }
 
 // ThrottleSnapshot builds the GET /admin/throttle state document - the
@@ -1007,7 +1365,10 @@ func (s *Server) ThrottleSnapshot() map[string]any {
 	throttles := make([]map[string]any, 0, len(infos))
 	for _, inf := range infos {
 		throttles = append(throttles, map[string]any{
-			"provider":           inf.Provider,
+			"id":                 inf.ID,
+			"scope":              scopeDocument(inf.Scope),
+			"schedule":           scheduleDocument(inf.Schedule),
+			"provider":           inf.Scope.PrimaryProvider(),
 			"concurrency":        inf.Limit.Concurrency,
 			"requests":           inf.Limit.Requests,
 			"request_window":     durationOrEmpty(inf.Limit.ReqWindow),
@@ -1023,23 +1384,68 @@ func (s *Server) ThrottleSnapshot() map[string]any {
 			"tokens_remaining":   inf.TokRemaining,
 			"requests_capacity":  inf.ReqCapacity,
 			"tokens_capacity":    inf.TokCapacity,
+			// The server owns whether a schedule is open right now; the
+			// dashboard must not re-derive it from the stored minutes.
+			"scheduled": inf.Scheduled,
 		})
 	}
 	known := sanitizeNameList(append(s.pause.providers.list(), throttleProviders(infos)...))
+	s.throttle.mu.Lock()
+	restoreDegraded := s.throttle.restoreDegraded
+	s.throttle.mu.Unlock()
 	return map[string]any{
 		"ok":              true,
 		"throttles":       throttles,
 		"known_providers": nullSlice(known),
-		"active":          len(throttles) > 0,
+		"known_clients":   nullSlice(sanitizeNameList(s.pause.clients.list())),
+		"known_models":    nullSlice(sanitizeNameList(s.pause.models.list())),
+		// A durable cap document existed but could not be read, so no cap from
+		// before the restart is enforcing. Reported apart from an empty list,
+		// which would read as a deliberate, uncapped configuration.
+		"restore_degraded": restoreDegraded,
+		"active":           len(throttles) > 0,
+	}
+}
+
+// scopeDocument projects a selector into the wire shape, omitting empty
+// dimensions so the dashboard's "any value" reading stays unambiguous.
+func scopeDocument(scope scheduler.LimitScope) map[string]any {
+	doc := map[string]any{}
+	if len(scope.Providers) > 0 {
+		doc["providers"] = scope.Providers
+	}
+	if len(scope.Models) > 0 {
+		doc["models"] = scope.Models
+	}
+	if len(scope.Clients) > 0 {
+		doc["clients"] = scope.Clients
+	}
+	if len(scope.KeyHashes) > 0 {
+		doc["key_hashes"] = scope.KeyHashes
+	}
+	if len(scope.Conversations) > 0 {
+		doc["conversations"] = scope.Conversations
+	}
+	return doc
+}
+
+// scheduleDocument projects a schedule; an always-active window is null rather
+// than an object with zeroed fields.
+func scheduleDocument(schedule scheduler.LimitSchedule) any {
+	if schedule.Empty() {
+		return nil
+	}
+	return map[string]any{
+		"days":         schedule.Days,
+		"start_minute": schedule.StartMin,
+		"end_minute":   schedule.EndMin,
 	}
 }
 
 func throttleProviders(infos []scheduler.ThrottleInfo) []string {
 	out := make([]string, 0, len(infos))
 	for _, inf := range infos {
-		if inf.Provider != "" {
-			out = append(out, inf.Provider)
-		}
+		out = append(out, inf.Scope.Providers...)
 	}
 	return out
 }

@@ -14,10 +14,12 @@ package main
 // answers the reserved-namespace 404.
 
 import (
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +54,14 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		if csp := w.Header().Get("Content-Security-Policy"); csp != "frame-ancestors 'none'" {
 			t.Errorf("%s: Content-Security-Policy = %q, want frame-ancestors 'none'", name, csp)
 		}
+		// One owner writes the transport fence, so the sniffing and referrer
+		// guards travel with every denial shape here too.
+		if nosniff := w.Header().Get("X-Content-Type-Options"); nosniff != "nosniff" {
+			t.Errorf("%s: X-Content-Type-Options = %q, want nosniff", name, nosniff)
+		}
+		if rp := w.Header().Get("Referrer-Policy"); rp != "no-referrer" {
+			t.Errorf("%s: Referrer-Policy = %q, want no-referrer", name, rp)
+		}
 		if wantBody != "" && w.Body.String() != wantBody {
 			t.Errorf("%s: body = %q, want %q", name, w.Body.String(), wantBody)
 		}
@@ -62,6 +72,43 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		w := httptest.NewRecorder()
 		gate.handleOperatorSession(w, httptest.NewRequest(http.MethodGet, "http://proxy.example/session", nil))
 		assertDenial(t, "405", w, http.StatusMethodNotAllowed, "")
+		if got, want := w.Header().Get("Allow"), "POST, DELETE"; got != want {
+			t.Errorf("405 Allow = %q, want %q", got, want)
+		}
+	})
+
+	// DELETE is the other half of the handshake: sign-out must expire the
+	// cookie the POST minted, with the same Path, HttpOnly, Secure and SameSite
+	// attributes, so the browser cannot keep a stale copy while a differently
+	// drawn cookie lingers beside it.
+	t.Run("sign-out expires the session cookie", func(t *testing.T) {
+		gate := newOperatorGate(token)
+		r := httptest.NewRequest(http.MethodDelete, "https://proxy.example/session", nil)
+		w := httptest.NewRecorder()
+		gate.handleOperatorSession(w, r)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("DELETE status = %d, want 204", w.Code)
+		}
+		cookies := w.Result().Cookies()
+		if len(cookies) != 1 {
+			t.Fatalf("DELETE set %d cookies, want exactly the expired one", len(cookies))
+		}
+		got := cookies[0]
+		if got.Name != sessionCookieName || got.Value != "" || got.MaxAge != -1 || !got.Expires.Before(time.Now()) {
+			t.Errorf("expired cookie = %+v, want %q cleared with MaxAge -1 and a past Expires", got, sessionCookieName)
+		}
+		// TLS request: Secure must be derived the same way the mint derives it.
+		if got.Path != "/" || !got.HttpOnly || !got.Secure || got.SameSite != http.SameSiteStrictMode {
+			t.Errorf("expired cookie attributes = path %q httpOnly %v secure %v sameSite %v", got.Path, got.HttpOnly, got.Secure, got.SameSite)
+		}
+	})
+
+	t.Run("sign-out on an unarmed plane", func(t *testing.T) {
+		gate := newOperatorGate("")
+		w := httptest.NewRecorder()
+		gate.handleOperatorSession(w, httptest.NewRequest(http.MethodDelete, "http://proxy.example/session", nil))
+		assertDenial(t, "403 sign-out", w, http.StatusForbidden,
+			"{\"error\":\"operator plane is disabled: set MILLIVOLT_OPERATOR_TOKEN to enable it\"}\n")
 	})
 
 	t.Run("unarmed plane", func(t *testing.T) {
@@ -165,9 +212,62 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		if response.StatusCode != http.StatusNoContent || len(response.Cookies()) != 1 {
 			t.Errorf("POST /session: status = %d cookies = %d, want 204 + the minted cookie", response.StatusCode, len(response.Cookies()))
 		}
-		// The cross-origin protection wrapper stayed on the moved route.
-		if crossOrigin := post("/session", "https://foreign.example"); crossOrigin.StatusCode != http.StatusForbidden {
-			t.Errorf("foreign origin on POST /session: status = %d, want 403 (the wrapper stayed)", crossOrigin.StatusCode)
+		// Sign-out travels the same installed route and needs no credential:
+		// the wrapper gates it, and the handler expires the cookie.
+		signOut, err := http.NewRequest(http.MethodDelete, endpoint.URL+"/session", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signOut.Header.Set("Origin", endpoint.URL)
+		signOutResponse, err := http.DefaultClient.Do(signOut)
+		if err != nil {
+			t.Fatalf("DELETE /session: %v", err)
+		}
+		t.Cleanup(func() {
+			signOutResponse.Body.Close()
+			_, _ = io.Copy(io.Discard, signOutResponse.Body)
+		})
+		if signOutResponse.StatusCode != http.StatusNoContent || len(signOutResponse.Cookies()) != 1 ||
+			!signOutResponse.Cookies()[0].Expires.Before(time.Now()) {
+			t.Errorf("DELETE /session: status = %d cookies = %d, want 204 + the expired cookie",
+				signOutResponse.StatusCode, len(signOutResponse.Cookies()))
+		}
+		// The cross-origin protection wrapper stayed on the moved route, and
+		// its denial carries the shared denial shape (no-store, unframeable,
+		// flat body) instead of the stdlib bare http.Error text.
+		crossOrigin := post("/session", "https://foreign.example")
+		if crossOrigin.StatusCode != http.StatusForbidden {
+			t.Fatalf("foreign origin on POST /session: status = %d, want 403 (the wrapper stayed)", crossOrigin.StatusCode)
+		}
+		if got := crossOrigin.Header.Get("Cache-Control"); got != "no-store" {
+			t.Errorf("cross-origin denial Cache-Control = %q, want no-store", got)
+		}
+		if got := crossOrigin.Header.Get("Content-Security-Policy"); got != "frame-ancestors 'none'" {
+			t.Errorf("cross-origin denial CSP = %q, want frame-ancestors 'none'", got)
+		}
+		// The transport fence is one gate-level owner, so the sniffing and
+		// referrer guards hold on this denial and on the admitted answer above
+		// without either handler writing them.
+		for name, header := range map[string]string{
+			"X-Content-Type-Options": "nosniff",
+			"Referrer-Policy":        "no-referrer",
+		} {
+			if got := crossOrigin.Header.Get(name); got != header {
+				t.Errorf("cross-origin denial %s = %q, want %q", name, got, header)
+			}
+			if got := response.Header.Get(name); got != header {
+				t.Errorf("admitted handshake %s = %q, want %q", name, got, header)
+			}
+		}
+		if got := crossOrigin.Header.Get("Content-Type"); got != "text/plain; charset=utf-8" {
+			t.Errorf("cross-origin denial Content-Type = %q, want the shared denial transport", got)
+		}
+		body, err := io.ReadAll(crossOrigin.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), "cross-origin request") {
+			t.Errorf("cross-origin denial body = %q, want the reason", body)
 		}
 		// The retired /admin spelling of the handshake must be gone: an
 		// old-style request answers the reserved-namespace 404, never the
@@ -179,4 +279,129 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 			t.Errorf("POST %s: status = %d, want the reserved-namespace 404", retired, response.StatusCode)
 		}
 	})
+}
+
+// TestSessionCookieNonceUsesTheDeclaredLength pins the nonce to its single
+// owner: the mint wrote a literal 16 while validSession rejected anything but
+// sessionNonceLen, so a changed constant would mint cookies the verifier
+// refuses. The table proves the minted nonce length and the acceptance agree.
+func TestSessionCookieNonceUsesTheDeclaredLength(t *testing.T) {
+	gate := newOperatorGate(strings.Repeat("k", 32))
+	cookie, err := gate.mintSessionCookie(httptest.NewRequest(http.MethodGet, "/", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(cookie.Value, ".")
+	if len(parts) != 4 {
+		t.Fatalf("cookie shape = %q", cookie.Value)
+	}
+	nonce, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nonce) != sessionNonceLen {
+		t.Fatalf("minted nonce is %d bytes, want the declared %d", len(nonce), sessionNonceLen)
+	}
+	if !gate.validSession(cookie) {
+		t.Fatal("a freshly minted cookie does not verify")
+	}
+}
+
+// TestValidSessionCookieClearsTheFailureBudget pins the documented "a verified
+// credential is admission": a correct session cookie must clear the throttle
+// entry, exactly like a correct Bearer, so an armed lockout cannot survive a
+// working session. Two rows cover the two halves: the cookie is admitted and
+// the budget resets.
+func TestValidSessionCookieClearsTheFailureBudget(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	gate := newOperatorGate(token)
+	_, handler := newOperatorMux(gate, config.Default())
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	// The httptest server sets RemoteAddr itself, so the key is the loopback
+	// peer the two sides actually use.
+	const ip = "127.0.0.1"
+	cookie, err := gate.mintSessionCookie(httptest.NewRequest(http.MethodGet, "/", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Four wrong guesses, one short of the lockout.
+	for range authFailureThreshold {
+		req, err := http.NewRequest(http.MethodGet, server.URL+"/metrics/bootstrap", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer wrong")
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	gate.limiter.mu.Lock()
+	before := gate.limiter.entries[ip].failures
+	gate.limiter.mu.Unlock()
+	if before != authFailureThreshold {
+		t.Fatalf("tracked failures = %d, want %d", before, authFailureThreshold)
+	}
+	// A valid cookie now clears the entry.
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/metrics/bootstrap", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.RemoteAddr = ip + ":5000"
+	req.AddCookie(cookie)
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	// /metrics/bootstrap is gated but unregistered here, so the reserved
+	// namespace answers 404 once the gate has admitted the request.
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("cookie-authenticated request = %d, want the reserved 404 (admitted)", resp.StatusCode)
+	}
+	gate.limiter.mu.Lock()
+	_, held := gate.limiter.entries[ip]
+	gate.limiter.mu.Unlock()
+	if held {
+		t.Fatal("a verified session cookie left the failure budget armed")
+	}
+}
+
+// deadlineRecorder counts read-deadline arms made through its ResponseWriter.
+// http.ResponseController discovers the optional interface, so a handler that
+// arms a bound shows up here even without a real network connection.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	arms int
+}
+
+func (d *deadlineRecorder) SetReadDeadline(time.Time) error {
+	d.arms++
+	return nil
+}
+
+// TestSessionHandshakeBodyDeadlineAppliesToEveryRead pins the handshake's own
+// pre-auth bound: the delivery layer re-arms the generic idle bound before each
+// body read, so one arm before the handler was overwritten on the first read
+// and the constant was inert. The bound must be re-armed per read, and the
+// form must still be read.
+func TestSessionHandshakeBodyDeadlineAppliesToEveryRead(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	gate := newOperatorGate(token)
+	form := url.Values{"token": {token}}.Encode()
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	r := httptest.NewRequest(http.MethodPost, "http://proxy.example/session", strings.NewReader(form))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	gate.handleOperatorSession(rec, r)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want the form 303; body %s", rec.Code, rec.Body.String())
+	}
+	// One arm before the handler plus at least one per body read; a single arm
+	// in total is the inert-deadline regression.
+	if rec.arms < 2 {
+		t.Fatalf("read deadline armed %d times, want one per read", rec.arms)
+	}
 }

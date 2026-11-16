@@ -142,7 +142,7 @@ components:
     padding: "16px 18px"
 ---
 
-# Design System: millivolt
+# Design system: millivolt
 
 ## Overview
 
@@ -150,7 +150,7 @@ components:
 
 The dashboard is a precision measurement instrument, not a content site. It borrows the physical language of a bench instrument: a warm near-black case, hairline seams, engraved mono labels, one blue indicator lamp, and a graduated scale printed along the edges. It is dense because the operator reads it at a glance, not because density is a style.
 
-One instrument, one ruler. The menu-like surfaces share one box recipe and, in most cases, one anatomy: a titled head, a grouped body and an optional action foot; the chart, timeframe and provider pickers also share one open and close lifecycle. Time is a ruler drawn over the stored history rather than a dropdown of abstract windows. The world extends the incumbent dashboard: the same warm panels, mono readouts, blue chrome ink and the 1px/7px tick rail. Nothing here introduces a second visual world.
+One instrument, one ruler. The menu-like surfaces share one box recipe and, in most cases, one anatomy: a titled head, a grouped body and an optional action foot; the chart, timeframe and provider pickers also share one open and close lifecycle. The operator console is the one policy surface: it adopts the same `.mn` lifecycle and box, then adds its own rail, workspace pane and session ledger. Time is a ruler drawn over the stored history rather than a dropdown of abstract windows. The world extends the incumbent dashboard: the same warm panels, mono readouts, blue chrome ink and the 1px/7px tick rail. Nothing here introduces a second visual world.
 
 Depth is tone first. Panels are flat, separated by a hairline and a very wide, low-alpha ambient shadow; the stronger lifts belong to menus, sheets and the drawer. There are no decorative gradient backdrops, no glow blobs, no hard offset blocks and no deck of rounded cards.
 
@@ -159,7 +159,7 @@ Depth is tone first. Panels are flat, separated by a hairline and a very wide, l
 - One blue chrome accent; violet, teal and status hues speak only as data or state.
 - Mono for every number, status and menu row; sans only for prose, setting names, titles and narrow header action labels.
 - Hairline borders and the graduated 1px/7px tick rail as the recurring motif.
-- 44px touch targets on the shared controls (menu rows and chips, triggers, the status filter, provider fields, sheet actions) wherever the pointer is coarse or the viewport is narrow.
+- 44px touch targets on the shared controls (menu rows and chips, triggers, the status filter, provider fields, sheet actions) on coarse pointers, with the console keeping its 38px rung on a narrow fine pointer.
 - The one-screen side-by-side lock exists only at 1200px by 750px and larger.
 
 ## Colors
@@ -183,7 +183,7 @@ The palette is a warm instrument case, deliberately the inverse of the default b
 - **Hairline Warm** (#2b2620): every default 1px divider and border.
 - **Hairline Strong** (#3a342b): menu outlines, panel edges, active borders and field strokes.
 - **Instrument Ink** (#e8e4de): primary text and values.
-- **Faded Engraving** (#97907e): labels, units, secondary facts and muted copy.
+- **Faded Engraving** (#97907e): labels, units, secondary facts and muted copy. Anything painted under its own opacity (disabled controls, off rows, rail miss counts) starts from the deeper faded-ink token (`--muted-off`, #e4e0d9 on Black and #07080a on Clear) so the composite, not the token alone, clears 4.5:1 at .6 and .7.
 - **Cancelled Ash** (#a8a096): the client-cancelled outcome, distinct from muted copy and from status ink.
 
 ### Status
@@ -198,16 +198,16 @@ The palette is a warm instrument case, deliberately the inverse of the default b
 ### Brand
 - **Scale Tick Violet** (#7a72a0) and **Scale Base Violet** (#56507a): the brand mark's graduated scale and baseline. The favicon mirrors them because a standalone SVG cannot resolve `var()`.
 
-### Light Surface
+### Light surface
 - **Clear Case** (#f7f2e8), **Clear Panel** (#fffdf7) and **Clear Ink** (#2a241a): the light family's ground, panel and text. The theme system owns the rest of the light palette.
 
-### Palette Variants
+### Palette variants
 The shipped shell carries eight palettes (Instrument, Slate, Midnight, Nord, Forest, Rose, Ember, Contrast), each in Black and Clear. Every palette block owns six surface roles, four accent roles and two material roles (shadow and veil hue) for both modes; the mode block owns text, status, scrim alpha and brand neutrals. Instrument Black is the canonical family, mirrored between the `:root` block and `themes.css`. Contrast is the maximum-separation pair.
 
-### Alpha Ladder
+### Alpha ladder
 Shared strengths keep tints from drifting surface by surface: status pills rest at 13% tint and 16% once they flag an operator-visible state; hover halos sit at 14%; a selected palette row tints at 6%; the tick strip washes at 7% and its major tick at 11%; scrims sit at 35% for menu sheets and 72/60/55% for dialogs, storms and the drawer.
 
-### Named Rules
+### Named rules
 **The Chrome-Not-Paint Rule.** Signal blue is chrome ink: hairlines, focus edges, checks, selection edges and one filled commit action for the decision at hand. Ambient blue stays a tint, 6% on a selected palette row, 10% on a pressed chip and 15% on the live pill, so a saturated blue fill always means commit.
 
 ## Typography
@@ -227,7 +227,7 @@ Shared strengths keep tints from drifting surface by surface: status pills rest 
 - **Control** (400, 11px): buttons, triggers and menu rows.
 - **Label** (600, 9px, letter-spacing 0.12em): KPI labels; section and column labels run 9px to 10px at 0.05em to 0.08em.
 
-### Named Rules
+### Named rules
 **The Readout Is Mono Rule.** Every measured value, identifier, status word, table cell and menu row is mono with tabular numerals. Sans is reserved for explanatory prose, help text, setting names, titles, sheet prose and the narrow header action labels.
 
 ## Layout
@@ -243,20 +243,24 @@ Only a viewport at least 1200px wide and 750px tall locks the whole page to the 
 Responsive steps:
 - 1200px by 750px: enter the locked one-screen instrument.
 - 900px: explorer rail becomes the dimension picker.
-- 800px: header actions become a full-width flyout under the rail; chart and provider menus become bottom sheets while the dimension picker stays a dropdown under its trigger; menu rows and chips, triggers, the status filter, provider fields and sheet actions reach 44px.
+- 800px: the operator readout stays in the header, where it is the one always-visible operator state; the theme and Settings triggers move into a full-width actions flyout under the rail. Activating the readout opens the operator console as a bottom sheet, while the theme tray stays an inline panel in the flyout. Chart and provider menus become bottom sheets while the dimension picker stays a dropdown under its trigger; the flyout's controls and the shared menu rows and chips reach 44px. The console workspace keeps its 38px rung on a fine pointer and takes 44px on a coarse pointer.
 - 720px: settings sheet goes single column, drawer goes full width.
 - 640px: phone padding (14px by 10px), 12px card padding, two-column KPI band, footer wraps.
 - 480px: chart totals widen their floor and wrap.
 - 440px: an odd final KPI tile spans the row.
 - 360px: the theme caption bar stacks.
 
-Touch follows `--tap` (44px) for menu rows and chips, triggers, the status filter, provider fields and sheet actions at 800px and below or on any coarse pointer; small utility affordances (copy, collapse, drawer navigation) keep their 32px to 38px boxes. Dense 24px to 28px controls remain on a fine pointer at desktop width.
+Touch follows `--tap` (44px) for menu rows and chips, triggers, the status filter, provider fields and sheet actions at 800px and below or on any coarse pointer; the console workspace uses a 38px rung at 800px and below on a fine pointer and the 44px target on any coarse pointer. Dense 24px to 28px controls remain on a fine pointer at desktop width. Small
+utility affordances (copy, collapse, drawer navigation) keep their 32px to 38px
+boxes on a fine pointer only; the drawer header is the way through and out of a
+request on a phone, so its navigation, copy and close take the 44px target at
+any coarse pointer.
 
-## Elevation & Depth
+## Elevation & depth
 
 Depth is tonal. A surface steps up by fill (`case` to `panel` to `panel-raised`), gains a 1px hairline, and only then receives a wide, low-alpha ambient shadow. Nothing uses a hard offset block or a colored glow as structure; the strongest lifts belong to menus, sheets and the drawer, and every one is still a soft wash rather than a hard edge.
 
-### Shadow Vocabulary
+### Shadow vocabulary
 - **Card** (`0 1px 0 color-mix(in srgb, var(--text) 3%, transparent) inset, 0 12px 28px rgba(var(--shadow-rgb), .24)`): every content card, with a faint top highlight.
 - **Rail** (`0 10px 24px rgba(var(--shadow-rgb), .30)` header, `0 -10px 24px rgba(var(--shadow-rgb), .28)` footer): keeps scrolling content from bleeding into the instrument rails.
 - **Menu and sheet** (`0 12px 32px rgba(var(--shadow-rgb), .5)`): the shared lift for anchored panels and sheets.
@@ -268,7 +272,7 @@ Depth is tonal. A surface steps up by fill (`case` to `panel` to `panel-raised`)
 
 Light mode retunes the same shadows to a warm, lower-alpha family so they do not read as soot. Keyboard focus uses a 1px accent outline plus a 3px halo at 12% accent; pressed and hover states strengthen the halo to 14%.
 
-### Named Rules
+### Named rules
 **The Soft-Lift Rule.** Depth never comes from a hard offset block. Surfaces separate by tone and a hairline first, and any shadow is a wide, low-alpha ambient wash.
 
 ## Shapes
@@ -290,17 +294,17 @@ The signature silhouette is the graduated scale: a 1px minor tick every 7px and 
 
 ## Components
 
-### Action Button
+### Action button
 Quiet machine controls: small mono labels, a raised panel fill, a hairline border and one accent step on hover.
 
 - **Shape:** softly squared (8px), 5px by 12px padding, 11px mono.
 - **Base:** raised fill (`panel-raised`), hairline border (`hairline-strong`), muted ink; hover moves ink to primary and the border to Signal Blue with a 3px halo.
-- **Accent:** Signal Blue fill with case-colored ink and 600 weight; hover uses Signal Blue Hover. Reserved for commit actions such as Apply and Restart now.
-- **Danger:** three weights, a 16% tint fill, a 7% outline and a solid Fault Coral fill. The most destructive action on a surface wears the solid fill.
-- **Focus / Disabled:** 1px accent outline at 1px offset; disabled drops to 45% opacity with the neutral skin.
+- **Accent:** Signal Blue fill with case-colored ink and 600 weight; hover uses Signal Blue Hover. Reserved for the one commit action on a surface, such as `apply limit`, `hold traffic`, `start capture`, `download`, `apply` or `restart now`.
+- **Danger:** two weights, a 16% tint fill for a repeatable scoped action and a solid Fault Coral fill for the one irreversible action on a surface. A confirmation dialog pairs a neutral Cancel with the solid weight.
+- **Focus / Disabled:** 1px accent outline at 1px offset; disabled drops to 60% opacity with the neutral skin and the faded-affordance ink, whose composite still clears 4.5:1.
 
-### Menu Panel
-The shared panel language the chart and timeframe controls use, and the box recipe the converted menus follow: one titled head, one grouped body and an optional action foot. Placement is JS-owned; the box is the same whether it is anchored or a bottom sheet.
+### Menu panel
+The shared `.mn` foundation the timeframe control and generated choice menus use, and the box the operator console extends: one titled head, one grouped body and an optional action foot. Placement, sheet conversion, dismissal and focus are JS-owned; the box is the same whether it is anchored or a bottom sheet. The theme tray keeps the older header-panel box.
 
 - **Shape:** 10px radius (12px as a sheet), 1px `hairline-strong` border, Case Panel fill, menu shadow. Width defaults to 340px, clamped to `calc(100vw - 16px)`.
 - **Head:** 11px/600 mono title with an optional 10px muted subline, 10px top and 12px side padding.
@@ -310,16 +314,27 @@ The shared panel language the chart and timeframe controls use, and the box reci
 - **Foot:** a 1px top hairline and space-between actions; only surfaces with a commit step use it.
 - **Open:** fades in from 4px above over 160ms ease-out. As a sheet it sits 8px from the window edges over a 35% scrim.
 
-### Timeframe Control
+### Operator console
+The header's one operator surface. A compact readout button carries a state dot and the current state words: `steady`, `paused 1 · capture 1 · limits 2`, or `restarting · step N`. The dot is muted at steady, accent when a policy is active and amber and pulsing during a restart; the trigger border follows the same state. It is a status summary, not a live region, and its accessible label carries the same words.
+
+- **Frame:** `.mn.oc` is a compact anchored panel: the shared shell at a 520px width, capped at `min(560px, calc(100dvh - 24px))` with a scrolling pane, so opening it never resizes the page around it. At 800px and below it is a bottom sheet over the shared scrim.
+- **Head:** console mark, a 12px mono title, the 10px state line and the shared close button with its `esc` hint. No tick strip: the head is a rail-toned band with one hairline.
+- **Rail:** six lowercase sections (overview, limits, pause, capture, export, system) in one horizontal, thumb-scrollable chip strip; the active chip takes an accent bottom edge and limits, pause and capture carry a tabular count badge. At 560px and below the strip becomes a three-column grid so all six stay reachable.
+- **Pane:** the section workspace scrolls on its own inside the fixed frame. Overview opens with the in-force register and the queue; the four traffic facts stay in the page band above the console, so the same numbers never appear twice on one screen. Rule rows are one calibration line: a 56px kind tag in the state color, the scope, the budget or schedule, and a live column with actions.
+- **Foot:** the bounded session ledger, one line of mono receipt text and an Undo button. The ledger is page-session memory, not a durable log.
+- **Confirmation:** consequential actions use the shared operator dialog, not a second click on the trigger. Cancel takes initial focus and the confirm button names the action.
+- **Touch:** 38px controls at 800px and below on a fine pointer; the 44px target on any coarse pointer.
+
+### Timeframe control
 Time is a ruler over real stored history. The panel draws the coverage rail, the zoom ladder and the calendar presets, and it disables any window wider than the data.
 
 - **Shape:** a 320px menu panel opened from the chart-head clock trigger, anchored to the end of the trigger or dropped as a sheet under 800px.
 - **Coverage rail:** 6px high, 3px radius, hairline border, the tick strip as its ground; a 45% Signal Blue fill spans the selection from the earliest stored request to now.
 - **Note and ceiling:** a 10px muted note names the two ends (`4.37m of history · since 00:18`); when any window is gated, a 10px ceiling line states `disabled windows need more stored history` once, in text.
-- **Groups:** `zoom` holds 1m through 1y plus all; `calendar` holds today, yesterday, this week and this month. Disabled chips sit at 45% and explain the limit in their title.
+- **Groups:** `zoom` holds 1m through 1y plus all; `calendar` holds today, yesterday, this week and this month. Disabled chips sit at 60% and explain the limit in their title.
 - **Behavior:** one pick repaints the rail, closes the panel and returns focus to the trigger. The trigger label reads `last 1h`, `all time` or the calendar name.
 
-### Chart-Head Trigger
+### Chart-head trigger
 The card-head control that names the current metric, window or percentile without opening a native select.
 
 - **Shape:** 24px high on a fine pointer, 7px radius, 4px by 10px padding, 11px mono, raised fill and hairline border.
@@ -327,7 +342,7 @@ The card-head control that names the current metric, window or percentile withou
 - **States:** muted ink at rest; hover and expanded move to primary ink and an accent border. Focus is a 2px accent outline at 2px offset.
 - **Touch:** 44px high with 12px inline padding at 800px and below or on coarse pointers.
 
-### KPI Tile
+### KPI tile
 An instrument readout cell, not a card: no radius, no shadow, no panel of its own.
 
 - **Band:** one hairline panel (8px radius) with auto-fit cells and 1px dividers; the first cell has no left border.
@@ -336,22 +351,22 @@ An instrument readout cell, not a card: no radius, no shadow, no panel of its ow
 - **Composition rail:** the in-flight tile adds a 4px split rail (Signal Blue sending, violet throttled, amber paused, muted pending).
 - **Baseline:** a 6px feathered tick strip closes the band.
 
-### Status Pill
+### Status pill
 The request outcome in one compact token, read by color and word together.
 
 - **Shape:** 1px by 7px padding, 4px radius, 10px/600 mono.
 - **Tint:** 13% of the status hue behind its own ink; paused, throttled and debug pills strengthen to 16% and become clickable; the live pill pulses between full and 55% opacity over 1.6s.
 - **Set:** ok, err, warn, cancel (neutral ash), live, paused, throttled, debug. A bare 429 is throttling, not an error.
 
-### Request Status Select
+### Request status select
 The one deliberate native control: the operating system picker is the accessible touch affordance for a long filter vocabulary.
 
 - **Shape:** native select, 6px radius, 10px type in the card head (`all status`), raised fill and a `hairline-strong` border.
-- **States:** hover and focus move the border to Signal Blue. On touch it takes the full 44px target.
+- **States:** hover and focus move the border to Signal Blue; a keyboard focus adds the shared focus outline. On touch it takes the full 44px target.
 - **Grouping:** an `all status` row, then `live states` and `http status` optgroups; a persisted value outside those groups keeps an ungrouped option so the control never loses its value.
 - **Recorded exception:** the closed control is the designed surface; the native popup itself is not styled or replaced.
 
-### Provider Picker
+### Provider picker
 The settings sheet's add-provider menu: the shared panel recipe at a narrower width, with an entity glyph per row and a free-label field.
 
 - **Shape:** 10px radius, 12px padding, 10px gap, 290px preferred width clamped to the sheet.
@@ -359,22 +374,22 @@ The settings sheet's add-provider menu: the shared panel recipe at a narrower wi
 - **Custom field:** raised rail fill, 7px radius, 1px `hairline` border; the add action is a small button at the end.
 - **Phone:** becomes a bottom sheet at 8px insets with the full-width custom field.
 
-### Settings Rail and Sheet
+### Settings rail and sheet
 Settings reads as an explorer topology, not a form dump: a modal sheet with a fixed category rail and a field pane.
 
 - **Sheet:** 1080px maximum width, 14px radius, Case Panel fill, strong hairline, settings shadow; header and footer use the rail fill with a 7px tick strip.
 - **Rail:** 220px column on Rail Shadow; rows share the explorer rail chrome (7px radius, 2px active left edge) with the category's entity color and a right-aligned tabular count.
 - **Fields:** label in 12px/600 sans, control in 12px mono on a raised fill with 8px radius; each row is a `1fr / minmax(220px, 300px)` grid separated by a hairline.
-- **States:** search hits accent the count, misses drop to 40%; disabled fields sit at 50%; the settings switch is the only capsule control (36px by 20px, 10px track radius, round knob).
+- **States:** search hits accent the count, misses drop to 70%; disabled fields sit at 70%; the settings switch is the only capsule control (36px by 20px, 10px track radius, round knob).
 - **Actions:** Revert is a ghost button, Apply is the one accent-filled commit. At 720px the rail becomes a wrapped strip and rows go single column.
 
-## Do's and Don'ts
+## Do's and don'ts
 
 ### Do:
 - **Do** set every measured value in mono with `font-variant-numeric: tabular-nums`, and keep numerals from shifting as live data lands.
 - **Do** keep Signal Blue to chrome and one filled commit action for the decision at hand; let rarity carry the meaning.
 - **Do** wear the graduated tick rail at rail edges, readout bands and day rules, feathered by a directional mask.
-- **Do** hold 44px targets on menu rows and chips, triggers, the status filter, provider fields and sheet actions at coarse pointers and at 800px and below, while keeping the dense 24px to 28px controls on a fine desktop pointer.
+- **Do** hold 44px targets on menu rows and chips, triggers, the status filter, provider fields and sheet actions at coarse pointers and at 800px and below, while keeping the dense 24px to 28px controls on a fine desktop pointer; the console uses its 38px narrow rung on a fine pointer.
 - **Do** keep the side-by-side pair for viewports at least 1200px wide and 750px tall, and stack everything below that.
 - **Do** write sentence case and lowercase labels, preserve identifiers, protocol names and acronyms, and use sentence punctuation instead of em dashes.
 - **Do** treat a status pill's tint as 13% of its own status hue, strengthening to 16% only when the state needs operator attention.
@@ -383,7 +398,7 @@ Settings reads as an explorer topology, not a form dump: a modal sheet with a fi
 - **Don't** introduce a second accent wash, a gradient hero or a deck of rounded, shadowed cards; the band and cards are one instrument.
 - **Don't** hard-code a new palette, font or shadow color; `themes.css` theme blocks own surfaces, accents and material hues for both modes.
 - **Don't** restyle or replace the native request-status popup; the closed control is the designed surface.
-- **Don't** nest a second scroller inside the 800px header flyout or inside a menu panel; one surface owns vertical scrolling.
+- **Don't** nest a second scroller inside the 800px header flyout or inside a menu panel; one surface owns vertical scrolling. The operator console is the workspace exception: its frame stays fixed while the rail and the active pane own their scroll.
 - **Don't** use a hard offset shadow, a 3px decorative side tab or a colored glow blob as structure; use tone, a hairline and the soft leading tick.
 - **Don't** set copy or labels below 9px, drop tabular numerals, or set prose in mono; the rule-trace annotation at 8.5px is the single exception.
 - **Don't** use uppercase or letter-spaced eyebrows as decoration; labels are lowercase or sentence case and earn their tracking from function.

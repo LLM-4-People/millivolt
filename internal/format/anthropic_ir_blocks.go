@@ -172,7 +172,7 @@ func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any
 func encodeAnthropicTools(in []ir.Tool) []map[string]any {
 	out := make([]map[string]any, 0, len(in))
 	for _, t := range in {
-		tool := map[string]any{"name": t.Name}
+		tool := map[string]any{"name": t.ModelName()}
 		if t.Description != "" {
 			tool["description"] = t.Description
 		}

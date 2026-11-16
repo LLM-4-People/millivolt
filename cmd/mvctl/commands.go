@@ -56,6 +56,12 @@ func registry() []Command {
 			Flags: []flagSpec{
 				{name: "query-timeout", kind: kindDuration, usage: fmt.Sprintf("bound the SQL read (default %s)", defaults.QueryTimeout)},
 			}, Run: cmdQuery},
+		{Name: "chart", Group: "view", Summary: "Server-authoritative time series",
+			Flags: []flagSpec{
+				{name: "window", kind: kindString, usage: "all history or a positive whole number of minutes (default all)"},
+				{name: "filter", kind: kindString, usage: "comma-separated scope filters as dim:id (client, provider, model, conversation, status, ...)"},
+				{name: "query-timeout", kind: kindDuration, usage: fmt.Sprintf("bound the fold read (default %s)", defaults.QueryTimeout)},
+			}, Run: cmdChart},
 		{Name: "prometheus", Group: "view", Summary: "Prometheus text exposition", Run: cmdPrometheus},
 		{Name: "watch", Group: "view", Summary: "Sample live counters",
 			Flags: []flagSpec{
@@ -73,6 +79,9 @@ func registry() []Command {
 			Flags: []flagSpec{
 				{name: "client", kind: kindString, usage: "comma-separated client names"},
 				{name: "provider", kind: kindString, usage: "comma-separated provider names"},
+				{name: "model", kind: kindString, usage: "comma-separated model names"},
+				{name: "key-hash", kind: kindString, usage: "comma-separated upstream key hashes"},
+				{name: "conversation", kind: kindString, usage: "comma-separated conversation ids"},
 				{name: "duration", kind: kindString, usage: mcp.CaptureDurationHelp},
 				{name: "id", kind: kindString, usage: "hold id to edit or remove"},
 				{name: "all", kind: kindBool, usage: "pause every client and provider, or remove every hold"},
@@ -120,7 +129,7 @@ func registry() []Command {
 		{Name: "restore", Group: "control", Summary: "Inspect or apply an archive",
 			Flags: []flagSpec{
 				{name: "file", kind: kindString, usage: "archive path (required)"},
-				{name: "inspect", kind: kindBool, usage: "validate and print the archive without applying it"},
+				{name: "inspect", kind: kindBool, usage: "validate and print the archive without applying it; decodes the whole database member, and is implied without --yes"},
 				{name: "reveal", kind: kindBool, usage: "print credential-class provider header values in the inspect document"},
 				restoreConfigFlag(defaults),
 				restoreDatabaseFlag(defaults),

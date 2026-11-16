@@ -258,7 +258,8 @@ func TestRequestEscapedTopLevelKeyDecodesOnce(t *testing.T) {
 			cfg := testConfig()
 			var runErr error
 			allocs := testing.AllocsPerRun(100, func() {
-				runErr = boundRequestMetadata(body, cfg)
+				var caps tokenCapScan
+				runErr = boundRequestMetadata(body, cfg, &caps)
 			})
 			if runErr != nil {
 				t.Fatalf("boundRequestMetadata = %v", runErr)
@@ -370,6 +371,7 @@ func TestRequestAggregateContentPartsBound(t *testing.T) {
 		{"aggregate at cap accepted", atCap, false},
 		{"aggregate over cap rejected", overCap, true},
 		{"aggregate across many messages rejected", `{"model":"m","messages":[` + strings.TrimSuffix(strings.Repeat(message(parts(100))+",", 300), ",") + `]}`, true},
+		{"tool-call overflow first still reports the content bound", `{"model":"m","messages":[{"role":"assistant","tool_calls":` + requestToolCallsArray(testConfig().RequestToolCallsMax+1) + `},` + message(parts(requestContentPartsMax+1)) + `]}`, true},
 		{"top-level system counts", `{"model":"m","messages":[` + message(parts(metrics.ContentPartMax)) + `],"system":` + parts(requestContentPartsMax-metrics.ContentPartMax+1) + `}`, true},
 		{"top-level system accepted at cap", `{"model":"m","messages":[` + message(parts(metrics.ContentPartMax)) + `],"system":` + parts(requestContentPartsMax-metrics.ContentPartMax) + `}`, false},
 		{"text length alone is not rejected", `{"model":"m","messages":[` + message(`"`+strings.Repeat("x", 2<<20)+`"`) + `]}`, false},

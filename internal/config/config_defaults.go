@@ -40,6 +40,11 @@ const subConversationParamMaxBytes = 64
 const (
 	DashLogRowsMin = 10
 	DashLogRowsMax = 500
+	// MaxRetriesMax is the band for max_retries. Each retry is a billed upstream
+	// send for one client request, so an unbounded value turns a typo into a
+	// million upstream calls. The neighbouring retry knobs are bounded for the
+	// same reason; this one was the exception.
+	MaxRetriesMax = 100
 	// QualityRetriesMax is the band for quality_retries (0 disables).
 	QualityRetriesMax = 3
 	// ThinkingRetriesMax is the band for thinking_retries (0 disables).
@@ -123,6 +128,13 @@ const (
 	MCPQueryMaxRowsMax    = 100000
 	MCPQueryMaxBytesMin   = 1
 	MCPCaptureMaxBytesMin = 1
+	// MCPResponseBytesMax is the largest response one MCP call reads back. A
+	// tool result above it cannot be delivered at all, so a per-surface byte
+	// budget above it is unreachable rather than generous: validation caps
+	// every MCP byte setting here, and the client reads no further. One number
+	// for both, because a setting that silently cannot take effect is worse
+	// than a rejected edit.
+	MCPResponseBytesMax = 64 << 20
 )
 
 // Discovery limits bound upstream metadata work, not total Go heap usage.

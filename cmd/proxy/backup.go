@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/atomicfile"
 	"github.com/LLM-4-People/millivolt/internal/backup"
 	backupparams "github.com/LLM-4-People/millivolt/internal/backup/params"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
 	"github.com/LLM-4-People/millivolt/internal/storage"
@@ -38,15 +40,24 @@ const (
 )
 
 func handleBackup(w http.ResponseWriter, r *http.Request) {
-	if !rejectUnless(w, r, http.MethodGet) {
+	// The audit owner sits above every gate: each terminal outcome writes one
+	// line, including a refusal that never reached the member selection.
+	members := "unparsed"
+	fail := func(why string) {
+		auditLog("backup", "outcome", "failed", "members", members, "error", why)
+	}
+	if refusal := rejectUnless(w, r, http.MethodGet); refusal != "" {
+		fail(refusal)
 		return
 	}
 	q, err := adminjson.StrictQuery(r)
 	if err != nil {
+		fail("invalid query")
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
 		return
 	}
 	if err := adminjson.DuplicateQueryKey(q, backupparams.BackupQueryKeys()...); err != nil {
+		fail(err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -55,16 +66,20 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	// the archive the same way). The gate order is parse error, duplicates,
 	// unknown keys, then the value grammar.
 	if err := adminjson.UnknownQueryKey(q, backupparams.BackupQueryKeys()...); err != nil {
+		fail(err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	wantConfig, wantDB, err := parseBackupParts(q)
 	if err != nil {
+		fail(err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	members = describeMembers(wantConfig, wantDB)
 	arch, cleanup, err := buildBackup(r.Context(), wantConfig, wantDB)
 	if err != nil {
+		fail(err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -79,15 +94,18 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	// the download never retains a second full archive copy in memory.
 	stageDir, ok := stageDirOr400(w, wantDB)
 	if !ok {
+		fail("staging directory unavailable")
 		return
 	}
 	path, size, err := backup.EncodeFile(stageDir, arch, backupCap())
 	if err != nil {
 		if errors.Is(err, backup.ErrTooLarge) {
+			fail("backup exceeds backup_max_bytes")
 			adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
 			return
 		}
-		log.Printf("backup: encode failed: %v", err)
+		logging.Printf("", "backup: encode failed: %v", err)
+		fail("encode: " + err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -97,7 +115,8 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	defer os.Remove(path)
 	f, err := os.Open(path)
 	if err != nil {
-		log.Printf("backup: open encoded archive: %v", err)
+		logging.Printf("", "backup: open encoded archive: %v", err)
+		fail("open archive: " + err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -106,21 +125,43 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	// UTC stamp>.mvb), disposition, content type and no-store.
 	proxy.WriteArtifactHeaders(w, "backup", "mvb", "application/octet-stream", time.Now(), "")
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	// Success is recorded before the body streams: a client that disconnects
+	// mid-download still leaves the fact that the archive was built and how
+	// large it was.
+	auditLog("backup", "outcome", "ok", "members", members, "bytes", size)
 	if _, err := io.Copy(w, f); err != nil {
-		log.Printf("backup: download failed: %v", err)
+		logging.Printf("", "backup: download failed: %v", err)
 	}
 }
 
 func handleRestore(w http.ResponseWriter, r *http.Request) {
-	if !rejectUnless(w, r, http.MethodPost) {
+	// One audit owner for the whole transaction, above every gate: each
+	// terminal outcome names the members, modes and inspect flag that were
+	// actually requested, so a lost response is diagnosable and a retry can be
+	// compared. Fields stay "unparsed" until their grammar accepts a value, so
+	// even the earliest refusal leaves a line.
+	members, configMode, dbMode := "unparsed", "unparsed", "unparsed"
+	inspect := false
+	audit := func(outcome string, extra ...any) {
+		fields := []any{"outcome", outcome, "members", members,
+			"config_mode", configMode, "database_mode", dbMode, "inspect", inspect}
+		auditLog("restore", append(fields, extra...)...)
+	}
+	fail := func(err error) {
+		audit("failed", "error", err.Error())
+	}
+	if refusal := rejectUnless(w, r, http.MethodPost); refusal != "" {
+		fail(errors.New(refusal))
 		return
 	}
 	q, err := adminjson.StrictQuery(r)
 	if err != nil {
+		fail(errors.New("invalid query"))
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
 		return
 	}
 	if err := adminjson.DuplicateQueryKey(q, backupparams.RestoreQueryKeys()...); err != nil {
+		fail(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -130,29 +171,37 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	// silently become the replace default). The gate order is parse error,
 	// duplicates, unknown keys, then the value grammar.
 	if err := adminjson.UnknownQueryKey(q, backupparams.RestoreQueryKeys()...); err != nil {
+		fail(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	inspect, err := queryFlag(q, backupparams.ParamInspect)
+	inspect, err = queryFlag(q, backupparams.ParamInspect)
 	if err != nil {
+		fail(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "inspect: "+err.Error())
 		return
 	}
 	wantConfig, wantDB, err := parseBackupParts(q)
 	if err != nil {
+		fail(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	configMode, err := parseRestoreMode(q, backupparams.ParamConfigMode)
+	members = describeMembers(wantConfig, wantDB)
+	mode, err := parseRestoreMode(q, backupparams.ParamConfigMode)
 	if err != nil {
+		fail(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dbMode, err := parseRestoreMode(q, backupparams.ParamDatabaseMode)
+	configMode = mode
+	mode, err = parseRestoreMode(q, backupparams.ParamDatabaseMode)
 	if err != nil {
+		fail(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	dbMode = mode
 	cap := backupCap()
 	// The upload is streamed into one private file, never read whole into heap.
 	// A database archive stages that file on the live database's volume so the
@@ -173,9 +222,20 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	// database still fails closed below when no volume exists.
 	decodeDatabase := storeAvailable && (wantDB || inspect)
 	if wantDB && !inspect && !storeAvailable {
+		audit("failed", "error", storage.ErrStorageDisabled.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, storage.ErrStorageDisabled.Error())
 		return
 	}
+	// One restore owns the whole transaction, including the upload staging and
+	// the decode: concurrent restores would otherwise each materialize a full
+	// member on the database volume at once and then queue for the same
+	// admission slot. A shared staging budget would bound the bytes more
+	// tightly, but it needs its own accounting and queue; widening the existing
+	// reload transaction over the decode reuses the one ownership mechanism
+	// that already serializes every apply phase. Inspect is serialized too
+	// because it stages and integrity-checks the same members.
+	unlock := lockRestoreTransaction()
+	defer unlock()
 	body := http.MaxBytesReader(w, r.Body, cap)
 	defer body.Close()
 	uploadFile, err := stageRestoreUpload(uploadDir, body, cap)
@@ -184,34 +244,53 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		// body and for a client that disappears mid-upload; local staging
 		// failures stay server errors instead of being misreported as a cap.
 		var readErr *restoreUploadReadError
+		if isUploadTimeout(err) {
+			// A deadline expiry used to answer the archive-cap 413, so a slow
+			// but perfectly valid restore read as "your backup is too big".
+			audit("failed", "error", "upload timed out")
+			adminjson.WriteErrorJSON(w, http.StatusRequestTimeout, "upload timed out; resend the archive")
+			return
+		}
 		if errors.Is(err, backup.ErrTooLarge) || errors.As(err, &readErr) {
+			audit("failed", "error", "backup exceeds backup_max_bytes")
 			adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
 			return
 		}
-		log.Printf("restore: stage upload: %v", err)
+		logging.Printf("", "restore: stage upload: %v", err)
+		audit("failed", "error", "stage upload: "+err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	uploadPath := uploadFile.Name()
 	defer func() {
 		if err := uploadFile.Close(); err != nil {
-			log.Printf("restore: close staged upload %s: %v", uploadPath, err)
+			logging.Printf("", "restore: close staged upload %s: %v", uploadPath, err)
 		}
 		if err := os.Remove(uploadPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("restore: remove staged upload %s: %v", uploadPath, err)
+			logging.Printf("", "restore: remove staged upload %s: %v", uploadPath, err)
 		}
 	}()
 	// Decode the staged descriptor, never its path: the bytes validated are
-	// then exactly the bytes this handler wrote.
-	arch, err := backup.DecodeFileReader(decodeDir, uploadFile, decodeDatabase)
+	// then exactly the bytes this handler wrote. The decode is held to the same
+	// backup_max_bytes ceiling as the upload: a compressed body well under the
+	// cap can expand far past it, and the pending snapshot must not be
+	// published larger than the operator configured.
+	arch, err := backup.DecodeFileReader(decodeDir, uploadFile, decodeDatabase, cap)
 	if err != nil {
 		// Without a live store there is no volume for a decoded database
 		// member; keep the endpoint's existing storage-disabled answer while a
 		// config-only archive above still decodes and applies.
 		if errors.Is(err, backup.ErrSnapshotStaging) {
+			audit("failed", "error", storage.ErrStorageDisabled.Error())
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, storage.ErrStorageDisabled.Error())
 			return
 		}
+		if errors.Is(err, backup.ErrPayloadTooLarge) {
+			audit("failed", "error", "backup payload exceeds backup_max_bytes")
+			adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup payload exceeds backup_max_bytes")
+			return
+		}
+		audit("failed", "error", "decode: "+err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -222,13 +301,14 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			dir := filepath.Dir(arch.DatabasePath)
 			if err := os.RemoveAll(dir); err != nil {
-				log.Printf("restore: remove decoded database staging %s: %v", dir, err)
+				logging.Printf("", "restore: remove decoded database staging %s: %v", dir, err)
 			}
 		}()
 	}
 	// A file-backed database member is integrity-checked in place, so the
 	// legacy staging-directory argument is empty.
 	if err := backup.ValidateSelected("", arch, decodeDatabase); err != nil {
+		audit("failed", "error", "validate: "+err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -237,10 +317,12 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if wantConfig && len(arch.Config) == 0 {
+		audit("failed", "error", "archive has no config member")
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "archive has no config member")
 		return
 	}
 	if wantDB && len(arch.Database) == 0 && arch.DatabasePath == "" {
+		audit("failed", "error", "archive has no database member")
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "archive has no database member")
 		return
 	}
@@ -255,20 +337,16 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	var configPlan *restoreConfigPlan
 	var dbGuard *restorePendingGuard
 	dbRestart := false
-	// Every apply phase that touches the database or config serializes under
-	// reloadMu. A database-only replace publishes the same PendingSnapshotPath
-	// admission slot a combined restore stages, so without this lock a failed
-	// combined restore could roll back (delete) a later database-only
-	// publication. Holding it for the whole phase also keeps config reads,
-	// writes, reloads and rollbacks serialized with SIGHUP, Settings saves, and
+	// reloadMu is already held from before the upload. A database-only replace
+	// publishes the same PendingSnapshotPath admission slot a combined restore
+	// stages, so without the lock a failed combined restore could roll back
+	// (delete) a later publication. The same lock keeps config reads, writes,
+	// reloads and rollbacks serialized with SIGHUP, Settings saves, and
 	// /admin/reload, and makes each guard rollback own only its own slot.
-	if wantConfig || wantDB {
-		reloadMu.Lock()
-		defer reloadMu.Unlock()
-	}
 	if wantConfig {
 		plan, err := prepareRestoreConfig(arch.Config, configMode)
 		if err != nil {
+			audit("failed", "error", "config: "+err.Error())
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -296,12 +374,14 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 			// config would make the next boot open a different file and strand
 			// those rows. Reject it before a config byte or row changes.
 			if err := validateRestoreMergePath(configPlan, store); err != nil {
+				audit("failed", "error", "merge path: "+err.Error())
 				adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 				return
 			}
 		}
 		needRestart, guard, err := applyRestoreDatabase(r.Context(), dbPath, arch.DatabasePath, dbMode, store)
 		if err != nil {
+			audit("failed", "error", "database: "+err.Error())
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -315,6 +395,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 					err = fmt.Errorf("%w; %v", err, rbErr)
 				}
 			}
+			audit("failed", "error", "config apply: "+err.Error())
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -329,6 +410,11 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	// ok is the operator action plane's shared success marker (the dashboard
 	// trusts the HTTP status; the restore tests pin it,
 	// tests/_go/cmd/proxy/backup_restore_stage.go).
+	restartText := strings.Join(restart, ",")
+	if restartText == "" {
+		restartText = "none"
+	}
+	audit("ok", "restart_required", restartText)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "restart_required": restart})
 }
@@ -454,6 +540,22 @@ type restoreUploadReadError struct{ err error }
 
 func (e *restoreUploadReadError) Error() string { return e.err.Error() }
 func (e *restoreUploadReadError) Unwrap() error { return e.err }
+
+// isUploadTimeout reports whether a staging failure was the delivery deadline
+// rather than a size or transport refusal. net/http surfaces an expired read
+// deadline as os.ErrDeadlineExceeded wrapped in the connection's net.OpError;
+// a transport timeout of any other origin is the same class for this answer.
+func isUploadTimeout(err error) bool {
+	var readErr *restoreUploadReadError
+	if errors.As(err, &readErr) {
+		err = readErr.err
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
 
 // stageRestoreUpload copies the bounded request body into one private file and
 // returns it open and rewound, with its path owned by the caller for removal.
@@ -742,9 +844,11 @@ func rollbackRestoreConfig(plan *restoreConfigPlan, cause error) error {
 }
 
 // restoreConfigFile atomically replaces path with the captured pre-restore
-// bytes, or removes it when the restore created it. It is the rollback owner,
-// not a second config writer: the prepared document still goes through
-// config.WriteFile.
+// bytes, or removes it when the restore created it. It publishes through the
+// same atomic writer as the forward config owner, which follows a symlinked
+// path to its target: a plain rename at the link path would replace the link
+// with a regular file while the linked target kept the restored document, and
+// the next boot would read the stale bytes.
 func restoreConfigFile(path string, raw []byte, mode os.FileMode, exists bool) error {
 	if !exists {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -752,25 +856,7 @@ func restoreConfigFile(path string, raw []byte, mode os.FileMode, exists bool) e
 		}
 		return nil
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-restore-*")
-	if err != nil {
-		return err
-	}
-	staged := tmp.Name()
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(staged)
-	}()
-	if err := tmp.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := tmp.Write(raw); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(staged, path)
+	return atomicfile.WriteFile(path, raw, mode)
 }
 
 // restorePendingGuard owns a pre-existing admission slot while a replace
@@ -782,9 +868,18 @@ type restorePendingGuard struct {
 	backup  string
 }
 
-// captureRestorePending moves a pre-existing pending snapshot aside so a failed
-// config phase can restore it byte-for-byte instead of deleting it. No pending
-// file means the guard only owns removing its newly staged successor.
+// restorePendingLinkHook is a test seam for os.Link: production is nil, so the
+// hard-link preserve owner runs unchanged. A test substitutes a failing link to
+// exercise volumes without hard links.
+var restorePendingLinkHook func(oldname, newname string) error
+
+// captureRestorePending preserves a pre-existing pending snapshot so a failed
+// config phase can restore it byte-for-byte instead of deleting it, and so a
+// crash cannot lose it either. The preserved copy is a hard link made BEFORE
+// the successor replaces the slot: both names then exist for the whole stage,
+// where a rename-aside-then-stage window left the queue empty and a crash in
+// that window let the orphan expire in the 24 h sweep. No pending file means
+// the guard only owns removing its newly staged successor.
 func captureRestorePending(dbPath string) (*restorePendingGuard, error) {
 	// The configured db_path may be a symlink. Staging and boot admission
 	// resolve it, so the preserved pending slot must be the same real-file
@@ -811,17 +906,40 @@ func captureRestorePending(dbPath string) (*restorePendingGuard, error) {
 		_ = os.Remove(backup)
 		return nil, fmt.Errorf("preserve pending snapshot: %w", err)
 	}
-	if err := os.Rename(pending, backup); err != nil {
-		_ = os.Remove(backup)
+	// CreateTemp reserved a unique name; link needs the name free.
+	if err := os.Remove(backup); err != nil {
 		return nil, fmt.Errorf("preserve pending snapshot: %w", err)
+	}
+	// Link rather than rename: the slot keeps its file while the preserved
+	// name points at the same inode, so the stage rename below is the only
+	// transition and a crash on either side still leaves a queued snapshot.
+	// The snapshot-sized bytes are never copied.
+	//
+	// A volume without hard links (exFAT/vfat, several FUSE and SMB mounts)
+	// rejects link(2). Fall back to moving the slot aside, which duplicates no
+	// bytes: the queue is briefly empty until the successor publishes, and a
+	// crash there leaves the preserved sibling for the boot re-admission.
+	link := os.Link
+	if restorePendingLinkHook != nil {
+		link = restorePendingLinkHook
+	}
+	if err := link(pending, backup); err != nil {
+		if errors.Is(err, fs.ErrExist) || errors.Is(err, fs.ErrNotExist) {
+			_ = os.Remove(backup)
+			return nil, fmt.Errorf("preserve pending snapshot: %w", err)
+		}
+		if rerr := os.Rename(pending, backup); rerr != nil {
+			_ = os.Remove(backup)
+			return nil, fmt.Errorf("preserve pending snapshot: %w", errors.Join(err, rerr))
+		}
 	}
 	g.backup = backup
 	return g, nil
 }
 
 // rollback restores the pre-existing pending snapshot, or removes the newly
-// staged one when the slot was empty. The new file is replaced by rename when
-// an old snapshot exists, so no failure window deletes the preserved bytes.
+// staged one when the slot was empty. The preserved inode is moved back by
+// rename when an old snapshot exists, so no failure window deletes it.
 func (g *restorePendingGuard) rollback() error {
 	if g == nil {
 		return nil
@@ -829,6 +947,13 @@ func (g *restorePendingGuard) rollback() error {
 	if g.backup != "" {
 		if err := os.Rename(g.backup, g.pending); err != nil {
 			return fmt.Errorf("restore preserved pending snapshot: %w", err)
+		}
+		// A stage that failed before publish's rename leaves slot and preserved
+		// name as two links of one inode, so the rename above is a no-op. Remove
+		// the sibling either way; when it already moved, this is the ignored
+		// not-exist case.
+		if err := os.Remove(g.backup); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove preserved pending snapshot: %w", err)
 		}
 		g.backup = ""
 		return nil
@@ -842,14 +967,15 @@ func (g *restorePendingGuard) rollback() error {
 	return nil
 }
 
-// discard releases the preserved copy after every later restore phase has
-// succeeded. The new pending snapshot stays in the admission slot.
+// discard drops the preserved name after every later restore phase has
+// succeeded; the inode stays reachable through the admission slot, so the
+// snapshot itself is not removed.
 func (g *restorePendingGuard) discard() {
 	if g == nil || g.backup == "" {
 		return
 	}
 	if err := os.Remove(g.backup); err != nil && !os.IsNotExist(err) {
-		log.Printf("restore: remove preserved pending snapshot %s: %v", g.backup, err)
+		logging.Printf("", "restore: remove preserved pending snapshot %s: %v", g.backup, err)
 	}
 	g.backup = ""
 }
@@ -924,7 +1050,7 @@ func applyRestoreDatabase(ctx context.Context, dbPath, source, mode string, stor
 	// Boot preflights the pending file before admitting it; a restore that
 	// stops at integrity staging would return 200 for a database the next
 	// boot rejects. Run the same preflight now, before the config is written.
-	if err := storage.ValidatePendingSnapshot(dbPath); err != nil {
+	if err := storage.ValidatePendingSnapshot(ctx, dbPath); err != nil {
 		return false, nil, rollbackRestorePending(guard, err)
 	}
 	return true, guard, nil
@@ -942,8 +1068,7 @@ func restoreDatabase(ctx context.Context, path, mode string) (restart bool, err 
 	// HTTP restore phase, so they take the same serialization lock before
 	// reading the live config or staging anything. The caller must not already
 	// hold reloadMu.
-	reloadMu.Lock()
-	defer reloadMu.Unlock()
+	defer lockRestoreTransaction()()
 	liveMu.Lock()
 	dbPath := ""
 	if liveCfg != nil {
@@ -1081,7 +1206,7 @@ func backupStatus() map[string]any {
 		// (and report a stale slot the next boot will ignore).
 		resolved, err := storage.ResolveDatabasePath(dbPath)
 		if err != nil {
-			log.Printf("backup status: %v", err)
+			logging.Printf("", "backup status: %v", err)
 		} else {
 			_, statErr := os.Stat(storage.PendingSnapshotPath(resolved))
 			pending = statErr == nil

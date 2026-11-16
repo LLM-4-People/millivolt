@@ -143,8 +143,10 @@ type Config struct {
 	// TTL is the retention of those blobs, independent of session lifetime.
 	DebugCaptureTTL time.Duration `yaml:"debug_capture_ttl" json:"debug_capture_ttl"`
 
-	// DebugCaptureMaxBytes caps one debug capture (request body + client-facing
-	// response bytes). Past the cap the rest is dropped and truncated=true.
+	// DebugCaptureMaxBytes caps one debug capture: retained header maps are
+	// charged first and the remainder is split between the request body and
+	// the client-facing response bytes. Past the cap the rest is dropped and
+	// truncated=true.
 	DebugCaptureMaxBytes ByteSize `yaml:"debug_capture_max_bytes" json:"debug_capture_max_bytes"`
 	// DebugStoreMaxBytes caps the total durable debug-capture sidecar. New
 	// captures are skipped once the sidecar would exceed it; TTL expiry frees

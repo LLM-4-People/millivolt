@@ -3,20 +3,26 @@ package metrics
 import (
 	"fmt"
 	"io"
-	"log"
 	"maps"
 	"net/http"
 	"slices"
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // HandlePrometheus renders the /metrics/prometheus exposition. It reuses the
 // last body while the finalized ring revision is unchanged, so repeated
 // scrapes skip the snapshot, aggregate, and TTFT sort. Callers register this on
 // the mux.
-func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
+//
+// extra renders state that moves without a finalized record (the durable
+// pipeline's queue depth, drops and flush failures). It runs on every scrape
+// after the memoized body, so a storage change cannot wait for the next
+// request to appear in the exposition. A nil provider renders nothing.
+func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer, extra ExtraPrometheus) {
 	if !RejectUnlessGet(w, r) {
 		return
 	}
@@ -25,7 +31,7 @@ func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
 	w.Header().Set("Cache-Control", "no-store")
 	body, err := buf.PrometheusExposition(renderPrometheusExposition)
 	if err != nil {
-		log.Printf("metrics: aggregate: %v", err)
+		logging.Printf("", "metrics: aggregate: %v", err)
 		http.Error(w, "metrics cannot be represented", http.StatusInternalServerError)
 		return
 	}
@@ -34,7 +40,17 @@ func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
 	// Best-effort write: the client may have already disconnected; nothing
 	// actionable remains at that point.
 	_, _ = io.WriteString(w, body)
+	if extra != nil {
+		// A blank line separates the blocks; the memoized body always ends
+		// inside a block, so the separator belongs to the appended one.
+		_, _ = io.WriteString(w, "\n")
+		extra(w)
+	}
 }
+
+// ExtraPrometheus is one per-scrape exposition block rendered outside the
+// memoized ring body. It must stay cheap and bounded: it runs on every scrape.
+type ExtraPrometheus func(io.Writer)
 
 // prometheusSamplePool recycles the flat TTFT scratch between scrapes. The
 // exposition is O(ring log ring) on every revision change, and a live ring

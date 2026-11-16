@@ -15,7 +15,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -23,6 +22,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
@@ -47,7 +47,8 @@ const (
 	// ranking. This is an internal guardrail, not a tunable.
 	explorerGroupBudget = 8192
 	// explorerOtherID reserves a dictionary slot that no real dimension value
-	// can occupy, so overflow memberships can still select the synthetic card
+	// can occupy, and the other card reserves the membership slot just past the
+	// group budget, so overflow memberships still select the synthetic card
 	// without colliding with an unset (zero) membership. The wire marks that
 	// card with synthetic:true; its display name is not a filter value.
 	// Internal only.
@@ -389,7 +390,7 @@ func scanContrib(rows *sql.Rows) (contrib, contribLabels, error) {
 	var startedAt, status, ttft int64
 	var gen float64
 	var errType, errCode, errMsg string
-	var attemptsJSON, toolNamesJSON []byte
+	var attemptsJSON, toolNamesJSON string
 	var model string
 	if err := rows.Scan(&c.id, &startedAt, &status, &errType, &errCode, &errMsg, &attemptsJSON,
 		&labels.client, &labels.prov, &model, &labels.key, &labels.conv, &labels.parentConv,
@@ -404,11 +405,11 @@ func scanContrib(rows *sql.Rows) (contrib, contribLabels, error) {
 	c.tps = gen
 	atts, attErr := storage.DecodeAttemptsColumn(attemptsJSON)
 	if attErr != nil {
-		log.Printf("aggregate: parse attempts for %s: %v", c.id, attErr)
+		logging.Printf("", "aggregate: parse attempts for %s: %v", c.id, attErr)
 	}
 	toolsL, toolErr := storage.DecodeToolNamesColumn(toolNamesJSON)
 	if toolErr != nil {
-		log.Printf("aggregate: parse tool names for %s: %v", c.id, toolErr)
+		logging.Printf("", "aggregate: parse tool names for %s: %v", c.id, toolErr)
 	}
 	c.toolsL = toolsL
 	r := metrics.Record{

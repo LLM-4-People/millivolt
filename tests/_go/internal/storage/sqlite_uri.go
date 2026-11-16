@@ -66,7 +66,7 @@ func TestSQLiteURIAgreementAcrossWriterReadPreflightAndInspect(t *testing.T) {
 			if err := StageSnapshot(path, data); err != nil {
 				t.Fatalf("StageSnapshot(%q): %v", path, err)
 			}
-			if err := ValidatePendingSnapshot(path); err != nil {
+			if err := ValidatePendingSnapshot(t.Context(), path); err != nil {
 				t.Fatalf("ValidatePendingSnapshot(%q): %v", path, err)
 			}
 			reopened, err := Open(path, testOpts)

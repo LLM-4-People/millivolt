@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -64,7 +65,7 @@ func cmdOverview(ctx *Context) (Result, error) {
 	pretty += "\n\n" + kv([][2]string{
 		{"storage", storageText(snapshot)},
 		{"dropped", num(snapshot.Storage.Dropped)},
-		{"pause", boolText(snapshot.Pause.Paused) + fmt.Sprintf(" (%s queued)", num(snapshot.Pause.Queued))},
+		{"pause", boolText(snapshot.Pause.Paused) + fmt.Sprintf(" (%s queued%s)", num(snapshot.Pause.Queued), gatedSuffix(snapshot.Pause.StormWaiters))},
 		{"throttles", num(float64(len(snapshot.Throttle.Throttles)))},
 		{"debug", boolText(snapshot.Debug.Enabled)},
 		{"dashboard build", shortVersion(snapshot.DashboardVersion)},
@@ -199,6 +200,55 @@ func cmdQuery(ctx *Context) (Result, error) {
 	return Result{Pretty: prettyJSON(rows), Data: rows}, nil
 }
 
+// cmdChart reads one chart fold. It goes through the query-bound client path:
+// a full-history fold outlives the generic per-request deadline, so the command
+// owns the config-derived query bound and passes the operator's override.
+func cmdChart(ctx *Context) (Result, error) {
+	if err := ctx.requireNoExtraArgs("mvctl chart"); err != nil {
+		return exitUsage(err)
+	}
+	queryTimeout := ctx.G.Settings.QueryTimeout
+	if ctx.Flags.Present("query-timeout") {
+		queryTimeout = ctx.Flags.Duration("query-timeout", queryTimeout)
+		if queryTimeout <= 0 {
+			return exitUsage(errors.New("--query-timeout must be greater than zero"))
+		}
+	}
+	values := url.Values{}
+	window := strings.TrimSpace(ctx.Flags.String("window", "all"))
+	if window == "" {
+		window = "all"
+	}
+	values.Set("window", window)
+	for _, filter := range strings.Split(ctx.Flags.String("filter", ""), ",") {
+		filter = strings.TrimSpace(filter)
+		if filter == "" {
+			continue
+		}
+		if !strings.Contains(filter, ":") {
+			return exitUsage(fmt.Errorf("--filter wants dim:id, got %q", filter))
+		}
+		values.Add("f", filter)
+	}
+	reqCtx, cancel := ctx.boundedFor(queryTimeout)
+	defer cancel()
+	var raw map[string]any
+	if err := ctx.C.GetJSONQuery(reqCtx, mcp.RouteChart, values, &raw); err != nil {
+		return Result{Code: exitFailure}, err
+	}
+	from := "n/a"
+	if fromMs, ok := raw["from_ms"].(float64); ok && fromMs > 0 {
+		from = shortTime(time.UnixMilli(int64(fromMs)))
+	}
+	pretty := heading("chart") + "\n" + kv([][2]string{
+		{"window", window},
+		{"from", from},
+		{"bucket", durPtr(float64Ptr(raw["bucket_ms"]))},
+		{"buckets", num(float64(jsonLen(raw["buckets"])))},
+	})
+	return Result{Pretty: pretty + "\n" + prettyJSON(raw), Data: raw}, nil
+}
+
 func cmdPrometheus(ctx *Context) (Result, error) {
 	if err := ctx.requireNoExtraArgs("mvctl prometheus"); err != nil {
 		return exitUsage(err)
@@ -330,6 +380,17 @@ func shortVersion(value string) string {
 		return value[:12] + "..."
 	}
 	return value
+}
+
+// gatedSuffix names requests parked by the storm/quota gate beside the
+// drainable queue. The gate runs before admission, so a drain cannot release
+// them: reporting one number for both would claim a drainable queue the
+// operator cannot drain.
+func gatedSuffix(stormWaiters float64) string {
+	if stormWaiters <= 0 {
+		return ""
+	}
+	return ", " + num(stormWaiters) + " gated"
 }
 
 func storageText(snapshot Snapshot) string {

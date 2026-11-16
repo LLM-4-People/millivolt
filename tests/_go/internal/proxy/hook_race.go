@@ -55,8 +55,8 @@ func TestHookPublishSerializesSeededHoldAndThrottleDispatch(t *testing.T) {
 	s := New(config.Default(), buf)
 	// Saturate the provider's request budget so every request parks behind
 	// OnThrottle while one admit per refill tick drains the queue.
-	s.scheduler.SetThrottle(scheduler.Throttle{
-		Provider:  provider,
+	s.scheduler.SetPolicy(scheduler.Throttle{
+		Scope:     scheduler.LimitScope{Providers: []string{provider}},
 		Limit:     scheduler.Limit{Requests: 2, ReqWindow: 20 * time.Millisecond},
 		Source:    scheduler.ThrottleSourceUI,
 		UpdatedBy: "reproducer",
@@ -81,7 +81,7 @@ func TestHookPublishSerializesSeededHoldAndThrottleDispatch(t *testing.T) {
 			// alternating (a second cycler would trip the overlap
 			// rejection), so every cycle seeds OnHold for each parked
 			// waiter on THIS goroutine.
-			if err := s.scheduler.AddHold(scheduler.Hold{ID: "hook-race", Providers: []string{provider}}); err != nil {
+			if err := s.scheduler.AddHold(scheduler.Hold{ID: "hook-race", Scope: scheduler.LimitScope{Providers: []string{provider}}}); err != nil {
 				t.Errorf("AddHold: %v", err)
 				return
 			}

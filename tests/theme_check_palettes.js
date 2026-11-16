@@ -18,7 +18,7 @@ const SURFACE_ACCENT_TOKENS = ['--bg', '--panel', '--panel2', '--rail', '--borde
 // scrim hue, so a cool Clear palette never inherits the warm Instrument soot.
 const MATERIAL_TOKENS = ['--shadow-rgb', '--veil-rgb'];
 const PALETTE_TOKENS = [...SURFACE_ACCENT_TOKENS, ...MATERIAL_TOKENS];
-const MODE_TOKENS = ['--text', '--muted', '--ok', '--warn', '--err', '--rl',
+const MODE_TOKENS = ['--text', '--muted', '--muted-off', '--ok', '--warn', '--err', '--rl',
   '--err-text', '--warn-text', '--danger-hover', '--veil', '--veil-strong',
   '--veil-soft', '--veil-rgb', '--shadow-rgb', '--neutral', '--scale-tick',
   '--scale-base', '--well-hi', '--well-lo', '--chart-grid-a'];
@@ -64,8 +64,6 @@ function contrastContract(css) {
   return {
     dangerHoverTint: cssTintPercentage(css, '.btn-danger:hover', 'err'),
     dangerHoverInk: cssInk(css, '.btn-danger:hover'),
-    dangerOutlineHoverTint: cssTintPercentage(css, '.btn-danger-outline:hover', 'err'),
-    dangerOutlineHoverInk: cssInk(css, '.btn-danger-outline:hover'),
     retryIdleTint: cssTintPercentage(css, 'tr.retry-sub td', 'warn'),
     retryIdleInk: cssInk(css, 'tr.retry-sub td'),
     retryHoverTint: cssTintPercentage(css, 'tr.retry-sub:hover td', 'warn'),
@@ -94,7 +92,6 @@ function tintContractErrors(contract) {
   const errors = [];
   for (const [label, alpha] of [
     ['danger hover', contract.dangerHoverTint],
-    ['danger outline hover', contract.dangerOutlineHoverTint],
     ['retry idle', contract.retryIdleTint],
     ['retry hover', contract.retryHoverTint],
     ['nested retry pill', contract.retryPillTint],
@@ -127,7 +124,6 @@ function inkContractErrors(contract) {
     ['selected entity', contract.entityInk, TEXT_INK],
     ['cancelled pill', contract.cancelInk, TEXT_INK],
     ['danger hover', contract.dangerHoverInk, ERR_INK],
-    ['danger outline hover', contract.dangerOutlineHoverInk, ERR_INK],
     ['retry idle', contract.retryIdleInk, MUTED_INK],
     ['retry hover', contract.retryHoverInk, TEXT_INK],
     ['nested retry pill hover', contract.retryPillHoverInk, 'var(--err-text)'],

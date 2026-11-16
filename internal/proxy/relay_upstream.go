@@ -20,21 +20,31 @@ import (
 // (metrics.ParseErrorEnvelope), defaulting the type when absent. Shared by the
 // final-response path and the per-retry-attempt log so both parse identically.
 //
-// The message is bounded (metrics.TruncatePreview) because a provider's error
-// message can echo user-supplied content and is otherwise arbitrary
+// Callers invoke it only where the response ALREADY failed (the >=400 gates in
+// ServeHTTP, the quality re-send, and the retry ladder's attempt log), so it
+// delegates to metrics.ParseFailureBody: the OpenAI/Anthropic envelope first,
+// then the reason members a non-OpenAI gateway uses (`detail`, `message`,
+// `errors[].message`). Without that second step a gateway answering
+// `{"detail":"model is not serving"}` stored a provider_error with no message
+// at all, and the dashboard showed a bare status with no reason.
+//
+// The message is bounded (metrics.RetainedErrorMsgMax) because a provider's
+// error message can echo user-supplied content and is otherwise arbitrary
 // provider-controlled bytes - the record stays bounded regardless of
 // capture_body_preview. When the (bounded) body doesn't parse (e.g. it was
-// truncated mid-token), fall back to a bounded raw prefix so the record keeps a
-// classifiable signature instead of a blank one.
+// truncated mid-token by the read bound), fall back to a bounded raw prefix so
+// the record keeps a classifiable signature instead of a blank one.
 func parseErrorBody(b []byte) (typ, code, msg string) {
 	if len(b) == 0 {
 		return "", "", ""
 	}
-	if typ, code, msg = metrics.ParseErrorEnvelope(b); typ != "" {
+	if typ, code, msg = metrics.ParseFailureBody(b); typ != "" {
 		return typ, code, msg
 	}
+	// Decodable but no extractable reason: classify, no message. This keeps a
+	// valid-JSON failure body (a decoy error value, or an object carrying no
+	// reason member) classifiable without inventing text.
 	if json.Valid(b) {
-		// Decodable but null/empty error value: classify, no message.
 		return metrics.TypeProviderError, "", ""
 	}
 	// Unparseable (e.g. an oversized body truncated mid-token): keep a
@@ -389,6 +399,18 @@ func (s *Server) admitSendAttempt(ctx context.Context, groupKey string, hooks sc
 	return own, permit, time.Now(), nil
 }
 
+// boundAttempts keeps the newest in-bound attempt entries. The attempt log is
+// appended by the transport and HTTP retry writers alike, and both share one
+// bound: the sum of the two configured retry budgets, with a one-entry floor
+// so a zero budget still records the re-send it absorbed. One owner, so neither
+// writer can outgrow the other on the same configuration.
+func (s *Server) boundAttempts(rec *metrics.Record) {
+	cfg := s.cfg()
+	if bound := max(cfg.MaxRetries+cfg.StormMaxRetries, 1); len(rec.Attempts) > bound {
+		rec.Attempts = append(rec.Attempts[:0], rec.Attempts[len(rec.Attempts)-bound:]...)
+	}
+}
+
 // absorbTransportRetry books one absorbed transport-level failure: the
 // attempt-log entry (transport class, the caller's rendered message), the
 // retry counter with a live publish, and the Trip that paces the group and
@@ -402,6 +424,7 @@ func (s *Server) absorbTransportRetry(rec *metrics.Record, groupKey, msg string,
 		ErrorMsg:   msg,
 		At:         time.Now(),
 	})
+	s.boundAttempts(rec)
 	rec.Retries++
 	s.publishUpdate(rec)
 	return s.scheduler.Trip(groupKey, s.scheduler.BackoffFor(groupKey, 0)) || own
@@ -410,9 +433,10 @@ func (s *Server) absorbTransportRetry(rec *metrics.Record, groupKey, msg string,
 // absorbHTTPRetry books one absorbed retryable HTTP response: the provider
 // retry hint (parseRetryAfter) and the attempt-log entry (status, bounded
 // error-body envelope via parseErrorBody, hint milliseconds, the response's
-// upstream metadata via captureUpstreamMeta), appended with the retry
-// counter. Returns the hint - the pacing floor for the caller's Trip and
-// RetryAfterMs stamp. The bounded body read, per-send cleanup, record
+// upstream metadata via captureUpstreamMeta), appended with the retry counter
+// through the shared attempt bound (boundAttempts).
+// Returns the hint - the pacing floor for the caller's Trip and RetryAfterMs
+// stamp. The bounded body read, per-send cleanup, record
 // stamps and publish order stay per-transport: the generic relay interplays
 // with the durable-quota 429 peek and clears stale error fields after its
 // publish; the cursor driver closes its duplex pipe and stamps before
@@ -438,6 +462,7 @@ func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBo
 	at.ErrorType, at.ErrorCode, at.ErrorMsg = parseErrorBody(errBody)
 	captureUpstreamMeta(&at, resp, authHeader)
 	rec.Attempts = append(rec.Attempts, at)
+	s.boundAttempts(rec)
 	rec.Retries++
 	return retryAfter
 }
