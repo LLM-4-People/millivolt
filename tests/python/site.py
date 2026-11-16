@@ -286,6 +286,37 @@ def shell_asset_errors(site: Path) -> list[str]:
     return errors
 
 
+def docs_shell_layout_errors(site: Path) -> list[str]:
+    """The collapsed docs rail hands its column to the article.
+
+    The open shell caps the article at a reading measure. Collapsing the menu
+    must release that cap, because tables and code otherwise wrap or scroll
+    inside a column the rail no longer occupies. Prose keeps its own 70ch
+    limit, so the extra width is spent on wide blocks rather than long lines.
+    """
+    name = referenced_shell(site, "site", "css")
+    if not name:
+        return ["no page references the site stylesheet"]
+    css = (site / "assets" / name).read_text(encoding="utf-8")
+    collapsed = re.search(r"html\.nav-collapsed\s+\.doc-main\s*\{([^}]*)\}", css)
+    if not collapsed:
+        return ["site stylesheet has no collapsed docs article rule"]
+    declarations = {}
+    for piece in collapsed.group(1).split(";"):
+        key, separator, value = piece.partition(":")
+        if separator:
+            declarations[key.strip()] = value.strip()
+    errors: list[str] = []
+    if declarations.get("max-width") != "none":
+        errors.append("a collapsed docs rail still caps the article width")
+    if declarations.get("justify-self") != "stretch":
+        errors.append("a collapsed docs rail does not stretch the article into the freed column")
+    open_rule = re.search(r"(?m)^\.doc-main\s*\{([^}]*)\}", css)
+    if not open_rule or "max-width: 780px" not in open_rule.group(1):
+        errors.append("the open docs rail no longer caps the article at the reading measure")
+    return errors
+
+
 def not_found_base_errors() -> list[str]:
     """A nested 404 must use the absolute path of whatever base it deploys on."""
     errors: list[str] = []
@@ -649,6 +680,7 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
         errors.append(f"missing referenced token stylesheet: assets/{tokens_name}")
 
     errors.extend(shell_asset_errors(site))
+    errors.extend(docs_shell_layout_errors(site))
 
     site_css_path = ROOT / SITE_STYLESHEET
     if not site_css_path.exists():

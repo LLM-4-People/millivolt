@@ -497,7 +497,10 @@ html.nav-collapsed .docs-shell {
   grid-template-areas: "main toc";
 }
 html.nav-collapsed .docs-nav-reveal { display: inline-flex; }
-html.nav-collapsed .doc-main { justify-self: center; }
+/* The collapsed rail frees its column, so the article takes it. Prose stays at
+   its reading measure; wide tables and code blocks get the room they need
+   instead of wrapping cells across lines. */
+html.nav-collapsed .doc-main { max-width: none; justify-self: stretch; }
 .nav-group { padding: 0 0 20px; }
 .nav-label { margin: 0 0 6px; color: var(--muted); font: 600 10px/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; }
 .docs-nav a {
