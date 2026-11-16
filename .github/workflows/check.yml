@@ -22,13 +22,16 @@ name: Checks and images
 #   promotion that changes a shipped artifact must also carry a VERSION newer
 #   than every existing release tag. Docs, site, tests, workflow and tooling
 #   changes do not require a version and do not rebuild images or cut a
-#   release. A docs/site-only promotion still validates Markdown, the generated
-#   site, workflow policy and docs contracts in `required`, so the docs
-#   workflow is not the only validation.
+#   release. The shipped license notices, LICENSE and THIRD_PARTY_NOTICES.md,
+#   are the one docs-filter exception: the image copies them into its license
+#   bundle, so they require a version and a release even though the docs gate
+#   validates them. A docs/site-only promotion still validates Markdown, the
+#   generated site, workflow policy and docs contracts in `required`, so the
+#   docs workflow is not the only validation.
 # - Dependabot security pull requests are the only exception. They still run the
 #   full gate. They normally create no release because their VERSION is already
-#   tagged; if main still carries an untagged pending VERSION, that merge can
-#   publish the pending version.
+#   tagged; if main still carries an untagged pending VERSION and the dependency
+#   change is release-bearing, that merge can publish the pending version.
 # - The full gate is three independent jobs. `unit` runs the default core
 #   suite (Go, Node and Python), `browser` runs the isolated Playwright
 #   fixtures and the live MCP integration test without any Node setup, and
@@ -103,10 +106,11 @@ permissions:
 
 env:
   # Release-bearing paths are the files that are compiled into, embedded in,
-  # or copied into the published image. This is deliberately narrower than
-  # "everything that is not docs": tests, workflows, site tooling, brand and
-  # gallery scripts, and repository metadata pass the full gate when needed
-  # but never force a VERSION bump or an image release.
+  # or copied into the published image, except the generated docs index below.
+  # This is deliberately narrower than "everything that is not docs": tests,
+  # workflows, site tooling, brand and gallery scripts, and repository metadata
+  # pass the full gate when needed but never force a VERSION bump or an image
+  # release.
   RELEASE_PATH_PATTERNS: >-
     VERSION version.go go.mod go.sum proxy.example.yaml Dockerfile .dockerignore
     LICENSE THIRD_PARTY_NOTICES.md
@@ -503,7 +507,9 @@ jobs:
       # the explicit check.yml push paths-ignore family: `**/*.md` becomes
       # `*.md` because a case `*` also matches `/`, and the four docs/site
       # workflow entries stay literal. check.yml is intentionally code-bearing
-      # and is never part of this family.
+      # and is never part of this family. LICENSE and THIRD_PARTY_NOTICES.md
+      # are docs-only for the gate but release-bearing because the image copies
+      # them into its license bundle.
       DOCS_PATH_PATTERNS: >-
         docs/** site-src/** scripts/build_site.py requirements-docs.txt LICENSE
         internal/docs/docs.json *.md .github/workflows/docs.yml
@@ -749,6 +755,11 @@ jobs:
             exit 1
           fi
 
+          changed_files="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.changed_files // 0')"
+          if [ "${changed_files:-0}" -ge 3000 ]; then
+            echo "::error::The PR reports $changed_files changed files, at GitHub's 3000-file API cap; the release scope cannot be proven from a truncated list."
+            exit 1
+          fi
           files="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
             --jq '.[] | .filename, (.previous_filename // empty)')"
           docs_only=true
@@ -851,7 +862,7 @@ jobs:
           # Capture the diff before classifying it. A failing `git diff` must
           # abort under `set -e`; inside a process substitution its status is
           # lost and an empty loop would leave docs_only=true.
-          changed="$(git diff --name-only --no-renames "$base" "$HEAD_SHA")"
+          changed="$(git -c core.quotePath=false diff --name-only --no-renames "$base" "$HEAD_SHA")"
           docs_only=true
           release_needed=false
           while IFS= read -r path; do
@@ -1084,7 +1095,7 @@ jobs:
               exit 1
               ;;
           esac
-          changed="$(git diff --name-only --no-renames "$gated" "$HEAD_SHA")"
+          changed="$(git -c core.quotePath=false diff --name-only --no-renames "$gated" "$HEAD_SHA")"
           non_docs=""
           while IFS= read -r path; do
             [ -n "$path" ] || continue
@@ -1163,7 +1174,7 @@ jobs:
           {
             echo "### Dependabot security promotion"
             echo "- The testing-ancestry and VERSION checks are skipped for this PR."
-            echo "- A security-only merge normally does not cut a release because VERSION is already tagged; an untagged pending VERSION on main can publish. Merge main back into testing; the next versioned promotion releases the change."
+            echo "- A security-only merge normally does not cut a release because VERSION is already tagged; when it changes a shipped artifact, an untagged pending VERSION on main can publish. Merge main back into testing; the next versioned promotion releases the change."
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
@@ -1299,7 +1310,7 @@ jobs:
               echo "::error::Cannot classify the main push: the push base $BEFORE is not available in the checkout."
               exit 1
             fi
-            changed="$(git diff --name-only --no-renames "$BEFORE" HEAD)"
+            changed="$(git -c core.quotePath=false diff --name-only --no-renames "$BEFORE" HEAD)"
             while IFS= read -r path; do
               [ -n "$path" ] || continue
               if is_release_path "$path"; then
@@ -1720,23 +1731,22 @@ jobs:
             done
             return 1
           }
+          needed=true
           if [ -z "${BEFORE:-}" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            echo "::error::Cannot classify the testing push: the event has no usable push base."
-            exit 1
+            echo "::warning::The testing push has no usable base; republishing the moving alias."
+          elif ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            echo "::warning::The testing push base $BEFORE is not available; republishing the moving alias."
+          else
+            changed="$(git -c core.quotePath=false diff --name-only --no-renames "$BEFORE" HEAD)"
+            needed=false
+            while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              if is_release_path "$path"; then
+                needed=true
+                break
+              fi
+            done <<< "$changed"
           fi
-          if ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-            echo "::error::Cannot classify the testing push: the push base $BEFORE is not available in the checkout."
-            exit 1
-          fi
-          changed="$(git diff --name-only --no-renames "$BEFORE" HEAD)"
-          needed=false
-          while IFS= read -r path; do
-            [ -n "$path" ] || continue
-            if is_release_path "$path"; then
-              needed=true
-              break
-            fi
-          done <<< "$changed"
           echo "needed=$needed" >> "$GITHUB_OUTPUT"
           if [ "$needed" = "true" ]; then
             echo "A shipped artifact changed; the testing image will be republished."

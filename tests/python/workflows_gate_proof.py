@@ -214,6 +214,7 @@ def full_gate_behavior_errors(run: str) -> list[str]:
     if shutil.which("bash") is None or shutil.which("jq") is None:
         return ["workflows self-check: bash and jq are required to exercise the full-gate proof"]
     fake_commands = r"""git() {
+  if [ "$1" = "-c" ]; then shift 2; fi
   case "$1" in
     merge-base)
       if [ "$2" = "--is-ancestor" ]; then

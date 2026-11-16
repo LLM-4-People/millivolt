@@ -485,13 +485,19 @@ the `required` docs validation. It does not rerun the suite.
 
 A promotion that changes a shipped artifact must also have a `VERSION` newer
 than every existing release tag. Shipped artifacts are the files compiled into,
-embedded in, or copied into the image. The generated embedded docs index is
-documentation content, so a docs edit does not force a release; the next
-application release carries it. Docs/site-only promotions skip the version and
-full-gate proofs, validate docs, workflow policy and the site in `required`
-within its ten-minute budget, and do not rebuild images or cut a release. Test,
-workflow and site-tooling promotions run the full gate when they are not
-docs-only, but they are also release-free.
+embedded in, or copied into the image, except the generated embedded docs index.
+That index is documentation content, so a docs edit does not force a release;
+the next application release carries it.
+
+The shipped notices `LICENSE` and `THIRD_PARTY_NOTICES.md` are the reverse
+exception: they are docs-filter paths but release-bearing, because the image
+copies them into its license bundle. The publish image build fails closed if the
+bundle is empty or missing, so a bad notice cannot produce a release.
+Docs/site-only promotions skip the version
+and full-gate proofs, validate docs, workflow policy and the site in `required`
+within its ten-minute budget, and do not rebuild images or cut a release, except
+for those shipped notices. Test, workflow and site-tooling promotions run the
+full gate when they are not docs-only, but they are also release-free.
 
 Merge with a merge commit. The merged-PR release workflow tags that reviewed
 merge commit and publishes the image; a delivered main push is an idempotent
@@ -499,7 +505,8 @@ fallback. Both classify the change and skip publication when no shipped
 artifact changed. It never pushes `main`.
 
 Dependabot security pull requests are the only other exception and normally do
-not cut a release by themselves; an untagged pending `VERSION` can publish. A
+not cut a release by themselves; when they change a shipped artifact, an
+untagged pending `VERSION` can publish. A
 manually pushed `v*` tag ships exactly as tagged.
 
 If the version tag already points at the released commit but its GitHub release
@@ -547,7 +554,8 @@ for `unit`, `browser` and `container` instead, because a testing push has no
 promotion proof to wait for.
 
 A release run whose `VERSION` is already tagged, such as a Dependabot security
-merge, normally does not publish; if main carries an untagged pending `VERSION`,
+merge, normally does not publish; if the merge changes a shipped artifact and
+main carries an untagged pending `VERSION`,
 that run can publish it. Open or unmerged pull requests do not publish images; a
 merged promotion PR does.
 

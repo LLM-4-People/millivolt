@@ -10,7 +10,7 @@ import tempfile
 from fnmatch import fnmatchcase
 from pathlib import Path
 
-from .workflows_support import non_comment_lines, shell_declaration
+from .workflows_support import ROOT, non_comment_lines, shell_declaration
 
 
 def github_glob(pattern: str, path: str) -> bool:
@@ -260,6 +260,77 @@ def release_exemption_errors(exemptions: str) -> list[str]:
     return []
 
 
+def dockerfile_copy_sources(text: str) -> list[str]:
+    """Return the source operands of every Dockerfile COPY, flag-free."""
+    lines: list[str] = []
+    buffer = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.endswith("\\"):
+            buffer += stripped[:-1] + " "
+            continue
+        lines.append(buffer + stripped)
+        buffer = ""
+    if buffer:
+        lines.append(buffer)
+    sources: list[str] = []
+    for line in lines:
+        parts = line.split()
+        if not parts or parts[0].upper() != "COPY":
+            continue
+        if any(part.startswith("--from=") for part in parts):
+            continue
+        args = [part for part in parts[1:] if not part.startswith("--")]
+        if len(args) >= 2:
+            sources.extend(args[:-1])
+    return sources
+
+
+def embed_targets() -> list[tuple[str, str]]:
+    """Return (go file, repository-relative target) for every go:embed line."""
+    files = [ROOT / "version.go"]
+    files.extend(sorted((ROOT / "internal").rglob("*.go")))
+    files.extend(sorted((ROOT / "cmd").rglob("*.go")))
+    files.extend(sorted((ROOT / "scripts" / "licenses").rglob("*.go")))
+    targets: list[tuple[str, str]] = []
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"(?m)^\s*//go:embed\s+(.+)$", text):
+            for pattern in match.group(1).split():
+                if pattern.startswith("all:"):
+                    pattern = pattern[4:]
+                target = (path.parent / pattern).relative_to(ROOT).as_posix()
+                targets.append((path.relative_to(ROOT).as_posix(), target))
+    return targets
+
+
+def release_shipped_input_errors(patterns: str, exemptions: str) -> list[str]:
+    """Require every image COPY source and go:embed target to be release-bearing."""
+    def covered(path: str) -> bool:
+        if any(fnmatchcase(path, exemption) for exemption in exemptions.split()):
+            return True
+        return any(fnmatchcase(path, pattern) for pattern in patterns.split())
+
+    def sample(path: str) -> str:
+        path = path.rstrip("/")
+        if "*" in path:
+            return path.replace("**", "nested/sample").replace("*", "sample")
+        if (ROOT / path).is_dir():
+            return path + "/sample"
+        return path
+
+    errors = []
+    for source in dockerfile_copy_sources((ROOT / "Dockerfile").read_text(encoding="utf-8")):
+        if not covered(sample(source)):
+            errors.append(f"check.yml: Dockerfile COPY source {source} is not release-bearing")
+    for go_file, target in embed_targets():
+        if not covered(sample(target)):
+            errors.append(f"check.yml: go:embed target {target} in {go_file} is not release-bearing")
+    return errors
+
+
 def docs_classifier_errors(run: str, patterns: str) -> list[str]:
     """Exercise the inline classifier over tracked docs and non-docs prefixes."""
     body = shell_declaration(run, "is_docs_path")
@@ -301,6 +372,7 @@ def docs_only_fail_open_errors(run: str) -> list[str]:
     if "source scripts/docs-paths.sh" in non_comment_lines(run):
         return ["workflows self-check: docs-only classification must not source the candidate classifier"]
     fake_git = """git() {
+  if [ "$1" = "-c" ]; then shift 2; fi
   case "$1" in
     fetch) return 0 ;;
     merge-base)
@@ -327,6 +399,8 @@ def docs_only_fail_open_errors(run: str) -> list[str]:
         ("code", {}, 0, "", {"docs_only": "false", "release_needed": "true"}),
         ("docs", {}, 0, "reached-after-diff", {"docs_only": "true", "release_needed": "false"}),
         ("tooling", {}, 0, "reached-after-diff", {"docs_only": "false", "release_needed": "false"}),
+        # The shipped notice is deliberately docs-only for the gate and
+        # release-bearing for the image.
         ("license", {}, 0, "reached-after-diff", {"docs_only": "true", "release_needed": "true"}),
         ("fail", {}, None, "", {}),
         ("docs", {"FAKE_TIP": "elsewhere"}, 1, "current testing tip", {}),

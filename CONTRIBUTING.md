@@ -123,7 +123,11 @@ directly and therefore still runs the full gate.
    A docs/site-only, test-only, workflow-only or site-tooling promotion may skip
    this step. `required` classifies every changed path: docs/site changes skip
    the full-gate proof, and only shipped artifacts require a version and a
-   release.
+   release. The shipped notices `LICENSE` and `THIRD_PARTY_NOTICES.md` are the
+   one docs-filter exception: the image copies them into its license bundle, so
+   they require a version and a release even though the docs gate validates
+   them. The publish image build fails closed if the bundle is empty or missing,
+   so a bad notice cannot produce a release.
 3. Open a pull request from `testing` to `main`. For a head that changes any
    non-docs path, wait for the `testing` `check.yml` push gate to finish first.
    A docs/site-only head has no canonical `check.yml` push run of its own, so
@@ -181,20 +185,23 @@ Dependabot version updates target `testing`. Dependabot security updates target
 the default branch and are the only exception to the testing-ancestry check;
 they also skip the version check. They still run the full gate and the
 `required` check. A security-only merge normally publishes no image and creates
-no tag because `VERSION` is already tagged; if `VERSION` is still untagged, that
-merge can publish the pending version. Merge `main` back into `testing` and
+no tag because `VERSION` is already tagged; when it changes a shipped artifact
+and `VERSION` is still untagged, that merge can publish the pending version. Merge `main` back into `testing` and
 include the fix in the next versioned promotion.
 
 Docs and site-only pushes to `testing` skip image work. A docs/site-only
 promotion to `main` skips the `VERSION` and full-gate proofs, validates the
 Markdown, generated site, workflow policy and docs contracts in `required`, and
 the merged-PR release path records the change as docs-only, so it does not
-rebuild images or cut a release.
+rebuild images or cut a release. The shipped notices `LICENSE` and
+`THIRD_PARTY_NOTICES.md` are the exception: they are docs-filter paths but
+release-bearing, because the image copies them into its license bundle.
 
 Test, workflow and site-tooling promotions run the full gate when they are not
 docs-only, but they are also release-free. Only a path compiled into, embedded
-in, or copied into the image requires a version and a release. A Pages-relevant
-change deploys the site from the `main` push, or from the Pages
+in, or copied into the image requires a version and a release, with the
+generated `internal/docs/docs.json` index as the one content exception. A
+Pages-relevant change deploys the site from the `main` push, or from the Pages
 `workflow_dispatch` fallback when that push workflow is not delivered.
 
 `AGENTS.md` is intentionally local and ignored by the publication guard. Keep its
@@ -715,7 +722,8 @@ because a testing push has no promotion proof to wait for:
    precedence and rejects a non-Dependabot main PR unless VERSION is newer.
    Docs/site, test, workflow and site-tooling promotions skip that comparison.
    Docs/site-only promotions also skip the full-gate proof and validate docs,
-   workflow policy and the site in `required`. All of them stay release-free.
+   workflow policy and the site in `required`. All of them stay release-free,
+   except a change to the shipped `LICENSE` or `THIRD_PARTY_NOTICES.md`.
    If VERSION is already tagged, no release is cut: this is the Dependabot
    security-merge case, and the next versioned promotion releases the change.
 2. The workflow creates the annotated `v<version>` tag on the reviewed
@@ -737,7 +745,8 @@ A docs/site-only main promotion also skips the VERSION and full-gate proofs but
 runs the same Markdown, generated-site, workflow-policy and repository checks in
 `required`. A Pages-relevant merged main push stays docs-only, so Pages deploys
 without rebuilding images or cutting a release. A test, workflow or site-tooling
-main promotion runs the full gate but is release-free.
+main promotion runs the full gate but is release-free. The shipped notices are
+the docs-filter exception and still require a version and a release.
 
 The merged-PR release path classifies the change from the reviewed PR file list;
 a delivered main push classifies the merge commit against its push base. Both

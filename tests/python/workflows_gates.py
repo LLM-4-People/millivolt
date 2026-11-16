@@ -14,6 +14,7 @@ from .workflows_docs import (
     release_classifier_errors,
     release_exemption_errors,
     release_pattern_errors,
+    release_shipped_input_errors,
     shell_case_family,
 )
 from .workflows_escalation import escalation_proof_behavior_errors
@@ -533,6 +534,7 @@ def check_gate_proof(checks: dict, errors: list[str]) -> None:
         errors.append("check.yml: the workflow must own the shipped-artifact path patterns")
     errors.extend(release_pattern_errors(release_patterns))
     errors.extend(release_exemption_errors(release_exemptions))
+    errors.extend(release_shipped_input_errors(release_patterns, release_exemptions))
     contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
     if "RELEASE_PATH_PATTERNS" not in contributing:
         errors.append("CONTRIBUTING.md: shipped-artifact policy must name the release filter owner")
@@ -546,9 +548,9 @@ def check_gate_proof(checks: dict, errors: list[str]) -> None:
                       "both gate steps own an inline copy")
     if "source scripts/docs-paths.sh" in check_text:
         errors.append("check.yml: gate steps must not source the candidate classifier")
-    if "docs_only" not in promotion_run or "git diff --name-only --no-renames" not in promotion_run:
+    if "docs_only" not in promotion_run or "diff --name-only --no-renames" not in promotion_run:
         errors.append("check.yml: main promotions must classify docs-only changes with --no-renames")
-    capture_diff = 'changed="$(git diff --name-only --no-renames "$base" "$HEAD_SHA")"'
+    capture_diff = 'changed="$(git -c core.quotePath=false diff --name-only --no-renames "$base" "$HEAD_SHA")"'
     missing_promotion_lines = missing_commands(
         promotion_run, ("set -euo pipefail",
                         "git fetch --no-tags origin main testing", capture_diff))
@@ -557,7 +559,7 @@ def check_gate_proof(checks: dict, errors: list[str]) -> None:
                       + ", ".join(missing_promotion_lines))
     if 'done <<< "$changed"' not in promotion_run:
         errors.append("check.yml: docs-only classification must iterate the captured diff")
-    if 'done < <(git diff --name-only --no-renames' in promotion_run:
+    if 'done < <(git -c core.quotePath=false diff --name-only --no-renames' in promotion_run:
         errors.append("check.yml: docs-only classification must not swallow git diff failures in a process substitution")
     commented_capture = "\n".join(
         "# " + line if capture_diff in line else line
@@ -677,7 +679,7 @@ def check_gate_proof(checks: dict, errors: list[str]) -> None:
             "sort_by(.created_at, .id)",
             "branch=testing",
             "git merge-base --is-ancestor",
-            "git diff --name-only --no-renames",
+            "diff --name-only --no-renames",
             "sleep 10",
             "for attempt in 1 2 3 4 5 6",
             "--argjson suite",

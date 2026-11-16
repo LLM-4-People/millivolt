@@ -53,6 +53,9 @@ newer than every tag for non-Dependabot promotions that change a shipped
 artifact. Tests, workflows and site tooling still need the full gate when they
 are not docs-only, but they do not need a version and do not release.
 
+The shipped `LICENSE` and `THIRD_PARTY_NOTICES.md` are docs-filter paths but
+release-bearing; the generated docs index is the reverse exception.
+
 A non-Dependabot promotion also requires a successful
 [escalation](../.github/workflows/escalation.yml) run (forced full-race sweep
 plus the repeated clock-sensitive flake sweep) for the reviewed head; the

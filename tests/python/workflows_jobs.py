@@ -460,6 +460,8 @@ def check_promotion(checks: dict, errors: list[str]) -> None:
             'latest_required" != "success"',
             'pulls/$PR_NUMBER/files',
             '.previous_filename',
+            '.changed_files // 0',
+            '-ge 3000',
             'echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"',
             'echo "release_needed=$release_needed" >> "$GITHUB_OUTPUT"',
             'release_needed=false',

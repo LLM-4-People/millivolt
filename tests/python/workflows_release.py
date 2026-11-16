@@ -509,7 +509,8 @@ def check_release(checks: dict, errors: list[str]) -> None:
             "is_release_path",
             "RELEASE_PATH_PATTERNS",
             'git cat-file -e "${BEFORE}^{commit}"',
-            'git diff --name-only --no-renames "$BEFORE" HEAD',
+            'git -c core.quotePath=false diff --name-only --no-renames "$BEFORE" HEAD',
+            'republishing the moving alias',
             'echo "needed=$needed" >> "$GITHUB_OUTPUT"',
         ):
             if needle not in testing_scope_run:
@@ -618,7 +619,7 @@ def check_release(checks: dict, errors: list[str]) -> None:
             "RELEASE_PATH_PATTERNS",
             'if [ "$MERGED_RELEASE" != "true" ]',
             'git cat-file -e "${BEFORE}^{commit}"',
-            'git diff --name-only --no-renames "$BEFORE" HEAD',
+            'git -c core.quotePath=false diff --name-only --no-renames "$BEFORE" HEAD',
             'echo "needed=$needed" >> "$GITHUB_OUTPUT"',
         ):
             if needle not in scope_run:
