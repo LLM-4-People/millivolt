@@ -7,9 +7,10 @@ or table for three or more parallel items, and roughly 110 words or fewer in a
 prose paragraph. This check is mechanical so a later edit cannot quietly
 reintroduce a blob.
 
-Generated pages are excluded: docs/settings.md restates the schema's help text,
-so its row length is owned by internal/config, not by this file. Tables, lists,
-blockquotes, code and headings are structural and are not counted.
+The generated docs/settings.md is included: its renderer groups the schema help
+into short paragraphs, so the same rule holds for a page nobody edits by hand.
+Tables, lists, blockquotes, code and headings are structural and are not
+counted.
 """
 from __future__ import annotations
 
@@ -18,8 +19,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MAX_WORDS = 110
-# Generated from a schema or a capture; editing the page would be wrong.
-GENERATED = {"docs/settings.md"}
 SOURCES = (
     "README.md",
     "CONTRIBUTING.md",
@@ -111,8 +110,6 @@ def main() -> int:
     errors: list[str] = []
     for path in source_files():
         relative = path.relative_to(ROOT).as_posix()
-        if relative in GENERATED:
-            continue
         for line, paragraph in prose_paragraphs(path.read_text(encoding="utf-8")):
             words = len(paragraph.split())
             if words <= MAX_WORDS:
