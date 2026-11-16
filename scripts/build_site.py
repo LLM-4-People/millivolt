@@ -32,8 +32,8 @@ from markdown.extensions.toc import TocExtension
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from scripts import site_llm
-from scripts.site_media import SITE_IMAGE_EXCLUDES, image_size
+from scripts import site_llm, site_plates
+from scripts.site_media import IMAGE_SUFFIXES, SITE_IMAGE_EXCLUDES, image_size
 SITE_SRC = ROOT / "site-src"
 TEMPLATES = SITE_SRC / "templates"
 # The published site's canonical origin. The Pages workflow passes the live base
@@ -84,6 +84,7 @@ NAV_GROUPS = (
             ("Documentation", "docs/index.html", "docs/README.md"),
             ("Install and first run", "docs/install.html", "docs/install.md"),
             ("Dashboard tour", "docs/dashboard.html", "docs/dashboard.md"),
+            ("Capture gallery", "docs/gallery.html", "docs/gallery.md"),
             ("Protocol and clients", "docs/protocol.html", "docs/protocol.md"),
         ),
     ),
@@ -143,7 +144,6 @@ PARAGRAPH = re.compile(r"<p>(.*?)</p>", re.DOTALL)
 TAG = re.compile(r"<[^>]+>")
 SPACE = re.compile(r"\s+")
 MARKDOWN_SUFFIXES = (".md", ".markdown")
-IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico")
 
 
 @dataclass(frozen=True)
@@ -578,6 +578,7 @@ def render_fragment(
     content = sanitize_content(content)
     content = rewrite_content_urls(content, source, output)
     content = enhance_images_with_root(content, output, site_root)
+    content = site_plates.enhance(content)
     content = render_callouts(content)
     return content
 

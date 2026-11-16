@@ -8,6 +8,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BRAND_MANIFEST = ROOT / "scripts/brand/manifest.json"
+# The suffixes a documentation page may reference as artwork.
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico")
 
 
 def image_size(path: Path) -> tuple[int, int] | None:

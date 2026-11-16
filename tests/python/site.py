@@ -22,7 +22,7 @@ from urllib.parse import unquote, urlsplit
 from scripts.build_site import (DEFAULT_BASE_URL, README_ANCHORS, build_site,
                                 markdown_engine, performance_headline, render_fragment,
                                 site_fonts, toc_html)
-from scripts.site_media import SITE_IMAGE_EXCLUDES, image_size
+from scripts.site_media import IMAGE_SUFFIXES, SITE_IMAGE_EXCLUDES, image_size
 from scripts.perf_docs import check as performance_drift_errors
 from tests.repository_check import markdown_anchors
 from tests.support import (PALETTE_OWNER, ROOT, SITE_STYLESHEET, root_custom_properties,
@@ -674,8 +674,38 @@ def docs_image_errors() -> list[str]:
             referenced.add(match.group(0))
     return [f"docs/{rel.relative_to(ROOT / 'docs').as_posix()}: no Markdown consumer"
             for rel in ROOT.joinpath("docs/images").rglob("*")
-            if rel.is_file()
+            if rel.is_file() and rel.suffix.lower() in IMAGE_SUFFIXES
             and rel.relative_to(ROOT / 'docs').as_posix() not in referenced]
+
+
+def gallery_page_errors(site: Path, page_texts: dict[Path, str]) -> list[str]:
+    """Every registry plate must survive the Markdown-to-site upgrade.
+
+    The Markdown test proves the generated page names each plate; this one
+    proves the published page actually carries its figure, anchor, split
+    legend and full-size link. Both run, because either half can regress
+    without the other.
+    """
+    from scripts.gallery import GALLERY
+
+    page = site / "docs/gallery.html"
+    if page not in page_texts:
+        return ["docs/gallery.html was not built"]
+    text = page_texts[page]
+    errors = []
+    figures = text.count('class="doc-plate')
+    if figures != len(GALLERY.plates):
+        errors.append(f"gallery page has {figures} plates, want {len(GALLERY.plates)}")
+    for plate in GALLERY.plates:
+        if f'id="plate-{plate.id}"' not in text:
+            errors.append(f"gallery page has no figure for {plate.id}")
+        target = "../assets/" + plate.path
+        if f'href="{target}"' not in text:
+            errors.append(f"gallery page has no full-size link for {plate.path}")
+    legends = text.count("split · black / clear")
+    if legends != len(GALLERY.plates):
+        errors.append(f"gallery page has {legends} split legends, want {len(GALLERY.plates)}")
+    return errors
 
 
 def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
@@ -683,6 +713,7 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
     errors: list[str] = docs_image_errors()
     pages = sorted(site.rglob("*.html"))
     page_texts = {page: page.read_text(encoding="utf-8") for page in pages}
+    errors.extend(gallery_page_errors(site, page_texts))
     parsed: dict[Path, PageParser] = {}
     for page in pages:
         parser = PageParser()
