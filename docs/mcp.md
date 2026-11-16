@@ -7,7 +7,7 @@ It is a client of a running proxy: it never starts, stops or restarts the proxy
 process. Its operator tools can reconfigure a running proxy, but only through
 the same credential and the same routes the dashboard uses.
 
-The endpoint serves 22 tools from one implementation. It is operator-gated
+The endpoint serves 25 tools from one implementation. It is operator-gated
 and Bearer-only, enabled by default: `mcp_enabled: false` removes it from the
 process (the route stays reserved, answering 404 and never inference; restart
 to apply), and the limits are config fields in the `mcp` category. It
@@ -64,7 +64,9 @@ process, and no session cookie or per-request state outlives the request. Every
 request is independently authenticated, so a missing or wrong Bearer is denied
 before any tool runs, and a request presenting only the dashboard session
 cookie is refused with 403, because the caller's own credential is what the
-internal calls carry. `/mcp/` look-alikes are reserved: an unregistered path
+internal calls carry.
+
+`/mcp/` look-alikes are reserved: an unregistered path
 answers 404 and is never forwarded to inference. The published Compose port is
 loopback-only, so it is not a remote origin; remote clients terminate TLS at
 the ingress as in the [reverse-proxy guide](reverse-proxy.md).
@@ -79,7 +81,7 @@ of choosing a client:
   either, unlike `/admin`, `/session`, `/metrics` and `/dash`, so an MCP client's
   cookie jar gains no dashboard credential; a client must not expect or send a
   session id. The admitted credential does key an in-process cache of the SDK
-  server object, so repeated calls do not rebuild all 22 tool registrations;
+  server object, so repeated calls do not rebuild all 25 tool registrations;
   admitting a different credential replaces it. The credential is only the
   in-memory cache key: it is never logged or persisted.
 - SSE resumption is not offered: no event store exists, so `Last-Event-ID`
@@ -112,12 +114,24 @@ of choosing a client:
 
 ## Tools
 
-`describe` is the one to call first. Without the live schema and the column
-semantics below, correct SQL is guesswork.
+`describe` is the one to call first for this instance's live schema; without
+it, correct SQL is guesswork. `docs_list` is the one to call first for how
+millivolt itself works: it indexes the same Markdown as the published site and
+needs no proxy request.
+
+The three docs tools read `internal/docs/docs.json`, which is generated from the
+same Markdown as the published site by `scripts/build_site.py`. Refresh the
+embedded copy with `python3 scripts/build_site.py --output site --write-manifest`
+after any page, title or navigation change. The tools never call the proxy,
+read storage, or use the operator credential. A full page is capped at 256 KiB
+by `internal/mcp/tools_docs.go`.
 
 | Tool | Purpose |
 | --- | --- |
 | `describe` | Live SQLite schema, the complete `requests`/`request_debug`/`meta` column reference, the exact health predicates, a value vocabulary for every filter dimension, the live known client/provider/model and tool names, the indexes, the complete result-limit set (the query row default and explicit `max_rows` ceiling, query bytes, log page band, default page size, explorer group and chart bucket caps, Prometheus line cap and capture byte budget), and the working SQL idioms for this build. |
+| `docs_list` | Every published documentation page in navigation order, with its path, title, description, public URL, Markdown URL and section count. Starts the docs flow; local only. |
+| `docs_search` | Ranked section search across titles, headings and body text, with path, anchor, heading context and a snippet. Every query word must match; the result reports its total and truncation. Local only. |
+| `docs_read` | One page by path, or one anchored section by heading id. Full-page Markdown is capped at 256 KiB with an explicit marker. This is the canonical explanation of millivolt's routes, configuration, protocol and operator behavior. Local only. |
 | `query` | One bounded `SELECT`, clamped on both rows and encoded size, truncating with an explicit marker. The only tool that can express a time range. |
 | `values` | The distinct values one dimension has in durable history, most frequent first, so a filter value is discovered rather than guessed. |
 | `explore` | Faceted breakdown over all matching history by one dimension, with at most 24 groups. No time window. |
@@ -148,13 +162,17 @@ they never leave the process and the gate re-validates the forwarded Bearer.
 
 `set_throttle` takes `provider` and any of `concurrency`,
 `requests`/`request_window`, `tokens`/`token_window`, `anti_burst` and
-`ramp_duration`; omitted dimensions keep their value. A count needs its own
+`ramp_duration`; omitted dimensions keep their value.
+
+A count needs its own
 window only when the policy stores none for that dimension, a count of `0`
 clears the dimension with its window, and a window without a count is refused
 unless a count is already stored. `clear: true` drops the whole policy and
 cannot be combined with a dimension. The proxy owns
 the duration grammar and band and refuses an explicit on-ramp without an
-active limit. This tool addresses one provider and has no selector or schedule
+active limit.
+
+This tool addresses one provider and has no selector or schedule
 fields. Scoped selectors and recurring schedules are available through the HTTP
 API (`/admin/throttle`) and the dashboard console, not through MCP.
 
@@ -198,7 +216,9 @@ Do not compare it across the two cases as one metric.
 The proxy scans a bounded number of rows per call, so a page can be short or
 empty while its `more` flag is still true. `exhausted` is true when a page that
 was given a cursor returns that same cursor, and also when `more` is false:
-treat it as "stop paging". A first page has no cursor to repeat, so any returned
+treat it as "stop paging".
+
+A first page has no cursor to repeat, so any returned
 cursor counts as progress, including `(0, "")`. A non-advancing cursor means the
 scan budget cannot reach the next row, and treating it as "keep going" is an
 endless loop; an empty page with an advanced cursor is instead the normal shape
@@ -276,7 +296,9 @@ rather than silently replacing it.
 **Edits change only named dimensions.** With a session id, an omitted
 `clients`, `providers` or `models` field preserves that dimension and an
 explicitly empty array clears it. An omitted `duration` preserves the deadline
-and an explicit empty string clears it. A create response also carries
+and an explicit empty string clears it.
+
+A create response also carries
 `created_id`, the id its own request installed, so concurrent starts resolve
 their own sessions. `set_pause` follows the same presence rules for scope and
 duration when `hold_id` targets an edit; without `hold_id`, an omitted create
@@ -298,7 +320,9 @@ restores it.
 every client, provider and model against the vocabulary `audit_status` reports.
 When that vocabulary is non-empty, an unknown name is refused with the known
 values offered, because a session scoped to a name that matches nothing would
-report `enabled: true` and capture nothing. An empty vocabulary is the
+report `enabled: true` and capture nothing.
+
+An empty vocabulary is the
 exception: a proxy that has seen nothing knows no names, so refusing every name
 would make the tool unusable rather than safer and the check is skipped. A
 vocabulary that cannot be read is not a skip: the start is refused, because the
@@ -308,10 +332,13 @@ guard cannot be applied at all.
 (`requests.id`), not the session id. There is no listing endpoint, so
 `audit_captures_list` discovers those ids by querying `requests WHERE debug = 1`
 with an existing, unexpired `request_debug` sidecar and reports that it does so.
+
 The listing also excludes an id that is empty or padded with whitespace: the
 capture route trims the id before lookup while the sidecar key is stored
 verbatim, so such an id could be advertised but never fetched. Every listed id
-is therefore readable. Captured documents are sensitive: credentials are
+is therefore readable.
+
+Captured documents are sensitive: credentials are
 redacted from headers, but body content is not sanitized.
 
 **Sessions survive a restart.** The proxy restores them from its own state, so a
@@ -363,7 +390,9 @@ completions and in-flight work and does not reset live error-storm protection.
 `set_config` is the other consequential call, and it is a revision-checked
 partial patch: `values` carries only the keys to change, the whole result is
 validated before the file is written, CLI-overridden keys are stripped, and the
-response names the keys that need a restart. A supplied list or map replaces
+response names the keys that need a restart.
+
+A supplied list or map replaces
 that whole field, so call `config_get` first for structured keys such as
 `providers` or `model_rules`, and echo the revision it returns.
 
@@ -383,7 +412,9 @@ Every failure is a tool result the model can read and correct, carrying the
 proxy's own `.error` text and the status: `401` (credential wrong or missing),
 `403` (the proxy's operator plane is unarmed, or the request carried only the
 dashboard session cookie), `404`, `409` (overlap or stale
-revision), `413` (a result limit), and `429` with its `Retry-After`. An
+revision), `413` (a result limit), and `429` with its `Retry-After`.
+
+An
 unreachable proxy, a timeout, and a body that is not the expected document are
 reported the same way. The `.error` field is read regardless of `Content-Type`,
 because the operator routes are inconsistent and some answer `text/plain` with
@@ -391,21 +422,29 @@ a JSON body.
 
 The returned text is scrubbed of the operator credential first, because a
 reflecting endpoint could otherwise put the `Authorization` value into its own
-failure message and hand it to the model. The scrub removes the literal token,
+failure message and hand it to the model.
+
+The scrub removes the literal token,
 any contiguous 8-byte fragment of it (so a credential split across two JSON
 string fields leaks no usable piece), percent escapes in any hex case
 (including full-byte nested forms), the query `+` form of a space, and
-JSON-escaped forms, including backslash-doubled text and surrogate pairs. Each
+JSON-escaped forms, including backslash-doubled text and surrogate pairs.
+
+Each
 form is decoded to a fixed point before matching: an encoding is either fully
 seen or the excerpt fails closed. Text that still decodes after three escape
 applications is not published partly decoded: the whole excerpt is replaced by
-`[redacted]` instead. That bound applies regardless of whether the credential
+`[redacted]` instead.
+
+That bound applies regardless of whether the credential
 appears in the body: a heavily re-encoded failure with no credential in it
 still loses its diagnostics, because a credential could be hidden past the
 bound. The scan is bounded to the region that can still reach the excerpt, and
 the raw bytes it reads are capped; a body whose whitespace collapse does not
 reach the excerpt target inside that cap fails closed to `[redacted]` too, for
-the same reason. The excerpt itself is whitespace-collapsed and truncated to
+the same reason.
+
+The excerpt itself is whitespace-collapsed and truncated to
 4 KiB before the ` [truncated]` marker is appended, so the model-visible text
 runs up to the 12-byte marker past 4 KiB. Redaction runs before the truncation,
 so a credential straddling the boundary cannot survive as a fragment.
@@ -446,7 +485,11 @@ repositories. See [Security](../SECURITY.md).
 The unit suite uses a fake proxy that pins the exact method, path, query and
 `Authorization` header of every tool, maps canned responses onto typed output,
 and covers the error shapes, setup validation, truncation markers, the pagination
-rule and the purge guards. The paging rule has one owner shared with
+rule and the purge guards.
+
+`tests/_go/internal/docs` checks the embedded copy against every source hash.
+`tests/python/site.py` checks the published Markdown twins, `llms.txt`,
+`llms-full.txt` and `docs.json` against the same page model. The paging rule has one owner shared with
 `audit_captures_list`, so the two listings cannot disagree. One of its tests
 runs outside that harness on purpose:
 
@@ -477,24 +520,33 @@ It runs in CI as part of the isolated browser-fixtures step, which already has a
 dev instance and an operator token; it is not part of the core source-and-unit
 job, because that job should not have to start a second proxy.
 
-It drives every registered tool against its own disposable instance. The
+It drives every registered tool against its own disposable instance.
+
+The
 state-changing tools are `set_pause`, `set_throttle`, `resume_quota`,
-`set_config`, `reload_config`, `audit_start`, `audit_stop` and `purge`. The
+`set_config`, `reload_config`, `audit_start`, `audit_stop` and `purge`.
+
+The
 run exercises `set_pause` (a hold scoped to the fixture client, resumed at
 once), `set_throttle` (a limit set and then cleared), `resume_quota`,
 `set_config` and `reload_config` against the scratch config copy, a full
 capture cycle (`audit_start` and `audit_stop`), and the purge path: the
 missing confirmation, the wrong phrase, an unauthorized token and a token
 issued for a different filter each refuse with the row count unchanged, and
-then an authorized purge deletes the fixture rows. The read-only tools are
-`describe`, `query`, `explore`, `chart`, `records`, `snapshot`, `prometheus`,
-`audit_status`, `audit_captures_list`, `audit_capture_get`, `operator_state`,
-`config_get`, `values` and `purge_preview`; the run drives each of them. A
+then an authorized purge deletes the fixture rows.
+
+The read-only tools are
+`describe`, `docs_list`, `docs_search`, `docs_read`, `query`, `explore`,
+`chart`, `records`, `snapshot`, `prometheus`, `audit_status`,
+`audit_captures_list`, `audit_capture_get`, `operator_state`, `config_get`,
+`values` and `purge_preview`; the run drives each of them.
+
+A
 successful purge and the config write are safe here because the instance, its
 database and its config copy all belong to the test and are discarded.
 
 The same run drives the proxy's own `/mcp` endpoint with a real streamable
-HTTP client: `initialize`, `tools/list` (22 tools), and `describe` and
+HTTP client: `initialize`, `tools/list` (25 tools), and `describe` and
 `records` returning the same documents the in-process session returns, plus the
 auth boundary (401 without a credential, 401 for a wrong Bearer from the shared
 gate, 403 for a cookie-only request or a wrong Bearer beside an admitted

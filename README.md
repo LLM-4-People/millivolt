@@ -12,17 +12,25 @@ a benchmark or a capacity measurement. Published measurements live in
 
 <picture>
   <source media="(min-width: 761px)" srcset="docs/images/brand/readme-spec.svg">
-  <img src="docs/images/brand/readme-spec-mobile.svg" alt="Readout: four upstream formats, one Go binary, 22 MCP tools, one operator plane" width="800">
+  <img src="docs/images/brand/readme-spec-mobile.svg" alt="Readout: four upstream formats, one Go binary, 25 MCP tools, one operator plane" width="800">
 </picture>
 
 **See every AI request. Keep your own routing.** millivolt is a patch bay for
 model traffic. OpenAI Chat Completions, OpenAI Responses and Anthropic Messages
-clients plug in on one side; a chat request can target the Cursor agent bridge,
-and any other HTTP client can use the same relay path with routing headers. The
-upstream you choose answers on the other. It
-can translate when the two ends disagree, pass the request through untouched,
-and measure the crossing: timing, tokens, cost, retries, outcome. Body capture
+clients plug in on one side. A chat request can target the Cursor agent bridge,
+and any other HTTP client can use the same relay path with routing headers.
+
+The upstream you choose answers on the other side. millivolt translates when
+the two ends disagree, passes the request through untouched when they do not,
+and measures the crossing: timing, tokens, cost, retries, outcome. Body capture
 only when you ask.
+
+- **Route.** One endpoint for three client formats, four upstream formats and
+  the Cursor bridge. Your base URL, your key, your path.
+- **Observe.** Live rows, durable SQLite history, scoped timelines, and a
+  drawer with timing, tokens, cost and retry attempts.
+- **Control.** Pause, throttle, capture, export and storm protection from one
+  operator console. The same plane is available as 25 MCP tools.
 
 **millivolt stays a relay, not a platform.** No separate provider registry, no
 API-key vault, no user accounts. One Go binary. One dashboard. One operator or
@@ -32,6 +40,10 @@ a small team.
 
 [Quickstart](#quickstart) · [Documentation](docs/README.md) · [Docs site](https://millivolt.llm4people.dev/) ·
 [Dashboard guide](docs/dashboard.md) · [Support](SUPPORT.md) · [Security](SECURITY.md)
+
+<sub>Docs for LLMs: [llms.txt](https://millivolt.llm4people.dev/llms.txt) ·
+[JSON index](https://millivolt.llm4people.dev/docs.json) ·
+[MCP server](docs/mcp.md)</sub>
 
 <sub>Pre-1.0 · Linux · MIT · single operator or small team. The 0.x series can change configuration and API details between releases.</sub>
 
@@ -142,10 +154,12 @@ retries, SSE keepalives, translation, and overrides can change bytes. See
 **Global totals stay global.** Explorer cards, timelines, and the request log
 share one selected scope. See the [visual guide](docs/dashboard.md) for focused
 captures of tokens, speed and latency, cost, providers, models, conversations,
-and Settings.
+and Settings, or open the [capture gallery](docs/gallery.md) for every surface.
 
-![Screenshot of the millivolt dashboard with global request, token, and cost totals above a scoped request log and timeline](docs/images/overview/dashboard.png)
+![The millivolt dashboard with global request, token, and cost totals above a scoped request log and timeline, split diagonally between the Black and Clear surfaces](docs/images/overview/dashboard.png)
 
+Every capture is one state photographed on both primary surfaces and split
+along the diagonal: Instrument Black upper-left, Instrument Clear lower-right.
 Static capture from an authorized, redacted history snapshot; identifiers are
 replaced. The offline indicator reflects the capture session, not service
 health; see [capture limitations](docs/dashboard.md).
@@ -176,18 +190,20 @@ error, time, or key without losing the selected filter.
 
 ### <kbd>C</kbd> Intervene: before the retry storm
 
-Pause new sends and retries by client, provider, or all traffic; running sends
+Pause new sends and retries by client, provider, or all traffic. Running sends
 finish. Cap concurrency, request rate, or token rate for any combination of
-provider, model, client, key and conversation, or the whole proxy, with an
+provider, model, client, key and conversation, or the whole proxy. Add an
 optional recurring server-local schedule and an opt-in anti-burst ramp on a
-single-provider rule. A header readout stays `steady` or names every active
-hold, capture and enforcing limit, an `off schedule` policy that is stored but
-admitting everything, and any restart or gated backlog; one operator console
-opens the policies, export and restart controls. Capture scoped debug bodies, export exactly the records
+single-provider rule.
+
+A header readout stays `steady` or names every active hold, capture and
+enforcing limit, an `off schedule` policy that is stored but admitting
+everything, and any restart or gated backlog. One operator console opens the
+policies, export and restart controls. Capture scoped debug bodies, export exactly the records
 you filtered, and turn on error-storm protection with recovery probes. These are
 operator actions, not per-user permissions.
 
-One Go service also carries the dashboard, SQLite, and a 22-tool MCP server at
+One Go service also carries the dashboard, SQLite, and a 25-tool MCP server at
 `/mcp`. An LLM client needs only the endpoint and its Bearer credential. See
 the [MCP server guide](docs/mcp.md).
 
@@ -251,9 +267,15 @@ vulnerabilities.
 | `01` | [Quickstart](#quickstart) · [container operation](docs/containers.md#containers) | First run, images, volumes, shutdown |
 | `02` | [Protocol](docs/protocol.md) · [adapters](docs/adapters.md) | Client setup, translation, compatibility |
 | `03` | [Operations](docs/operations.md) · [operator CLI](docs/cli.md) · [performance](docs/performance.md) · [reverse proxy](docs/reverse-proxy.md) | Day-to-day operation and measurements |
-| `04` | [MCP server](docs/mcp.md) | The 22-tool operator API |
+| `04` | [MCP server](docs/mcp.md) | The 25-tool operator API |
 | `05` | [Architecture](docs/architecture.md) | Ownership and invariants |
 | `06` | [Contributing](CONTRIBUTING.md) · [support](SUPPORT.md) · [security](SECURITY.md) | Development, help, reporting |
+
+Every published page has a Markdown twin. The [docs site](https://millivolt.llm4people.dev/)
+also serves [`llms.txt`](https://millivolt.llm4people.dev/llms.txt),
+[`llms-full.txt`](https://millivolt.llm4people.dev/llms-full.txt) and
+[`docs.json`](https://millivolt.llm4people.dev/docs.json) from the same sources,
+and the `docs_list`, `docs_search` and `docs_read` MCP tools read that index.
 
 The application is [MIT licensed](LICENSE). Dependency notices are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

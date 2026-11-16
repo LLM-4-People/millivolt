@@ -15,22 +15,17 @@ import re
 import unittest
 
 from ..support import ROOT
+from scripts.mcp_registry import registered_tools
 
-SERVER = ROOT / "internal/mcp/server.go"
 CLIENT = ROOT / "internal/mcp/client.go"
 ROUTES = ROOT / "docs/routes.md"
 MCP_DOC = ROOT / "docs/mcp.md"
 SKIP_PARTS = frozenset({"agents", "node_modules", ".venv", ".git", "site"})
-TOOL = re.compile(r'addTool\(server, &sdk\.Tool\{\s*\n\s*Name:\s+"([a-z_]+)"')
 ROUTE = re.compile(r'^\t(Route\w+)\s+Route\s*=\s*"([^"]+)"', re.MULTILINE)
 COUNT = re.compile(r"\b(\d+) (?:MCP )?tools\b")
 TABLE_ROW = re.compile(r"^\|\s*`([a-z_]+)`\s*\|")
 ROUTE_ROW = re.compile(r"^\|\s*`(?:GET|POST|GET/POST|GET/PUT|DELETE)\s+(\S+)")
 DOC_PATH = re.compile(r"`(/(?:admin|metrics)/[a-z/]*)")
-
-
-def registered_tools() -> list[str]:
-    return TOOL.findall(SERVER.read_text(encoding="utf-8"))
 
 
 def owned_routes() -> dict[str, str]:

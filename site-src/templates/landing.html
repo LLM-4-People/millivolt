@@ -3,7 +3,7 @@
     <div class="hero-copy">
       <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>self-hosted · cross-protocol · MIT</p>
       <h1>See every AI request.<br>Keep your own routing.</h1>
-      <p class="lead">A self-hosted, cross-protocol inference proxy with a live dashboard, SQLite history, and controls to pause, limit, or debug traffic. OpenAI Chat Completions, OpenAI Responses and Anthropic Messages clients can target any configured upstream, including the Cursor agent bridge; other HTTP clients use the same relay path. Request metadata, timing, tokens, cost, and outcomes; body capture is opt-in.</p>
+      <p class="lead">Point any OpenAI or Anthropic client at the upstream you choose. millivolt relays the request, translates when the two ends disagree, and records the crossing in a live dashboard. Body capture stays off until you ask.</p>
       <div class="hero-actions">
         <a class="btn btn-primary" href="#quickstart">Run it locally</a>
         <a class="btn btn-ghost" href="docs/dashboard.html">Tour the dashboard</a>
@@ -11,38 +11,36 @@
       <p class="proof-line"><span>MIT licensed</span><span>one Go binary</span><span>SQLite or in-memory</span></p>
     </div>
 
-    <figure class="signal-panel" aria-labelledby="signal-title">
-      <div class="signal-head">
-        <span class="mono-label" id="signal-title">request path</span>
-        <span class="signal-state"><span class="signal-dot" aria-hidden="true"></span>self-hosted</span>
-      </div>
-      <div class="signal-map">
-        <div class="signal-column">
-          <span class="entity-label">client protocols</span>
-          <div class="entity-chip"><span class="entity-line" style="--entity:#56b4e9" aria-hidden="true"></span>chat</div>
-          <div class="entity-chip"><span class="entity-line" style="--entity:#009e73" aria-hidden="true"></span>responses</div>
-          <div class="entity-chip"><span class="entity-line" style="--entity:#e69f00" aria-hidden="true"></span>messages</div>
+    <figure class="relay-plate" aria-labelledby="relay-title">
+      <div class="relay-stage">
+        <img class="relay-art" src="assets/relay-field.webp" alt="" width="1800" height="764" fetchpriority="high" decoding="async">
+        <div class="relay-scrim" aria-hidden="true"></div>
+        <div class="relay-head">
+          <span class="mono-label" id="relay-title">request path</span>
+          <span class="relay-state"><span class="signal-dot" aria-hidden="true"></span>self-hosted</span>
         </div>
-        <div class="signal-arrow" aria-hidden="true"></div>
-        <div class="signal-core">
-          <img src="assets/mark.svg" alt="" width="64" height="64">
-          <strong>millivolt</strong>
-          <span>translate · route</span>
-          <small>any configured upstream</small>
+        <span class="relay-port" aria-hidden="true"><i></i></span>
+        <div class="relay-kpis">
+          <span class="relay-kpi-label">sample history</span>
+          <dl>
+            <div><dt>requests</dt><dd>100.16K</dd></div>
+            <div><dt>cache hit</dt><dd>96.5%</dd></div>
+            <div><dt>errors</dt><dd>0.3%</dd></div>
+          </dl>
         </div>
-        <div class="signal-arrow" aria-hidden="true"></div>
-        <div class="signal-column">
-          <span class="entity-label">upstreams</span>
-          <div class="entity-chip"><span class="entity-line" style="--entity:#0072b2" aria-hidden="true"></span>OpenAI</div>
-          <div class="entity-chip"><span class="entity-line" style="--entity:#cc79a7" aria-hidden="true"></span>Anthropic</div>
-          <div class="entity-chip"><span class="entity-line" style="--entity:#8a8f98" aria-hidden="true"></span>compatible</div>
+        <div class="relay-out">
+          <span class="relay-out-arrow" aria-hidden="true">→</span>
+          <div><strong>your upstream</strong><span>your base URL · your key</span></div>
+        </div>
+        <div class="relay-flow">
+          <span>chat</span><span>responses</span><span>messages</span>
+          <span class="relay-flow-arrow" aria-hidden="true">→</span>
+          <b>one relay</b>
+          <span class="relay-flow-arrow" aria-hidden="true">→</span>
+          <span>any upstream</span>
         </div>
       </div>
-      <div class="signal-store">
-        <span>SQLite / in-memory</span>
-        <span>metadata and metrics</span>
-      </div>
-      <figcaption class="sr-only">Chat Completions, Responses, and Anthropic Messages clients send requests to millivolt. millivolt translates them for the configured upstream and records request metadata and metrics in SQLite or an in-memory ring.</figcaption>
+      <figcaption class="relay-caption">Illustrative hardware field. KPI values are a sample from the redacted history capture below, not a benchmark.</figcaption>
     </figure>
   </section>
 
@@ -87,8 +85,8 @@
       </div>
       <figure class="instrument-plate">
         <div class="plate-bar"><span class="mono-label">overview</span><span class="plate-caption">static capture · redacted fixture</span></div>
-        <img src="assets/images/overview/dashboard.png" alt="millivolt dashboard with KPI tiles, provider explorer cards, a traffic timeline, and a request log" width="1440" height="1000" loading="lazy" decoding="async">
-        <figcaption>Static capture from an authorized redacted history snapshot. The offline indicator reflects the capture session, not service health. <a href="docs/dashboard.html">Open the visual guide</a>.</figcaption>
+        <img src="assets/images/overview/dashboard.png" alt="millivolt dashboard with KPI tiles, provider explorer cards, a traffic timeline, and a request log, split diagonally between the Black and Clear surfaces" width="1920" height="1200" loading="lazy" decoding="async">
+        <figcaption>One state, both surfaces: Instrument Black upper-left, Instrument Clear lower-right. Static capture from an authorized redacted history snapshot; the offline indicator reflects the capture session, not service health. <a href="docs/dashboard.html">Open the visual guide</a> or the <a href="docs/gallery.html">capture gallery</a>.</figcaption>
       </figure>
       <div class="readout-grid">
         <div class="readout"><span class="readout-num">01</span><div><strong>KPI band</strong><p>Requests, tokens, spend, cache hit rate, errors, and speed, with their ranges.</p></div></div>
@@ -107,23 +105,23 @@
     </div>
     <div class="chart-grid">
       <figure class="chart-plate">
-        <img src="assets/images/charts/traffic.png" alt="Traffic chart with request and error timelines" width="1124" height="427" loading="lazy" decoding="async">
+        <img src="assets/images/charts/traffic.png" alt="Traffic chart with request and error timelines" width="1124" height="431" loading="lazy" decoding="async">
         <figcaption><strong>Traffic.</strong> Requests and errors over the selected window and scope.</figcaption>
       </figure>
       <figure class="chart-plate">
-        <img src="assets/images/charts/tokens.png" alt="Token chart with input, output, reasoning, cached tokens, and cache hit rate" width="1124" height="427" loading="lazy" decoding="async">
+        <img src="assets/images/charts/tokens.png" alt="Token chart with input, output, reasoning, cached tokens, and cache hit rate" width="1124" height="431" loading="lazy" decoding="async">
         <figcaption><strong>Tokens.</strong> Input, output, reasoning, cached tokens, and cache hit rate.</figcaption>
       </figure>
       <figure class="chart-plate">
-        <img src="assets/images/charts/errors.png" alt="Errors chart separating errors from HTTP 429 rate limits" width="1124" height="427" loading="lazy" decoding="async">
+        <img src="assets/images/charts/errors.png" alt="Errors chart separating errors from HTTP 429 rate limits" width="1124" height="431" loading="lazy" decoding="async">
         <figcaption><strong>Errors.</strong> Errors and HTTP 429 throttles stay separate.</figcaption>
       </figure>
       <figure class="chart-plate">
-        <img src="assets/images/charts/cost.png" alt="Cost chart with spend and request volume" width="1124" height="427" loading="lazy" decoding="async">
+        <img src="assets/images/charts/cost.png" alt="Cost chart with spend and request volume" width="1124" height="431" loading="lazy" decoding="async">
         <figcaption><strong>Cost.</strong> Provider-reported spend beside request volume.</figcaption>
       </figure>
     </div>
-    <p class="scroll-hint">Swipe to compare charts.</p>
+    <p class="scroll-hint">Swipe to compare charts. Every plate is split between the Black and Clear surfaces.</p>
   </section>
 
   <section class="section section-control">

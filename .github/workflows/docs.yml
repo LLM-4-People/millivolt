@@ -22,7 +22,21 @@ on:
       - 'LICENSE'
       - 'site-src/**'
       - 'scripts/build_site.py'
+      - 'scripts/site_llm.py'
+      - 'scripts/site_media.py'
+      - 'scripts/site_plates.py'
+      - 'scripts/brand/**'
+      - 'scripts/gallery/**'
+      - 'scripts/mcp_registry.py'
       - 'requirements-docs.txt'
+      - 'internal/docs/**'
+      - 'internal/web/static/css/themes.css'
+      - 'internal/web/static/js/theme_boot.js'
+      - 'internal/web/static/js/theme_state.js'
+      - 'tests/python/site.py'
+      - 'tests/python/gallery.py'
+      - 'tests/python/docs_readability.py'
+      - 'tests/python/mcp_docs.py'
       - '.github/workflows/*.yml'
       - '.github/workflows/*.yaml'
   pull_request:
@@ -32,7 +46,21 @@ on:
       - 'LICENSE'
       - 'site-src/**'
       - 'scripts/build_site.py'
+      - 'scripts/site_llm.py'
+      - 'scripts/site_media.py'
+      - 'scripts/site_plates.py'
+      - 'scripts/brand/**'
+      - 'scripts/gallery/**'
+      - 'scripts/mcp_registry.py'
       - 'requirements-docs.txt'
+      - 'internal/docs/**'
+      - 'internal/web/static/css/themes.css'
+      - 'internal/web/static/js/theme_boot.js'
+      - 'internal/web/static/js/theme_state.js'
+      - 'tests/python/site.py'
+      - 'tests/python/gallery.py'
+      - 'tests/python/docs_readability.py'
+      - 'tests/python/mcp_docs.py'
       - '.github/workflows/*.yml'
       - '.github/workflows/*.yaml'
 
@@ -67,6 +95,12 @@ jobs:
         run: python3 -m pip install --require-hashes -r requirements-docs.txt
       - name: Check Markdown links, anchors and typography
         run: python3 -B -m tests.repository_check
+      - name: Check documentation prose readability
+        run: python3 -B -O -m tests.python.docs_readability
+      - name: Check generated brand assets
+        run: python3 -m scripts.brand.build --check
+      - name: Check capture gallery, manifest and freshness
+        run: python3 -B -O -m tests.python.gallery
       - name: Build and validate the static site
         run: python3 -B -O -m tests.python.site
       - name: Check workflow and automation policy

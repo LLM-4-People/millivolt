@@ -1,0 +1,305 @@
+{
+  "schema": 1,
+  "generator": "python3 -B -O -m tests.explorer_check --docs-history docs/images",
+  "captured_at": "2026-11-16T02:40:00+00:00",
+  "ui_sha256": "9f7add623a106cbc276526e629724f532738c45328afa9458a4d6c97032ac114",
+  "source_records": 100158,
+  "plates": [
+    {
+      "id": "overview",
+      "path": "images/overview/dashboard.png",
+      "width": 1920,
+      "height": 1200,
+      "bytes": 338933,
+      "sha256": "bfb878bc34a0606ca44f53da341ea868ebedf4e702f84e9d810f2a8a439bef4a"
+    },
+    {
+      "id": "overview-mobile",
+      "path": "images/overview/mobile.png",
+      "width": 390,
+      "height": 844,
+      "bytes": 74322,
+      "sha256": "6d8a01ac9fc7d37aa216bb206983f3f3ad0e168b8c57b0ae4017b013e4adfd61"
+    },
+    {
+      "id": "chart-overview",
+      "path": "images/charts/overview.png",
+      "width": 1124,
+      "height": 207,
+      "bytes": 43524,
+      "sha256": "6ed3a208f06df42ca196a74599a68e3525339f5a32f95109c8a86a26a845d1af"
+    },
+    {
+      "id": "chart-traffic",
+      "path": "images/charts/traffic.png",
+      "width": 1124,
+      "height": 431,
+      "bytes": 32848,
+      "sha256": "c02144cdb0badcf05196511e8fd2e5a903e6b588ac1a115faa00866feba5ca54"
+    },
+    {
+      "id": "chart-errors",
+      "path": "images/charts/errors.png",
+      "width": 1124,
+      "height": 431,
+      "bytes": 34117,
+      "sha256": "9c3c2f2a0edf2a6eaf45a742f1fff4b5df4486d0fcf50fe478cdf31848a34243"
+    },
+    {
+      "id": "chart-tokens",
+      "path": "images/charts/tokens.png",
+      "width": 1124,
+      "height": 431,
+      "bytes": 48921,
+      "sha256": "eec91c4ee2f0aad3cbcf0a31362333792d8652f34c507e11466e00c52a805319"
+    },
+    {
+      "id": "chart-latency",
+      "path": "images/charts/speed-latency.png",
+      "width": 1124,
+      "height": 431,
+      "bytes": 48665,
+      "sha256": "60bb85e1aac308b695c0b198b138e122dcab6a9f0c1e47d07e08ed1ab4aab483"
+    },
+    {
+      "id": "chart-cost",
+      "path": "images/charts/cost.png",
+      "width": 1124,
+      "height": 431,
+      "bytes": 42233,
+      "sha256": "78321b0d61c082f64c20bdb35af656a002b214d365027dd7fd8df3f620f58460"
+    },
+    {
+      "id": "chart-window",
+      "path": "images/charts/window.png",
+      "width": 1148,
+      "height": 454,
+      "bytes": 62110,
+      "sha256": "e21dd9e0e7f67da5dba0b3bd0c9aa508daca4b7a996b69807fa2cb04f11f4822"
+    },
+    {
+      "id": "explorer-providers",
+      "path": "images/explorer/providers.png",
+      "width": 1384,
+      "height": 401,
+      "bytes": 154211,
+      "sha256": "d27722c98ed465e22b81c65b9d2bbcca8276ca86523a1873e3dfab19930fdb17"
+    },
+    {
+      "id": "explorer-models",
+      "path": "images/explorer/models.png",
+      "width": 1384,
+      "height": 401,
+      "bytes": 160462,
+      "sha256": "aed431daae49f62c77459daf1ee9e269851380df4c3ca9dc27dbab48084284b0"
+    },
+    {
+      "id": "explorer-clients",
+      "path": "images/explorer/clients.png",
+      "width": 1384,
+      "height": 401,
+      "bytes": 156663,
+      "sha256": "4cd7675f1123f51a6fb3a883c11e77e1df4dcacad90d42dffb7445235387c39b"
+    },
+    {
+      "id": "explorer-conversations",
+      "path": "images/explorer/conversations.png",
+      "width": 1384,
+      "height": 401,
+      "bytes": 158456,
+      "sha256": "a348457652260e6294d6bd386994ca208002467a8be6aef6911d1940fa5321fb"
+    },
+    {
+      "id": "explorer-tools",
+      "path": "images/explorer/tools.png",
+      "width": 1384,
+      "height": 401,
+      "bytes": 147918,
+      "sha256": "a2f1ab259611387d05a49c8504c3d75e486831b73b2bc445d4e34d917d1eb454"
+    },
+    {
+      "id": "explorer-time",
+      "path": "images/explorer/time.png",
+      "width": 1384,
+      "height": 401,
+      "bytes": 86016,
+      "sha256": "de965db75697648bd2a43bc9c7a3368a3303f22aec0a9ed0eb3b37234e460347"
+    },
+    {
+      "id": "explorer-status",
+      "path": "images/explorer/status.png",
+      "width": 1384,
+      "height": 401,
+      "bytes": 68739,
+      "sha256": "e1d7aac856f2705b6cd61978cb92d37457b1170d6937d6e74ebe4ec69684f667"
+    },
+    {
+      "id": "explorer-errors",
+      "path": "images/explorer/errors.png",
+      "width": 1384,
+      "height": 401,
+      "bytes": 149959,
+      "sha256": "dfbe0c0ab5903ba6350e41c14f5a0bedda58f4ca4452e939e6297df55761438a"
+    },
+    {
+      "id": "explorer-keys",
+      "path": "images/explorer/keys.png",
+      "width": 1384,
+      "height": 401,
+      "bytes": 158966,
+      "sha256": "ad32639a141f785ac292c19402ac883cc52d780b3c9e4caf1040330d37bdf7dd"
+    },
+    {
+      "id": "explorer-scoped",
+      "path": "images/explorer/scoped.png",
+      "width": 1384,
+      "height": 401,
+      "bytes": 160190,
+      "sha256": "42f18a763f7410fba891ccd38cdb2b3a3676998bde73aa9fed95b4b7fb75843f"
+    },
+    {
+      "id": "requests-table",
+      "path": "images/requests/table.png",
+      "width": 1424,
+      "height": 341,
+      "bytes": 64405,
+      "sha256": "2571f574434cfde12058a2aa4d185a10f0e12c348af4a6762f01345809f9bdfe"
+    },
+    {
+      "id": "requests-retries",
+      "path": "images/requests/retries.png",
+      "width": 1424,
+      "height": 341,
+      "bytes": 59272,
+      "sha256": "bdb22a0847653fe0b0bfd6d32da44c9275b884d082b92ce055a8303a4d203059"
+    },
+    {
+      "id": "requests-details",
+      "path": "images/requests/details.png",
+      "width": 640,
+      "height": 786,
+      "bytes": 60055,
+      "sha256": "9f8b03019dcce25a01d2f47870659050d202006f34541f01ac605a97a291f4ce"
+    },
+    {
+      "id": "requests-performance",
+      "path": "images/requests/performance.png",
+      "width": 640,
+      "height": 536,
+      "bytes": 38794,
+      "sha256": "28bcc8621212ad17797c52dd1dd0500bea39576cbbcb619c3644c565f9a56d0b"
+    },
+    {
+      "id": "requests-diagnostics",
+      "path": "images/requests/diagnostics.png",
+      "width": 640,
+      "height": 786,
+      "bytes": 60462,
+      "sha256": "fe7aacdc3bb461c3c3e03e706b247fd6aad712046b9edcd6e916a1d959c19885"
+    },
+    {
+      "id": "console-overview",
+      "path": "images/console/overview.png",
+      "width": 520,
+      "height": 187,
+      "bytes": 20568,
+      "sha256": "14080ca1d3823173641b48760c74207873b443c51959ab3b9fd6775c31126380"
+    },
+    {
+      "id": "console-limits",
+      "path": "images/console/limits.png",
+      "width": 520,
+      "height": 232,
+      "bytes": 24247,
+      "sha256": "a566b986d4ca187c9a51989bece06170c96749f4703e3108c8200f03214b741b"
+    },
+    {
+      "id": "console-limits-composer",
+      "path": "images/console/limits-composer.png",
+      "width": 520,
+      "height": 536,
+      "bytes": 40505,
+      "sha256": "1519887bb4113de7a59c2a32416b012a4db336d491dc6fc5ad9366031c977b34"
+    },
+    {
+      "id": "console-pause",
+      "path": "images/console/pause.png",
+      "width": 520,
+      "height": 232,
+      "bytes": 25788,
+      "sha256": "b3cc2d450b92f0db80a1e0b41dc20706a92741e54a7106489da3fbf58971d540"
+    },
+    {
+      "id": "console-capture",
+      "path": "images/console/capture.png",
+      "width": 520,
+      "height": 232,
+      "bytes": 24769,
+      "sha256": "5bb88675626c89215741462a23041165d5fa20c847057c1d2e089db3579efe92"
+    },
+    {
+      "id": "console-export",
+      "path": "images/console/export.png",
+      "width": 520,
+      "height": 358,
+      "bytes": 35967,
+      "sha256": "9a7ecebd9ac8238ffd06cf951d21c9938f3c0e0dc50f16c733835245dcf41b20"
+    },
+    {
+      "id": "console-system",
+      "path": "images/console/system.png",
+      "width": 520,
+      "height": 375,
+      "bytes": 32295,
+      "sha256": "bf0656b06a16443105edde8445dd576530ca0c9552d904eba0780e9b3760ac45"
+    },
+    {
+      "id": "settings-dashboard",
+      "path": "images/settings/dashboard.png",
+      "width": 1080,
+      "height": 648,
+      "bytes": 64623,
+      "sha256": "552e5eb8dd659ae6db9af65400d870b0321cab7c47f47df0fedfeb297025cbb7"
+    },
+    {
+      "id": "settings-queue",
+      "path": "images/settings/queue.png",
+      "width": 1080,
+      "height": 728,
+      "bytes": 82450,
+      "sha256": "50cb25cedddf25370289aed4880a8a05175ca0d6d1b4c7668b392bc883f12a89"
+    },
+    {
+      "id": "settings-storage",
+      "path": "images/settings/storage.png",
+      "width": 1080,
+      "height": 648,
+      "bytes": 70409,
+      "sha256": "be4e919134cd3d9d27ffde8d92ec73963de85c701f32ec79851914f8f01fd639"
+    },
+    {
+      "id": "settings-providers",
+      "path": "images/settings/providers.png",
+      "width": 1080,
+      "height": 648,
+      "bytes": 92533,
+      "sha256": "f348bb3b7aa27a5f245fd42a128ad7aa70e4f5fe76e72e1a09e117a8fc7d6044"
+    },
+    {
+      "id": "settings-backup",
+      "path": "images/settings/backup.png",
+      "width": 1080,
+      "height": 728,
+      "bytes": 76963,
+      "sha256": "ce9a91b6e951c3dcde87b6787cf7d7a07263202a2dc458a03259c001f5b4d4b7"
+    },
+    {
+      "id": "theme-tray",
+      "path": "images/theme/tray.png",
+      "width": 368,
+      "height": 753,
+      "bytes": 51304,
+      "sha256": "79ffed8c92d69a5d18ae69bc1ef5e79e09f383a2e039866ef34aab03667fb313"
+    }
+  ]
+}

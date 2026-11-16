@@ -17,7 +17,6 @@ import json
 import os
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import textwrap
@@ -31,6 +30,10 @@ import nh3
 from markdown.extensions.toc import TocExtension
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts import site_llm, site_plates
+from scripts.site_media import IMAGE_SUFFIXES, SITE_IMAGE_EXCLUDES, image_size
 SITE_SRC = ROOT / "site-src"
 TEMPLATES = SITE_SRC / "templates"
 # The published site's canonical origin. The Pages workflow passes the live base
@@ -64,15 +67,6 @@ BRAND_ASSETS = {
 # embeds. The build publishes exactly the faces the stylesheet requests, so the
 # two surfaces cannot ship different fonts and a typo cannot 404 silently.
 FONT_URL = re.compile(r'url\("(fonts/[^"]+)"\)')
-# README-only artwork stays in the repository for GitHub's renderer; no
-# generated site page references it.
-SITE_IMAGE_EXCLUDES = frozenset({
-    "brand/readme-cover-dark.png",
-    "brand/readme-cover-light.png",
-    "brand/readme-spec.svg",
-    "brand/readme-spec-mobile.svg",
-})
-
 ROOT_PAGE_MAP = {
     "README.md": "index.html",
     "CONTRIBUTING.md": "contributing.html",
@@ -90,6 +84,7 @@ NAV_GROUPS = (
             ("Documentation", "docs/index.html", "docs/README.md"),
             ("Install and first run", "docs/install.html", "docs/install.md"),
             ("Dashboard tour", "docs/dashboard.html", "docs/dashboard.md"),
+            ("Capture gallery", "docs/gallery.html", "docs/gallery.md"),
             ("Protocol and clients", "docs/protocol.html", "docs/protocol.md"),
         ),
     ),
@@ -149,7 +144,6 @@ PARAGRAPH = re.compile(r"<p>(.*?)</p>", re.DOTALL)
 TAG = re.compile(r"<[^>]+>")
 SPACE = re.compile(r"\s+")
 MARKDOWN_SUFFIXES = (".md", ".markdown")
-IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico")
 
 
 @dataclass(frozen=True)
@@ -394,26 +388,6 @@ def previous_next(current_output: str) -> tuple[tuple[str, str] | None, tuple[st
     return None, None
 
 
-def image_size(path: Path) -> tuple[int, int] | None:
-    """Read PNG or SVG dimensions without requiring an image library."""
-    try:
-        if path.suffix.lower() == ".png":
-            data = path.read_bytes()[:24]
-            if data[:8] != b"\x89PNG\r\n\x1a\n":
-                return None
-            width, height = struct.unpack(">II", data[16:24])
-            return width, height
-        if path.suffix.lower() == ".svg":
-            head = path.read_text(encoding="utf-8", errors="replace")[:1000]
-            width = re.search(r'\bwidth="(\d+)"', head)
-            height = re.search(r'\bheight="(\d+)"', head)
-            if width and height:
-                return int(width.group(1)), int(height.group(1))
-    except (OSError, ValueError, struct.error):
-        return None
-    return None
-
-
 def site_page_for(source: Path) -> str | None:
     key = source.relative_to(ROOT).as_posix()
     if key in ROOT_PAGE_MAP:
@@ -604,6 +578,7 @@ def render_fragment(
     content = sanitize_content(content)
     content = rewrite_content_urls(content, source, output)
     content = enhance_images_with_root(content, output, site_root)
+    content = site_plates.enhance(content)
     content = render_callouts(content)
     return content
 
@@ -857,6 +832,18 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
     edit_url = GITHUB_EDIT + source_key
     source_url = GITHUB_BLOB + source_key
     group = nav_group_of(page.output)
+    markdown_href = Path(site_llm.markdown_name(page.output)).name
+    # The twin is a real page format, not only a crawler affordance: expose it
+    # beside the title so a reader can open the source or copy the whole page.
+    formats = (
+        '<div class="doc-formats">'
+        f'<a class="doc-format" href="{attr_escape(markdown_href)}" target="_blank" '
+        'rel="noopener noreferrer" type="text/markdown">Markdown</a>'
+        '<button class="doc-format" type="button" data-copy-doc>Copy page</button>'
+        '<span class="sr-only" role="status" data-copy-status></span>'
+        "</div>"
+    )
+    content = content.replace("</h1>", "</h1>" + formats, 1)
     crumbs = "" if page.output == "docs/index.html" else (
         '<nav class="crumbs" aria-label="Breadcrumb">'
         f'<a href="{attr_escape(page_relative("docs/index.html", page.output))}">Docs</a>'
@@ -919,6 +906,11 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
         theme_color=theme_color,
         active="docs",
         assets=assets,
+        # The twin sits beside the rendered page, so the href is its basename.
+        # A root-relative path would break a subpath deployment, and the full
+        # output path would resolve to docs/docs/<page>.md.
+        head_extra='<link rel="alternate" type="text/markdown" href="'
+        + attr_escape(markdown_href) + '">',
     )
     return render_base(values), {
         "title": title,
@@ -1012,12 +1004,17 @@ def render_tokens_css(tokens: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# The three files every page loads before any content renders. They are served
-# at content-hashed URLs so a cached page and a new deployment can never pair a
-# document with an incompatible stylesheet or script; GitHub Pages sets its own
-# Cache-Control, and a unique URL is the part this repository controls.
+# The shell every page loads before any content renders, plus the theme layer
+# the dashboard and site share. They are served at content-hashed URLs so a
+# cached page and a new deployment can never pair a document with an
+# incompatible stylesheet or script; GitHub Pages sets its own Cache-Control,
+# and a unique URL is the part this repository controls.
 SHELL_ASSETS = {
     "asset_tokens": ("tokens", "css", "tokens.css"),
+    "asset_themes": ("themes", "css", "themes.css"),
+    "asset_theme_boot": ("theme_boot", "js", "theme_boot.js"),
+    "asset_theme_state": ("theme_state", "js", "theme_state.js"),
+    "asset_site_theme": ("site_theme", "js", "site_theme.js"),
     "asset_site_css": ("site", "css", "site.css"),
     "asset_site_js": ("site", "js", "site.js"),
 }
@@ -1035,6 +1032,10 @@ def asset_filename(stem: str, extension: str, content: bytes) -> str:
 def shell_sources(tokens: dict[str, str]) -> dict[str, bytes]:
     return {
         "asset_tokens": render_tokens_css(tokens).encode(),
+        "asset_themes": (ROOT / "internal/web/static/css/themes.css").read_bytes(),
+        "asset_theme_boot": (ROOT / "internal/web/static/js/theme_boot.js").read_bytes(),
+        "asset_theme_state": (ROOT / "internal/web/static/js/theme_state.js").read_bytes(),
+        "asset_site_theme": (SITE_SRC / "assets" / "site_theme.js").read_bytes(),
         "asset_site_css": (SITE_SRC / "assets" / "site.css").read_bytes(),
         "asset_site_js": (SITE_SRC / "assets" / "site.js").read_bytes(),
     }
@@ -1066,16 +1067,20 @@ def retained_shell_assets() -> dict[str, list[bytes]]:
     generations stay in the published output. A checkout without history (a
     source archive) simply has nothing to retain.
     """
-    retained: dict[str, list[bytes]] = {
-        "asset_tokens": [], "asset_site_css": [], "asset_site_js": []}
+    retained: dict[str, list[bytes]] = {key: [] for key in SHELL_ASSETS}
     tokens_path = "internal/web/static/css/dashboard.css"
     for revision in git_history(tokens_path):
         source = git_show(revision, tokens_path)
         if source is not None:
             retained["asset_tokens"].append(
                 render_tokens_css(root_custom_properties(source.decode())).encode())
-    for key, path in (("asset_site_css", "site-src/assets/site.css"),
-                      ("asset_site_js", "site-src/assets/site.js")):
+    for key, path in (
+            ("asset_themes", "internal/web/static/css/themes.css"),
+            ("asset_theme_boot", "internal/web/static/js/theme_boot.js"),
+            ("asset_theme_state", "internal/web/static/js/theme_state.js"),
+            ("asset_site_theme", "site-src/assets/site_theme.js"),
+            ("asset_site_css", "site-src/assets/site.css"),
+            ("asset_site_js", "site-src/assets/site.js")):
         for revision in git_history(path):
             source = git_show(revision, path)
             if source is not None:
@@ -1228,6 +1233,10 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
         json.dumps(search_index, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    records = site_llm.page_records(
+        pages, search_index, NAV_GROUPS, root=ROOT,
+        base_url=base_url, version=version)
+    site_llm.write_outputs(output, records, base_url=base_url, version=version)
     write_sitemap(
         output,
         base_url,
@@ -1248,6 +1257,11 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("SITE_URL", DEFAULT_BASE_URL),
         help="public site URL used for canonical and social metadata",
     )
+    parser.add_argument(
+        "--write-manifest",
+        action="store_true",
+        help="also copy the generated docs index into internal/docs/docs.json for the MCP embed",
+    )
     args = parser.parse_args(argv)
     # The domain has one owner outside this repository: the Pages setting. Warn
     # when a build for the live site disagrees with the committed default, which
@@ -1262,6 +1276,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     try:
         outputs = build_site(Path(args.output), base_url=args.base_url)
+        if args.write_manifest:
+            site_llm.write_checked_manifest(
+                Path(args.output), ROOT / "internal/docs/docs.json")
     except BuildError as exc:
         print(f"build_site: {exc}", file=sys.stderr)
         return 1

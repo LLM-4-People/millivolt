@@ -502,6 +502,20 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 	live := devInstance(t)
 	upstream := fixtureUpstream(t)
 
+	// Docs: local embedded content, independent of the proxy and its storage.
+	index := live.invoke(t, "docs_list", map[string]any{})
+	if len(array(t, index, "pages")) < 15 {
+		t.Fatalf("docs_list returned too few pages: %v", index["count"])
+	}
+	search := live.invoke(t, "docs_search", map[string]any{"query": "operator token"})
+	if len(array(t, search, "results")) == 0 {
+		t.Fatalf("docs_search found no operator token section: %v", search)
+	}
+	read := live.invoke(t, "docs_read", map[string]any{"path": "docs/mcp.md", "section": "tools"})
+	if text(t, read, "text") == "" || text(t, read, "path") != "docs/mcp.md" {
+		t.Fatalf("docs_read returned no tools section: %v", read)
+	}
+
 	// describe: the reference, with the live schema of a real database.
 	reference := live.invoke(t, "describe", map[string]any{})
 	objects := map[string]bool{}

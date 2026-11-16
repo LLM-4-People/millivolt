@@ -12,7 +12,8 @@ from unittest.mock import AsyncMock, patch
 from playwright.async_api import async_playwright
 
 from .. import browser_check as fixture
-from ..explorer_check import docs_directory, docs_snapshot, history_route, publish_images
+from ..docs_capture import publish as publish_images
+from ..explorer_check import docs_directory, docs_snapshot, history_route
 from ..browser_check import require
 from ..support import ROOT, clip_js
 
@@ -163,6 +164,19 @@ async def history_method_checks():
             route.abort.assert_awaited_once_with()
             delegated.assert_not_awaited()
             require(len(errors) == 1, 'mutating POST was admitted during capture')
+        # The dashboard's own static files are reads, including the
+        # self-hosted faces that render the captures. Only /dash/ files with a
+        # published suffix and clean segments are admitted.
+        for path in ('/dash/js/core.js', '/dash/css/dashboard.css',
+                     '/dash/vendor/uplot.js',
+                     '/dash/fonts/instrument-sans.woff2'):
+            route = SimpleNamespace(request=SimpleNamespace(method='GET', url=base + path), abort=AsyncMock())
+            errors = []
+            await history_route(route, base, errors)
+            delegated.assert_awaited_once_with(route, base, errors)
+            route.abort.assert_not_awaited()
+            require(not errors, 'dashboard static asset was rejected: ' + path)
+            delegated.reset_mock()
         for method in ('GET', 'HEAD'):
             route = SimpleNamespace(request=SimpleNamespace(method=method, url=base + '/'), abort=AsyncMock())
             errors = []

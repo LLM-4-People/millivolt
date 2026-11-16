@@ -66,14 +66,15 @@ func render(defaults map[string]string, flags []Flag) ([]byte, error) {
 	b.WriteString("     after changing one of those owners. -->\n\n")
 	b.WriteString("Settings and the proxy CLI write the same fields. The dashboard Settings sheet\n")
 	b.WriteString("saves them through `GET` and `POST /admin/config`, the YAML file holds them at\n")
-	b.WriteString("rest, and the proxy flags override a few of them at launch. Every row below\n")
+	b.WriteString("rest, and the proxy flags override a few of them at launch. Every block below\n")
 	b.WriteString("is generated from the code that owns it, so a setting's key, label, type,\n")
 	b.WriteString("bound, reload behavior and help cannot describe one thing here and another in\n")
 	b.WriteString("the dashboard. A `-` under accepted values means the schema declares no bound\n")
 	b.WriteString("and no closed vocabulary for that key.\n\n")
 	b.WriteString("Read [configuration](configuration.md) for precedence, the YAML file and the\n")
-	b.WriteString("settings schema, and [containers](containers.md) for image mounts, restore\n")
-	b.WriteString("paths and the deployment lifecycle.\n")
+	b.WriteString("settings schema, [containers](containers.md) for image mounts, restore paths\n")
+	b.WriteString("and the deployment lifecycle, and the [capture gallery](gallery.md) for the\n")
+	b.WriteString("rendered sheet on both surfaces.\n\n")
 
 	byCategory := make(map[string][]config.Field, len(config.Categories()))
 	for _, field := range config.Schema() {
@@ -84,7 +85,7 @@ func render(defaults map[string]string, flags []Flag) ([]byte, error) {
 		if len(fields) == 0 {
 			continue
 		}
-		b.WriteString("\n## " + category.Label + "\n\n")
+		b.WriteString("## " + category.Label + "\n\n")
 		if category.Help != "" {
 			help, err := prose(category.ID, category.Help)
 			if err != nil {
@@ -92,44 +93,34 @@ func render(defaults map[string]string, flags []Flag) ([]byte, error) {
 			}
 			b.WriteString(help + "\n\n")
 		}
-		b.WriteString("| Setting | Default | Accepted values | Reload | Description |\n")
-		b.WriteString("| --- | --- | --- | --- | --- |\n")
 		for _, field := range fields {
-			row, err := settingRow(field, defaults)
+			block, err := settingBlock(field, defaults)
 			if err != nil {
 				return nil, err
 			}
-			b.WriteString(row + "\n")
+			b.WriteString(block)
 		}
 	}
 
-	b.WriteString("\n## Proxy CLI flags\n\n")
-	b.WriteString("The flag set in `cmd/proxy` owns these rows. Every flag is parsed before any\n")
+	b.WriteString("## Proxy CLI flags\n\n")
+	b.WriteString("The flag set in `cmd/proxy` owns these blocks. Every flag is parsed before any\n")
 	b.WriteString("configuration is loaded, so the default below is the registration default, not\n")
 	b.WriteString("the effective value after a config file or another override.\n\n")
-	b.WriteString("| Flag | Type | Default | Usage |\n")
-	b.WriteString("| --- | --- | --- | --- |\n")
 	for _, flag := range flags {
-		usage, err := prose("-"+flag.Name, flag.Usage)
+		block, err := flagBlock(flag)
 		if err != nil {
 			return nil, err
 		}
-		typeCell, err := code("-"+flag.Name+" type", flag.Type)
-		if err != nil {
-			return nil, err
-		}
-		defaultCell, err := code("-"+flag.Name+" default", flag.Default)
-		if err != nil {
-			return nil, err
-		}
-		b.WriteString("| `-" + flag.Name + "` | " + typeCell + " | " + defaultCell + " | " + usage + " |\n")
+		b.WriteString(block)
 	}
 	return []byte(b.String()), nil
 }
 
-// settingRow renders one schema field as one table row. Every cell is read
-// from the field or from the rendered default; nothing is restated here.
-func settingRow(field config.Field, defaults map[string]string) (string, error) {
+// settingBlock renders one schema field as a readable block: the key, label
+// and type on one line, the compact facts on the next, then the help at full
+// width. A long structured default moves into a fenced block instead of
+// forcing a table column wider than the page.
+func settingBlock(field config.Field, defaults map[string]string) (string, error) {
 	def, ok := defaults[field.Key]
 	if !ok {
 		return "", fmt.Errorf("schema key %q has no rendered default: the YAML writer did not emit it", field.Key)
@@ -138,19 +129,15 @@ func settingRow(field config.Field, defaults map[string]string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	defaultCell, err := code(field.Key+" default", def)
-	if err != nil {
-		return "", err
-	}
 	typeCell, err := code(field.Key+" type", typeName(field))
 	if err != nil {
 		return "", err
 	}
-	accepted, err := acceptedValues(field)
+	label, err := prose(field.Key+" label", field.Label)
 	if err != nil {
 		return "", err
 	}
-	label, err := prose(field.Key+" label", field.Label)
+	accepted, err := acceptedValues(field)
 	if err != nil {
 		return "", err
 	}
@@ -162,11 +149,90 @@ func settingRow(field config.Field, defaults map[string]string) (string, error) 
 	if field.HotReload {
 		reload = "Hot-reloads"
 	}
-	// The dashboard's label rides beside the key in one cell: seven columns do
-	// not fit a reading measure, and the label is how an operator finds the
-	// field, so it cannot be dropped.
-	return "| " + keyCell + " (" + label + " · " + typeCell + ") | " + defaultCell +
-		" | " + accepted + " | " + reload + " | " + help + " |", nil
+	var b strings.Builder
+	b.WriteString("#### " + keyCell + "\n\n" + label + " · " + typeCell + "\n\n")
+	if longDefault(def) {
+		b.WriteString("Default:\n\n```yaml\n" + strings.TrimRight(def, "\n") + "\n```\n\n")
+	} else {
+		defaultCell, err := code(field.Key+" default", def)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString("Default " + defaultCell + " · ")
+	}
+	b.WriteString("Accepted " + accepted + " · " + reload + "\n\n")
+	b.WriteString(helpParagraphs(help) + "\n\n")
+	return b.String(), nil
+}
+
+// flagBlock renders one proxy flag in the same shape as a setting.
+func flagBlock(flag Flag) (string, error) {
+	keyCell, err := code("-"+flag.Name+" key", "-"+flag.Name)
+	if err != nil {
+		return "", err
+	}
+	typeCell, err := code("-"+flag.Name+" type", flag.Type)
+	if err != nil {
+		return "", err
+	}
+	defaultCell, err := code("-"+flag.Name+" default", flag.Default)
+	if err != nil {
+		return "", err
+	}
+	usage, err := prose("-"+flag.Name+" usage", flag.Usage)
+	if err != nil {
+		return "", err
+	}
+	return "#### " + keyCell + "\n\n" + typeCell + "\n\nDefault " + defaultCell +
+		"\n\n" + helpParagraphs(usage) + "\n\n", nil
+}
+
+// longDefault keeps a structured YAML default out of the compact fact line.
+// The threshold is presentation only; the value still comes from the one YAML
+// writer and is compared byte-for-byte by the config suite.
+func longDefault(value string) bool {
+	return len(value) > 80 || strings.Contains(value, "\n")
+}
+
+// helpParagraphs keeps a long owner sentence set scannable. It splits after
+// sentence punctuation and groups sentences into paragraphs of at most 85
+// words. Words and punctuation are untouched; only whitespace changes.
+func helpParagraphs(text string) string {
+	words := strings.Fields(text)
+	if len(words) <= 85 {
+		return text
+	}
+	var paragraphs []string
+	var current []string
+	count := 0
+	for _, sentence := range splitSentences(text) {
+		n := len(strings.Fields(sentence))
+		if count > 0 && count+n > 85 {
+			paragraphs = append(paragraphs, strings.Join(current, " "))
+			current = current[:0]
+			count = 0
+		}
+		current = append(current, sentence)
+		count += n
+	}
+	if len(current) > 0 {
+		paragraphs = append(paragraphs, strings.Join(current, " "))
+	}
+	return strings.Join(paragraphs, "\n\n")
+}
+
+var sentenceEnd = regexp.MustCompile(`[.!?]\s+`)
+
+func splitSentences(text string) []string {
+	var out []string
+	start := 0
+	for _, match := range sentenceEnd.FindAllStringIndex(text, -1) {
+		end := match[0] + 1
+		out = append(out, strings.TrimSpace(text[start:end]))
+		start = match[1]
+	}
+	out = append(out, strings.TrimSpace(text[start:]))
+	return out
 }
 
 // typeName is the UI/API type the dashboard renders a control from, with the
@@ -204,9 +270,9 @@ func acceptedValues(field config.Field) (string, error) {
 	return strings.Join(parts, ", "), nil
 }
 
-// prose escapes one sentence for a table cell. A cell that is not a code span
-// still has to escape the column separator, and an odd backtick would open a
-// code span that swallows the rest of the row, so it fails loudly instead.
+// prose validates one owner sentence before it reaches the page. A line break
+// would break the block shape, and an odd backtick would open a code span that
+// swallows the rest of the paragraph, so both fail loudly instead.
 func prose(owner, text string) (string, error) {
 	if strings.ContainsAny(text, "\r\n") {
 		return "", fmt.Errorf("%s: text contains a line break", owner)
@@ -214,7 +280,7 @@ func prose(owner, text string) (string, error) {
 	if strings.Count(text, "`")%2 != 0 {
 		return "", fmt.Errorf("%s: text carries an unbalanced backtick", owner)
 	}
-	return strings.ReplaceAll(text, "|", `\|`), nil
+	return text, nil
 }
 
 // code escapes one literal value and wraps it in a code span. A value that

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+@font-face { font-family: "Instrument Sans"; font-weight: 400 700; src: url("{{font_sans}}") format("woff2"); }
+@font-face { font-family: "Instrument Serif"; font-weight: 400; src: url("{{font_serif}}") format("woff2"); }
+@font-face { font-family: JBM; font-weight: 400 700; src: url("{{font_mono}}") format("woff2"); }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1280px; height: 640px; }
+body {
+  background: #0d0b09; color: #f2eee7; overflow: hidden;
+  font-family: "Instrument Sans", system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+}
+.plate { position: relative; width: 1280px; height: 640px; overflow: hidden; background: #0d0b09; }
+.art {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+  object-position: 62% 38%; opacity: .62; filter: saturate(.9) brightness(.9);
+}
+.wash {
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(90deg, rgba(10,9,7,.98) 0%, rgba(10,9,7,.94) 30%, rgba(10,9,7,.62) 48%, rgba(10,9,7,.12) 66%, rgba(10,9,7,.42) 100%),
+    linear-gradient(0deg, rgba(10,9,7,.86) 0%, rgba(10,9,7,.06) 34%, rgba(10,9,7,.28) 100%);
+}
+.vignette { position: absolute; inset: 0; background: radial-gradient(120% 100% at 72% 42%, transparent 30%, rgba(0,0,0,.55) 100%); }
+.frame { position: absolute; inset: 18px; border: 1px solid rgba(232,228,222,.16); border-radius: 10px; }
+.frame::before, .frame::after { content: ""; position: absolute; width: 7px; height: 7px; border: 1px solid rgba(232,228,222,.34); }
+.frame::before { left: -1px; top: -1px; border-right: 0; border-bottom: 0; border-radius: 10px 0 0 0; }
+.frame::after { right: -1px; bottom: -1px; border-left: 0; border-top: 0; border-radius: 0 0 10px 0; }
+
+.brand { position: absolute; left: 44px; top: 38px; display: flex; align-items: center; gap: 12px; }
+.mark { width: 34px; height: 34px; border-radius: 9px; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
+.wordmark { font: 500 24px/1 JBM; letter-spacing: -.055em; }
+.brand-sub { display: flex; align-items: center; gap: 12px; margin-left: 3px; }
+.brand-rule { width: 1px; height: 22px; background: rgba(232,228,222,.2); }
+.brand-note { color: #a39b8b; font: 500 10px/1.2 JBM; letter-spacing: .16em; }
+
+.eyebrow { position: absolute; left: 44px; top: 132px; display: flex; align-items: center; gap: 9px; color: #9b9485; font: 600 9.5px/1.4 JBM; letter-spacing: .18em; }
+.eyebrow::before { content: ""; width: 18px; height: 1px; background: #7aa0ff; }
+h1 { position: absolute; left: 42px; top: 158px; font: 400 48px/.98 "Instrument Serif"; letter-spacing: -.03em; }
+.lede { position: absolute; left: 44px; top: 270px; width: 408px; color: #b7afa1; font: 400 15px/1.5 "Instrument Sans"; }
+.lede b { color: #e8e4de; font-weight: 600; }
+
+.readout-label { position: absolute; left: 44px; top: 358px; color: #8f887a; font: 600 9px/1.2 JBM; letter-spacing: .18em; }
+.kpis { position: absolute; left: 44px; top: 376px; display: grid; grid-template-columns: 200px 200px; gap: 8px; }
+.kpi { width: 200px; min-height: 80px; padding: 10px 12px 9px; background: rgba(18,16,13,.82); border: 1px solid rgba(232,228,222,.16); border-radius: 7px; }
+.kpi dt { color: #9b9485; font: 600 8.5px/1.2 JBM; letter-spacing: .1em; text-transform: uppercase; }
+.kpi dd { margin-top: 5px; color: #f2eee7; font: 600 23px/1 JBM; letter-spacing: -.04em; }
+.kpi .sub { display: block; margin-top: 5px; color: #827b6e; font: 500 8.5px/1.2 JBM; white-space: nowrap; }
+
+.foot { position: absolute; left: 44px; bottom: 34px; display: flex; align-items: center; gap: 10px; color: #9b9485; font: 500 9.5px/1.2 JBM; letter-spacing: .14em; }
+.foot .bar { width: 3px; height: 13px; background: #7aa0ff; }
+.foot .sep { color: #5f594e; }
+
+.shot-label { position: absolute; left: 512px; top: 40px; color: #a39b8b; font: 600 9px/1.2 JBM; letter-spacing: .18em; }
+.shot-label b { color: #e8e4de; font-weight: 600; }
+.shot-label .dot { display: inline-block; width: 5px; height: 5px; margin-right: 6px; border-radius: 50%; background: #5fd0a8; box-shadow: 0 0 0 3px rgba(95,208,168,.14); }
+.shot {
+  position: absolute; left: 512px; top: 58px; width: 724px; height: 503px;
+  object-fit: cover; border-radius: 9px; border: 1px solid rgba(232,228,222,.2);
+  box-shadow: 0 28px 60px rgba(0,0,0,.6), 0 2px 0 rgba(255,255,255,.04) inset;
+}
+.shot-caption { position: absolute; right: 44px; top: 572px; color: #8f887a; font: 500 9px/1.2 JBM; letter-spacing: .12em; text-align: right; }
+.shot-caption b { color: #b7afa1; font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="plate">
+  <img class="art" src="{{hero}}" alt="">
+  <div class="wash"></div>
+  <div class="vignette"></div>
+  <div class="frame"></div>
+
+  <div class="brand">
+    <img class="mark" src="{{mark}}" alt="">
+    <span class="wordmark">millivolt</span>
+    <span class="brand-sub"><span class="brand-rule"></span><span class="brand-note">MODEL RELAY / DASHBOARD</span></span>
+  </div>
+
+  <p class="eyebrow">{{eyebrow}}</p>
+  <h1>{{headline}}</h1>
+  <p class="lede">{{lede}}</p>
+
+  <p class="readout-label">SAMPLE HISTORY / REDACTED CAPTURE</p>
+  <dl class="kpis">
+    <div class="kpi"><dt>requests</dt><dd>{{requests}}</dd><span class="sub">{{requests_sub}}</span></div>
+    <div class="kpi"><dt>total cost</dt><dd>{{cost}}</dd><span class="sub">{{cost_sub}}</span></div>
+    <div class="kpi"><dt>cache hit</dt><dd>{{cache}}</dd><span class="sub">{{cache_sub}}</span></div>
+    <div class="kpi"><dt>error rate</dt><dd>{{errors}}</dd><span class="sub">{{errors_sub}}</span></div>
+  </dl>
+
+  <div class="foot"><span class="bar"></span>{{footer}}</div>
+
+  <p class="shot-label"><span class="dot"></span><b>FULL DASHBOARD</b> / SAMPLE HISTORY</p>
+  <img class="shot" src="{{dashboard}}" alt="">
+  <p class="shot-caption"><b>KPI band · scoped explorer · timelines · request log</b><br>sample values, not a benchmark</p>
+</div>
+</body>
+</html>

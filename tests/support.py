@@ -8,9 +8,14 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-# The request table's learned floors are content-sized. Leave enough width for
-# font and subpixel variation so the published docs capture never clips.
-DOCS_CAPTURE_VIEWPORT = {'width': 2208, 'height': 900}
+
+
+def viewport(name: str) -> dict:
+    """One measured viewport from the capture registry, for a harness."""
+    from scripts.gallery.model import VIEWPORTS
+
+    size = VIEWPORTS[name]
+    return {'width': size.width, 'height': size.height}
 
 
 def require(value, message):

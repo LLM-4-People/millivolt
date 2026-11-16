@@ -19,9 +19,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from scripts.build_site import (DEFAULT_BASE_URL, README_ANCHORS, build_site, image_size,
+from scripts.build_site import (DEFAULT_BASE_URL, README_ANCHORS, build_site,
                                 markdown_engine, performance_headline, render_fragment,
                                 site_fonts, toc_html)
+from scripts.site_media import IMAGE_SUFFIXES, SITE_IMAGE_EXCLUDES, image_size
 from scripts.perf_docs import check as performance_drift_errors
 from tests.repository_check import markdown_anchors
 from tests.support import (PALETTE_OWNER, ROOT, SITE_STYLESHEET, root_custom_properties,
@@ -44,12 +45,14 @@ RUNTIME_ASSET_ALLOWLIST = frozenset({
     # The pre-hash names. A document cached before the content-hashed deploy
     # still asks for these; they carry the current bytes and disappear only
     # after every client cache has turned over. No page links them.
-    "assets/tokens.css", "assets/site.css", "assets/site.js",
+    "assets/tokens.css", "assets/themes.css", "assets/theme_boot.js",
+    "assets/theme_state.js", "assets/site_theme.js", "assets/site.css", "assets/site.js",
 })
 # The shell files at content-hashed URLs: each generation is served for a
 # document cached by an earlier deployment, so none of them has an in-repo
 # consumer. The current generation is asserted separately.
-SHELL_GENERATION = re.compile(r"assets/(?:tokens|site)\.[0-9a-f]{10}\.(?:css|js)$")
+SHELL_GENERATION = re.compile(
+    r"assets/(?:tokens|themes|theme_boot|theme_state|site_theme|site)\.[0-9a-f]{10}\.(?:css|js)$")
 
 
 class PageParser(HTMLParser):
@@ -157,24 +160,47 @@ def entity_color_errors() -> list[str]:
             for value in sorted(used - canonical)]
 
 
-BRAND_IMAGE_CONTRACTS = {
-    "docs/images/brand/readme-cover-dark.png": (1600, 640),
-    "docs/images/brand/readme-cover-light.png": (1600, 640),
-    "docs/images/brand/readme-spec.svg": (1600, 144),
-    "docs/images/brand/readme-spec-mobile.svg": (800, 384),
-    "site-src/assets/og.png": (1200, 630),
-    ".github/social-preview.png": (1280, 640),
-}
+BRAND_MANIFEST = ROOT / "scripts/brand/manifest.json"
+
+
+def brand_assets() -> dict[str, dict]:
+    payload = json.loads(BRAND_MANIFEST.read_text(encoding="utf-8"))
+    if payload.get("schema") != 1:
+        raise ValueError("scripts/brand/manifest.json schema is not 1")
+    return {entry["path"]: entry for entry in payload["assets"]}
 
 
 def brand_image_errors() -> list[str]:
-    """Pin the dimensions of artwork that GitHub renders or a maintainer
-    uploads. The PWA icon pixel contracts live in the Go web tests."""
+    """Verify every generated brand plate against its one manifest.
+
+    Dimensions used to be a second hand-maintained map here. The manifest is
+    written by scripts/brand/build.py, so the asset, its contract and its hash
+    move together; a hand edit to a PNG or an SVG fails instead of shipping.
+    """
     errors = []
-    for name, expected in BRAND_IMAGE_CONTRACTS.items():
-        actual = image_size(ROOT / name)
+    assets = brand_assets()
+    for name, entry in assets.items():
+        path = ROOT / name
+        if not path.is_file():
+            errors.append(f"{name}: missing generated brand asset")
+            continue
+        actual = image_size(path)
+        expected = (entry["width"], entry["height"])
         if actual != expected:
             errors.append(f"{name}: dimensions are {actual}, expected {expected[0]}x{expected[1]}")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != entry["sha256"]:
+            errors.append(f"{name}: sha256 does not match scripts/brand/manifest.json; "
+                          "run python3 -m scripts.brand.build")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for tag in re.findall(r"<img\b[^>]*>", readme):
+        src = re.search(r'\bsrc="([^"]*)"', tag)
+        if not src or src.group(1) not in assets:
+            continue
+        width = re.search(r'\bwidth="(\d+)"', tag)
+        if width and int(width.group(1)) != assets[src.group(1)]["width"]:
+            errors.append(f"README width {width.group(1)} does not match the manifest "
+                          f"width {assets[src.group(1)]['width']} for {src.group(1)}")
     return errors
 
 
@@ -247,18 +273,19 @@ def referenced_shell(site: Path, stem: str, extension: str) -> str:
 
 
 def shell_asset_errors(site: Path) -> list[str]:
-    """The three shell files load at content-hashed URLs.
+    """The shell files load at content-hashed URLs.
 
     A cached document and a new deployment must never pair a page with an
-    incompatible stylesheet or script: the URL names the bytes. The name is
-    verified against the file, the stable spelling must not appear in any page,
-    and the generations the build retained from history must be on disk so a
-    document still holding the previous hash keeps its styling.
+    incompatible stylesheet or script: the URL names the bytes. The set and
+    stable spellings come from the build owner, so a new shared asset cannot be
+    hashed without its cache fallback or test. The name is verified against the
+    file, no page may reference the stable spelling, and the generations the
+    build retained from history must be on disk.
     """
     import scripts.build_site as build_site
 
     errors: list[str] = []
-    for stem, extension in (("tokens", "css"), ("site", "css"), ("site", "js")):
+    for key, (stem, extension, stable) in build_site.SHELL_ASSETS.items():
         name = referenced_shell(site, stem, extension)
         if not name:
             errors.append(f"no page references a content-hashed {stem}.{extension}")
@@ -272,9 +299,9 @@ def shell_asset_errors(site: Path) -> list[str]:
             errors.append(f"assets/{name} does not carry its content hash")
     for page in sorted(site.rglob("*.html")):
         text = page.read_text(encoding="utf-8")
-        for stable in ("assets/tokens.css", "assets/site.css", "assets/site.js"):
-            if stable in text:
-                errors.append(f"{page.relative_to(site)}: references the unhashed {stable}")
+        for key, (_stem, _extension, stable) in build_site.SHELL_ASSETS.items():
+            if f"assets/{stable}" in text:
+                errors.append(f"{page.relative_to(site)}: references the unhashed assets/{stable}")
     if (ROOT / ".git").exists():
         retained = build_site.retained_shell_assets()
         for key, generations in retained.items():
@@ -283,6 +310,144 @@ def shell_asset_errors(site: Path) -> list[str]:
                 name = build_site.asset_filename(stem, extension, content)
                 if not (site / "assets" / name).exists():
                     errors.append(f"retained generation assets/{name} was not published")
+    return errors
+
+
+def docs_manifest_errors(site: Path, base_url: str) -> list[str]:
+    """The LLM/MCP index is generated from the same pages as the site.
+
+    The checked-in copy is the MCP embed; a stale copy would answer with an old
+    title, anchor or route. The site output also has to carry the per-page
+    Markdown and the two llms files, and every absolute Markdown URL must name
+    a file that exists beside its rendered twin.
+    """
+    import scripts.build_site as build_site
+
+    errors: list[str] = []
+    generated_path = site / "docs.json"
+    if not generated_path.is_file():
+        return ["docs.json was not generated"]
+    generated = json.loads(generated_path.read_text(encoding="utf-8"))
+    if generated.get("schema") != 1:
+        errors.append(f"docs.json schema is {generated.get('schema')!r}, want 1")
+    pages = generated.get("pages", [])
+    if not pages:
+        errors.append("docs.json contains no pages")
+    if base_url.rstrip("/") != build_site.DEFAULT_BASE_URL.rstrip("/"):
+        return errors
+    checked = ROOT / "internal/docs/docs.json"
+    if not checked.is_file():
+        errors.append("internal/docs/docs.json is missing; run scripts/build_site.py --write-manifest")
+    elif checked.read_bytes() != generated_path.read_bytes():
+        errors.append("internal/docs/docs.json is stale; run scripts/build_site.py --write-manifest")
+    for record in pages:
+        for key in ("path", "title", "description", "url", "markdown_url", "markdown", "markdown_text", "sections"):
+            if key not in record:
+                errors.append(f"docs.json page {record.get('path', '?')} has no {key}")
+                break
+        markdown = site / record.get("markdown", "")
+        if not markdown.is_file():
+            errors.append(f"docs.json names a missing Markdown twin: {record.get('markdown')}")
+        if not record.get("markdown_text"):
+            errors.append(f"docs.json page {record.get('path')} carries no Markdown")
+        for section in record.get("sections", []):
+            if not section.get("id") or not section.get("heading"):
+                errors.append(f"docs.json page {record.get('path')} has an incomplete section")
+                break
+        page = site / record.get("output", "")
+        if not page.is_file():
+            errors.append(f"docs.json names a missing page: {record.get('output')}")
+        else:
+            href = Path(record["markdown"]).name
+            link = f'<link rel="alternate" type="text/markdown" href="{href}">'
+            page_text = page.read_text(encoding="utf-8")
+            if link not in page_text:
+                errors.append(f"{record['output']} does not advertise its Markdown twin")
+            for needle in ('class="doc-formats"', 'data-copy-doc',
+                           f'<a class="doc-format" href="{href}"'):
+                if needle not in page_text:
+                    errors.append(f"{record['output']} is missing the page-format control: {needle}")
+    llms = site / "llms.txt"
+    if not llms.is_file():
+        errors.append("llms.txt was not generated")
+    else:
+        text = llms.read_text(encoding="utf-8")
+        for record in pages:
+            if record["markdown_url"] not in text:
+                errors.append(f"llms.txt does not link {record['markdown_url']}")
+                break
+    full = site / "llms-full.txt"
+    if not full.is_file():
+        errors.append("llms-full.txt was not generated")
+    else:
+        text = full.read_text(encoding="utf-8")
+        for record in pages:
+            if f"<!-- {record['path']} -->" not in text:
+                errors.append(f"llms-full.txt omits {record['path']}")
+                break
+    return errors
+
+
+def image_size_errors() -> list[str]:
+    """The dimension reader owns WebP too, so a page cannot skip its check.
+
+    Every landing image must declare its intrinsic size. A format the reader
+    cannot parse would silently waive that rule, so the WebP header parse is
+    exercised directly rather than only through the current artwork.
+    """
+    width, height = 1234, 567
+    header = (b"RIFF" + (30).to_bytes(4, "little") + b"WEBPVP8X"
+              + (10).to_bytes(4, "little") + b"\x00" * 4
+              + (width - 1).to_bytes(3, "little")
+              + (height - 1).to_bytes(3, "little") + b"\x00" * 2)
+    with tempfile.TemporaryDirectory(prefix="millivolt-webp-") as temp:
+        path = Path(temp) / "probe.webp"
+        path.write_bytes(header)
+        if image_size(path) != (width, height):
+            return [f"image_size does not read the WebP dimensions: {image_size(path)!r}"]
+    asset = image_size(ROOT / "site-src/assets/relay-field.webp")
+    if asset is None:
+        return ["relay-field.webp has no readable dimensions"]
+    return []
+
+
+def theme_asset_errors(site: Path) -> list[str]:
+    """The site publishes the dashboard's palette owner and shared state verbatim.
+
+    A site-local copy of a palette value or a registry label would let the two
+    surfaces drift. The theme stylesheet and the pre-paint registry are the
+    canonical bytes; the shell loads them before the site stylesheet and
+    applies the default pair in the document, so no frame paints unstyled.
+    """
+    errors: list[str] = []
+    themes_name = referenced_shell(site, "themes", "css")
+    canonical = ROOT / "internal/web/static/css/themes.css"
+    if not themes_name:
+        errors.append("no page references a content-hashed themes.css")
+    elif canonical.is_file() and (site / "assets" / themes_name).read_bytes() != canonical.read_bytes():
+        errors.append("published themes.css is not byte-identical to the dashboard owner")
+    boot_name = referenced_shell(site, "theme_boot", "js")
+    if not boot_name:
+        errors.append("no page references a content-hashed theme_boot.js")
+    elif canonical.is_file():
+        boot = (site / "assets" / boot_name).read_text(encoding="utf-8")
+        ids = sorted(set(re.findall(r'\[data-theme="([a-z-]+)"\]\[data-mode=', canonical.read_text(encoding="utf-8"))))
+        missing = [theme for theme in ids if f"id: '{theme}'" not in boot]
+        if missing:
+            errors.append("theme_boot.js does not register: " + ", ".join(missing))
+    for stem, extension in (("theme_state", "js"), ("site_theme", "js")):
+        if not referenced_shell(site, stem, extension):
+            errors.append(f"no page references a content-hashed {stem}.{extension}")
+    base = (ROOT / "site-src/templates/base.html").read_text(encoding="utf-8")
+    for needle in ('data-theme="instrument" data-mode="black"',
+                   'name="theme-storage-key"',
+                   "{{asset_themes}}", "{{asset_theme_boot}}",
+                   "{{asset_theme_state}}", "{{asset_site_theme}}",
+                   'id="btn-theme"', 'id="theme-menu"'):
+        if needle not in base:
+            errors.append(f"base.html is missing the theme contract: {needle}")
+    if "prefers-color-scheme" in base or 'name="color-scheme"' in base:
+        errors.append("base.html pins color-scheme instead of letting the theme layer own it")
     return errors
 
 
@@ -459,6 +624,10 @@ def performance_headline_escape_errors() -> list[str]:
         page = build_site.render_landing(
             version="0.0.0", base_url="https://example.test/", theme_color="#000000",
             assets={"asset_tokens": "tokens.0000000000.css",
+                    "asset_themes": "themes.0000000000.css",
+                    "asset_theme_boot": "theme_boot.0000000000.js",
+                    "asset_theme_state": "theme_state.0000000000.js",
+                    "asset_site_theme": "site_theme.0000000000.js",
                     "asset_site_css": "site.0000000000.css",
                     "asset_site_js": "site.0000000000.js"})
     finally:
@@ -505,8 +674,38 @@ def docs_image_errors() -> list[str]:
             referenced.add(match.group(0))
     return [f"docs/{rel.relative_to(ROOT / 'docs').as_posix()}: no Markdown consumer"
             for rel in ROOT.joinpath("docs/images").rglob("*")
-            if rel.is_file()
+            if rel.is_file() and rel.suffix.lower() in IMAGE_SUFFIXES
             and rel.relative_to(ROOT / 'docs').as_posix() not in referenced]
+
+
+def gallery_page_errors(site: Path, page_texts: dict[Path, str]) -> list[str]:
+    """Every registry plate must survive the Markdown-to-site upgrade.
+
+    The Markdown test proves the generated page names each plate; this one
+    proves the published page actually carries its figure, anchor, split
+    legend and full-size link. Both run, because either half can regress
+    without the other.
+    """
+    from scripts.gallery import GALLERY
+
+    page = site / "docs/gallery.html"
+    if page not in page_texts:
+        return ["docs/gallery.html was not built"]
+    text = page_texts[page]
+    errors = []
+    figures = text.count('class="doc-plate')
+    if figures != len(GALLERY.plates):
+        errors.append(f"gallery page has {figures} plates, want {len(GALLERY.plates)}")
+    for plate in GALLERY.plates:
+        if f'id="plate-{plate.id}"' not in text:
+            errors.append(f"gallery page has no figure for {plate.id}")
+        target = "../assets/" + plate.path
+        if f'href="{target}"' not in text:
+            errors.append(f"gallery page has no full-size link for {plate.path}")
+    legends = text.count("split · black / clear")
+    if legends != len(GALLERY.plates):
+        errors.append(f"gallery page has {legends} split legends, want {len(GALLERY.plates)}")
+    return errors
 
 
 def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
@@ -514,6 +713,7 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
     errors: list[str] = docs_image_errors()
     pages = sorted(site.rglob("*.html"))
     page_texts = {page: page.read_text(encoding="utf-8") for page in pages}
+    errors.extend(gallery_page_errors(site, page_texts))
     parsed: dict[Path, PageParser] = {}
     for page in pages:
         parser = PageParser()
@@ -653,7 +853,8 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
                  "sitemap.xml", "robots.txt", "assets/og.png"):
         if not (site / name).exists():
             errors.append(f"missing generated file: {name}")
-    for stem, extension in (("tokens", "css"), ("site", "css"), ("site", "js")):
+    import scripts.build_site as build_site
+    for stem, extension, _stable in build_site.SHELL_ASSETS.values():
         if not referenced_shell(site, stem, extension):
             errors.append(f"no page references a content-hashed {stem}.{extension}")
     # One published origin: the metadata a crawler reads names the base URL, so
@@ -695,6 +896,9 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
         errors.append(f"missing referenced token stylesheet: assets/{tokens_name}")
 
     errors.extend(shell_asset_errors(site))
+    errors.extend(image_size_errors())
+    errors.extend(theme_asset_errors(site))
+    errors.extend(docs_manifest_errors(site, base_url))
     errors.extend(docs_shell_layout_errors(site))
 
     site_css_path = ROOT / SITE_STYLESHEET

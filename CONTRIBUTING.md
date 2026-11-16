@@ -66,26 +66,29 @@ operator reading the release page.
 
 Completed feature pushes to `testing` publish only the moving development image.
 All pull requests to `testing`, all code-bearing pushes to `testing`, manually
-dispatched `testing` gates, and manually pushed `v*` tags run the full gate;
-docs and site-only pushes to `testing` run the smaller documentation gate in
-`docs.yml`. An ordinary promotion
-pull request to `main` runs only `check.yml`'s lightweight `required` promotion
-gate: it verifies the head is the current `testing` tip, `main` is already
-merged back into `testing`, and the full gate already succeeded for that
-commit: the canonical `check.yml` push run's own check suite, with `unit`,
-`browser` and both native container legs. A final docs-only commit after the
-closest gated `testing` commit reuses that gate when every path since it is
-docs/site-only. Every non-Dependabot promotion also starts
-[`escalation.yml`](.github/workflows/escalation.yml) on its head and must
-carry a successful `race` job for that exact commit; the proof waits under a
-bounded budget and fails closed. The fallback selects the closest gated testing
-commit from canonical `testing` push runs, with no commit-count bound. For a
-code-bearing head, let the `testing` `check.yml` push gate finish before opening
-or re-running a promotion PR; pending exact check runs get a short bounded wait
-and the proof fails closed while they remain pending. A docs/site-only head has
-no canonical `check.yml` push run of its own, so wait for `docs.yml` or only the
-`required` docs validation. A Dependabot security pull request targets `main`
-directly and therefore still runs the full gate.
+dispatched `testing` gates, and manually pushed `v*` tags run the full gate.
+Docs and site-only pushes to `testing` run the smaller documentation gate in
+`docs.yml`.
+
+An ordinary promotion pull request to `main` runs only `check.yml`'s lightweight
+`required` promotion gate. It verifies the head is the current `testing` tip,
+`main` is already merged back into `testing`, and the full gate already
+succeeded for that commit: the canonical `check.yml` push run's own check
+suite, with `unit`, `browser` and both native container legs.
+
+A final docs-only commit after the closest gated `testing` commit reuses that
+gate when every path since it is docs/site-only. Every non-Dependabot promotion
+also starts [`escalation.yml`](.github/workflows/escalation.yml) on its head and
+must carry a successful `race` job for that exact commit. The proof waits under
+a bounded budget and fails closed. The fallback selects the closest gated
+testing commit from canonical `testing` push runs, with no commit-count bound.
+
+For a code-bearing head, let the `testing` `check.yml` push gate finish before
+opening or re-running a promotion PR. Pending exact check runs get a short
+bounded wait and the proof fails closed while they remain pending. A
+docs/site-only head has no canonical `check.yml` push run of its own, so wait
+for `docs.yml` or only the `required` docs validation. A Dependabot security
+pull request targets `main` directly and therefore still runs the full gate.
 
 ### Promote testing to main
 
@@ -113,7 +116,7 @@ directly and therefore still runs the full gate.
    `docs/`, `site-src/`, the docs and Pages workflows, and `LICENSE`), and the
    merged main push stays docs-only.
 3. Open a pull request from `testing` to `main`. For a code-bearing head, wait
-   for the `testing` `check.yml` push gate to finish first; a docs/site-only
+   for the `testing` `check.yml` push gate to finish first. A docs/site-only
    head has no canonical `check.yml` push run of its own, so wait for `docs.yml`
    or only the `required` docs validation. Then wait for `required`. The proof
    polls pending exact runs a bounded number of times and fails closed while
@@ -218,16 +221,19 @@ the regular proxy build does not require a native SQLite driver.
 scripts/check.sh
 ```
 
-The shared script owns the core verification commands, including offline
-documentation-link, publication-ignore and typography regressions (Git is required),
-the generated-site contract, and the workflow/automation policy. That policy
-suite runs the workflow files of the ref under test, and a `pull_request` run
-evaluates its own head revision rather than the base branch's: a workflow change
-is judged as this pull request ships it, which is what lets a workflow edit pass
-before merge. Review the workflow diff itself, since the run that validates it
-was configured by the same commit; only the post-merge `main` state proves what
-landed. `npm test` runs
-the jsdom suites and the request-log merge regression probe separately. All tests and disposable harnesses
+The shared script owns the core verification commands. They include offline
+documentation-link, publication-ignore and typography regressions (Git is
+required), the generated-site contract, the documentation readability check and
+the workflow/automation policy.
+
+That policy suite runs the workflow files of the ref under test. A
+`pull_request` run evaluates its own head revision rather than the base
+branch's, so a workflow change is judged as this pull request ships it. Review
+the workflow diff itself, since the run that validates it was configured by the
+same commit; only the post-merge `main` state proves what landed.
+
+`npm test` runs the jsdom suites and the request-log merge regression probe
+separately. All tests and disposable harnesses
 live in [tests/](tests/README.md), with suffix-free physical filenames. Go's
 temporary overlay adds its required virtual `_test.go` names; Python unit
 modules live in `tests/python/`. Use `scripts/check.sh go test` for targeted Go
@@ -242,8 +248,9 @@ not establish real canvas rendering, layout, focus or viewport behavior.
 The public site is generated from the existing Markdown, not maintained as a
 second documentation tree. `site-src/` owns the layout, styles, and brand
 assets; `scripts/build_site.py` renders the pages, rewrites repository links,
-and emits the search index, sitemap, and 404 page. The generated `site/`
-directory is ignored and never committed.
+and emits the search index, sitemap, 404 page and the machine-readable docs
+outputs described below. The generated `site/` directory is ignored and never
+committed.
 
 ```sh
 python3 -m pip install --require-hashes -r requirements-docs.txt
@@ -265,17 +272,53 @@ documentation changes, and `pages.yml` deploys from `main` through the official
 GitHub Pages Actions flow. Repository-level Pages enablement and the
 `github-pages` environment are one-time administrator settings.
 
-The three files every page loads before content renders (`tokens.css`,
-`site.css`, `site.js`) are published at content-hashed names such as
-`site.11c6502e41.css`. GitHub Pages sets its own `Cache-Control`, so the URL is
-the only cache key this repository controls: a page cached from the previous
-deployment names the previous hash, and it must find those bytes. The build
-therefore republishes the last `SHELL_RETENTION` generations of each file,
-regenerated from the revisions that produced them, which is why the Pages
-workflow checks out full history. A checkout without history still builds the
-current page correctly but cannot retain earlier generations. Do not add a
-hand-written reference to the unhashed names; `tests/python/site.py` rejects
-one.
+The shell every page loads before content renders is owned by `SHELL_ASSETS` in
+`scripts/build_site.py`: `tokens.css`, `themes.css`, `site.css`,
+`theme_boot.js`, `theme_state.js`, `site_theme.js` and `site.js`. Each is
+published at a content-hashed name such as `site.11c6502e41.css`.
+
+`tokens.css` is derived from the dashboard palette. `themes.css`,
+`theme_boot.js` and `theme_state.js` are published byte-for-byte from
+`internal/web/static`, so the dashboard and the site share one palette owner,
+one registry and one state module. `tests/python/site.py` checks that identity,
+the load order and the registered palette ids.
+
+GitHub Pages sets its own `Cache-Control`, so the URL is the only cache key this
+repository controls. A page cached from the previous deployment names the
+previous hash, and it must find those bytes. The build republishes the last
+`SHELL_RETENTION` generations of each shell file, regenerated from the revisions
+that produced them, which is why the Pages workflow checks out full history.
+
+A checkout without history still builds the current page correctly but cannot
+retain earlier generations. Do not add a hand-written reference to an unhashed
+name; `tests/python/site.py` rejects one.
+
+### Machine-readable documentation
+
+`scripts/build_site.py` drives `scripts/site_llm.py`, which writes a Markdown
+twin beside every rendered page, plus `llms.txt`, `llms-full.txt` and
+`docs.json`. The MCP server embeds a checked-in copy at
+`internal/docs/docs.json`; never edit that file by hand.
+
+Regenerate it after any Markdown, title, navigation or description change:
+
+```sh
+python3 scripts/build_site.py --output site --write-manifest
+```
+
+`tests/python/site.py` fails when the embedded copy is stale, when a page does
+not advertise its Markdown twin, or when a generated URL names a missing file.
+The MCP tools `docs_list`, `docs_search` and `docs_read` read that index and
+make no proxy request.
+
+### Documentation prose
+
+Write for a reader who is scanning. Keep one idea per paragraph and roughly 110
+words or fewer. Use a list or table when a sentence carries three or more
+parallel items, and split a paragraph when it changes subject.
+
+`tests/python/docs_readability.py` enforces the word limit on hand-written
+Markdown. `docs/settings.md` is generated from the schema and is excluded.
 
 The site is published at `https://millivolt.llm4people.dev/`. That origin has two
 owners, and neither is a file in this repository: the Pages custom domain in the
@@ -285,6 +328,31 @@ proxy disabled. `scripts/build_site.py` warns when a build for `SITE_URL` names
 a different host than `DEFAULT_BASE_URL`, because that is what a half-finished
 migration looks like. GitHub ignores a `CNAME` file in an Actions deployment, so
 this repository does not ship one.
+
+### Brand plates
+
+The README covers, specification strips, Open Graph card and GitHub social
+preview are generated, not hand-edited. `scripts/brand/facts.py` owns the
+headline, the four specification facts and the sample-history values.
+`scripts/brand/manifest.json` owns each target's dimensions and hash.
+
+Regenerate every plate after a copy or fact change:
+
+```sh
+python3 -m pip install --require-hashes -r requirements-docs.txt
+python3 -m scripts.brand.build
+```
+
+The PNG renders need Playwright's Chromium; the SVG strips do not.
+`python3 -m scripts.brand.build --check` verifies every committed asset against
+the manifest and re-renders both SVG strips from source. CI runs that check.
+The tool count in the specification strip comes from
+`scripts/mcp_registry.py`, the same parser the MCP docs test uses, so adding a
+tool cannot leave the art behind.
+
+Upload `.github/social-preview.png` under the repository's Settings, Social
+preview after it changes. That upload is a GitHub setting, not a repository
+file.
 
 ### Push gate
 
@@ -372,10 +440,11 @@ serves reads only and denies every mutation.
 
 `scripts/dev.sh status` reports the private instance. The script builds first,
 then replaces only its tracked dev process; a failed build leaves it running.
-The tracked identity is the pid file, and `status`/`stop` fall back to the
-listener on the instance's port when the file names a dead pid: a rebuild child
-rewrites the file only once it is fully booted, so a child that dies before
-readiness would otherwise strand the instance. The fallback still requires the
+
+The tracked identity is the pid file. `status`/`stop` fall back to the listener
+on the instance's port when the file names a dead pid. A rebuild child rewrites
+the file only once it is fully booted, so a child that dies before readiness
+would otherwise strand the instance. The fallback still requires the
 process to carry this instance's exact `-pid-file` flag.
 Starting/restarting development resets its disposable database and private config,
 seeded from the public example by default. `DEV_CONFIG=proxy.yaml` explicitly
@@ -475,25 +544,43 @@ removed, and recorded timing, token and cost values are retained. The raw online
 snapshot is temporary and never served. Treat even the derived database as
 sensitive; retained usage and timestamps can reveal activity patterns.
 
+The view list is a registry, not a capture script. `scripts/gallery/data.py`
+declares every plate: its published path, title, description, scene, named
+viewport and setup. `tests/docs_capture.py` owns the scene strategies (page,
+element, scoped explorer, absorbed retries, drawer, console, settings, chart,
+window picker, theme tray). `scripts/gallery/compose.py` turns each scene into
+one plate: the same document is photographed on Instrument Black and Instrument
+Clear, then split along the diagonal from bottom-left to top-right. `applyState`
+is the one theme mutation path, so an open drawer, a selected filter or an open
+tray survives the second half.
+
+The run writes `docs/images/capture.json`, which records every plate's bytes,
+dimensions and SHA-256, the verified record count, and a digest of
+`internal/web/static`. It also writes the generated `docs/gallery.md`. Commit
+both with the images. `tests/python/gallery.py` fails when a registered plate
+has no capture, a capture is not registered, a byte or dimension drifts, the
+digest no longer matches the dashboard source, or the gallery page is stale.
+A UI change therefore requires a recapture in the same branch, not a later one.
+
 Capture last. The gallery is a picture of the shipped dashboard, so a markup,
-CSS or layout change dates every image that shows the affected surface. Recapture
-in the same branch once the last layout edit is in, never before it, and
-recapture again if a later edit moves what an image shows. A recapture diff is
-the review set: inspect each changed file, and expect geometry changes (for
-example the request table's 8px cell padding and retry sub-rows) to come with
-them.
+CSS or layout change dates every image that shows the affected surface.
+Recapture in the same branch once the last layout edit is in, never before it,
+and recapture again if a later edit moves what an image shows. A recapture diff
+is the review set: inspect every changed plate, and expect geometry changes
+(for example the request table's 8px cell padding and retry sub-rows) to come
+with them.
 
 The capture mode revalidates every row and its provenance, plus exact public
 configuration bytes, before and after browser capture. It permits only read-only
-same-origin requests: no inference, POST, purge or Settings save. Images are
-staged before publication, and the exit trap stops the private process. Review
-every gallery image before committing. SSE is deliberately disabled, so the images'
-offline indicator describes a static capture session, not current service health.
-Captures keep the same category folders under `docs/images/`: `overview`,
-`charts`, `explorer`, `requests`, `console` and `settings`. Update the existing
-capture owner and Markdown links together when adding a view; the site check
-fails on any file under `docs/images/` without a Markdown consumer, so a
-recapture that drops a view cannot leave an orphan behind.
+same-origin requests: no inference, POST, purge or Settings save.
+
+Images are staged before publication, and the exit trap stops the private
+process. Review every plate before committing. SSE is deliberately disabled, so
+the images' offline indicator describes a static capture session, not current
+service health. Captures keep the same category folders under `docs/images/`:
+`overview`, `charts`, `explorer`, `requests`, `console`, `settings` and `theme`.
+The site fails on any image under `docs/images/` without a Markdown consumer, so
+a recapture that drops a view cannot leave an orphan behind.
 
 The independent `--docs-images` option remains a strict synthetic regression.
 Run it only with `DEV_COPY_DB=0` and direct those two images to a scratch directory,
@@ -551,11 +638,12 @@ go run ./cmd/stress -target http://127.0.0.1:8081 -concurrency 1,8,32,128 -durat
 
 The harness does not manage or reconfigure the proxy. It uses a local synthetic
 upstream and checks exact bytes, durable rows/tokens/cost and the same-process
-storage-drop delta. A drop is a failed stage even if every HTTP request
-succeeded, unless the run asks for an overload observation with
-`-allow-drops`; that mode still requires `durable + dropped = successful
-requests` and still aborts on a response failure. Read
-`go run ./cmd/stress -h` for workload/safety controls.
+storage-drop delta.
+
+A drop is a failed stage even if every HTTP request succeeded, unless the run
+asks for an overload observation with `-allow-drops`. That mode still requires
+`durable + dropped = successful requests` and still aborts on a response
+failure. Read `go run ./cmd/stress -h` for workload/safety controls.
 The ramp retains its cumulative fixture history across measured stages, then
 removes only its unique client records after measurements finish. Cleanup has
 its own bounded wait even after cancellation and revalidates private process,
@@ -592,9 +680,10 @@ go run ./cmd/release -revision "$(git rev-parse HEAD)" -tag "v$millivolt_version
 
 Publication is automatic. A code-bearing versioned promotion releases when the
 promotion PR merges, after the full gate has passed for the promoted commit, or
-after the closest gated `testing` commit plus a docs-only delta. A non-Dependabot
-promotion also requires a successful
-[escalation](.github/workflows/escalation.yml) run for the reviewed head; the
+after the closest gated `testing` commit plus a docs-only delta.
+
+A non-Dependabot promotion also requires a successful
+[escalation](.github/workflows/escalation.yml) run for the reviewed head. The
 promotion PR starts it automatically, and `required` waits for it under a
 bounded, fail-closed proof. The merged-PR
 event carries the exact merge commit; a delivered `main` push is an idempotent
@@ -624,13 +713,16 @@ because a testing push has no promotion proof to wait for:
    never moves them.
 
 Docs and site-only pushes to `testing` skip image work. They validate Markdown,
-the generated site, workflow policy and docs contracts. A docs/site-only main
-promotion also skips the VERSION and full-gate proofs but runs the same
-Markdown, generated-site, workflow-policy and repository checks in `required`;
-a Pages-relevant merged main push stays docs-only, so Pages deploys without
-rebuilding images or cutting a release; the merged-PR release path classifies
-the change and skips publication. A code-bearing promotion must carry a VERSION
-newer than every existing tag and cuts a release. A manually pushed `v*` tag
+the generated site, workflow policy and docs contracts.
+
+A docs/site-only main promotion also skips the VERSION and full-gate proofs but
+runs the same Markdown, generated-site, workflow-policy and repository checks in
+`required`. A Pages-relevant merged main push stays docs-only, so Pages deploys
+without rebuilding images or cutting a release.
+
+The merged-PR release path classifies the change and skips publication. A
+code-bearing promotion must carry a VERSION newer than every existing tag and
+cuts a release. A manually pushed `v*` tag
 still ships exactly as tagged through the same
 pipeline, with the image published before the release is created. A manual tag
 must match VERSION. Code-bearing pushes to `testing` publish the moving
@@ -705,6 +797,7 @@ preserve exact protocol names, identifiers, user data and license wording.
 Dependabot checks Go, npm, Python, Docker and GitHub Actions dependencies weekly
 with grouped minor and patch updates. Review dependency changes and re-run
 checks; runtime version files still require deliberate updates and verification.
+
 The Docker `golang` base is deliberately left manual because its tag must move
 with go.mod; distroless updates remain automated. Security updates target
 `main` as described in the branch workflow. Dependency review runs on pull
