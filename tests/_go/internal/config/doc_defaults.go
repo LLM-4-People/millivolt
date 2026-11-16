@@ -176,7 +176,7 @@ func TestProseDefaultsMatchTheSettingsReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s: %v; run go run ./cmd/docgen -write", settingsdoc.PagePath, err)
 	}
-	rows := parseRows(t, string(page))
+	defaults := generatedDefaults(t, string(page))
 	checked := 0
 
 	for _, file := range proseFiles(t, root) {
@@ -185,7 +185,7 @@ func TestProseDefaultsMatchTheSettingsReference(t *testing.T) {
 			t.Fatalf("read %s: %v", file, err)
 		}
 		text, lineAt := flatText(stripFences(string(source)))
-		spans := codeSpans(text, rows)
+		spans := codeSpans(text, defaults)
 		masked := maskSpans(text, spans)
 
 		for _, word := range defaultWord.FindAllStringIndex(masked, -1) {
@@ -201,8 +201,11 @@ func TestProseDefaultsMatchTheSettingsReference(t *testing.T) {
 			if field == nil {
 				continue
 			}
-			row := rows[span.key]
-			wantText := strings.Trim(row.cells[1], "`")
+			wantText, ok := defaults[span.key]
+			if !ok {
+				t.Errorf("%s:%d: no generated default for %s", file, lineAt[at], span.key)
+				continue
+			}
 			wantNumber, wantUnit := wantText, ""
 			if field.Kind == config.KindBytes || field.Kind == config.KindDuration {
 				wantNumber, wantUnit = splitUnit(wantText)
@@ -241,11 +244,11 @@ func splitUnit(value string) (string, string) {
 	return value[:index], value[index:]
 }
 
-func codeSpans(text string, rows map[string]*settingsRow) []keySpan {
+func codeSpans(text string, defaults map[string]string) []keySpan {
 	var spans []keySpan
 	for _, match := range codeSpan.FindAllStringSubmatchIndex(text, -1) {
 		key := text[match[2]:match[3]]
-		if _, ok := rows[key]; !ok {
+		if _, ok := defaults[key]; !ok {
 			continue
 		}
 		spans = append(spans, keySpan{start: match[0], end: match[1], key: key})
