@@ -25,7 +25,7 @@ from .browser_console import console_rail_checks
 from .browser_settings import settings_checks
 from .browser_storm import storm_checks as run_storm_checks
 from .browser_theme import theme_checks
-from .support import DOCS_CAPTURE_VIEWPORT, operator_headers, operator_signin, pick_chart_control, require
+from .support import operator_headers, operator_signin, pick_chart_control, require, viewport
 
 
 def target(value):
@@ -157,7 +157,7 @@ async def check(base, screenshot):
                 # The published docs capture leaves headroom for the request
                 # table's learned content widths and font variation. The table
                 # is content-sized, not a fixed budget.
-                await page.set_viewport_size(DOCS_CAPTURE_VIEWPORT)
+                await page.set_viewport_size(viewport("wide"))
                 await page.evaluate(
                     'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
                 docs_table = await page.evaluate("""() => {

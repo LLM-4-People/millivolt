@@ -26,8 +26,16 @@ from playwright.async_api import async_playwright
 from scripts.backup_db import verify_docs_copy
 from . import browser_check as guards
 from .browser_check import require
-from .support import (DOCS_CAPTURE_VIEWPORT, ROOT, clip_js, operator_headers,
-                      operator_signin, pick_chart_control)
+from .docs_capture import capture_image, docs_directory, navigation
+from .docs_capture import publish as publish_capture
+from .docs_capture import run as run_capture
+from .support import ROOT, clip_js, operator_headers, operator_signin
+
+# The embedded dashboard serves its own published static files under /dash/.
+# The capture needs the stylesheets, scripts, self-hosted faces and vendor
+# runtime; a subset silently renders with fallback fonts. These are the
+# suffixes the static tree ships, not a second route table.
+DASHBOARD_ASSET_SUFFIXES = ('.js', '.css', '.woff2')
 
 ORDER = ['provider', 'model', 'client', 'conversation', 'tool', 'time', 'status', 'error', 'key']
 KEY = 'local-lineage-fixture-only'
@@ -38,11 +46,6 @@ ANSWER = json.dumps({
                  'finish_reason': 'tool_calls'}],
     'usage': {'prompt_tokens': 5, 'completion_tokens': 3, 'total_tokens': 8, 'cost': 0.0001},
 }, separators=(',', ':')).encode()
-
-
-def navigation(base, filters, dim='conversation'):
-    pairs = [*filters, ('by', dim)]
-    return base + '/#/' + '/'.join(quote(str(part), safe='') for pair in pairs for part in pair)
 
 
 class FixtureUpstream(BaseHTTPRequestHandler):
@@ -142,48 +145,6 @@ async def docs_preflight(request, base, client, count):
         await response.dispose()
 
 
-def docs_directory(value):
-    output = Path(value).absolute()
-    require(output.resolve() == output and (not output.exists() or output.is_dir()),
-            'documentation output must be a direct directory, without symlinked ancestors')
-    return output
-
-
-async def capture_image(page, destination, selector=None):
-    docs_directory(destination.parent)
-    require(not destination.is_symlink(), 'refusing a symlinked documentation image')
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    # Use actual responsive layout and wait for font/canvas commits. No CSS,
-    # chart arrays or record values are changed to manufacture a prettier view.
-    await page.evaluate('''async () => {
-        await document.fonts.ready;
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    }''')
-    subject = page.locator(selector) if selector else page
-    options = {'path': str(destination), 'type': 'png', 'scale': 'css', 'animations': 'disabled'}
-    if not selector:
-        options['full_page'] = True
-    await subject.screenshot(**options)
-
-
-def publish_images(staging, output):
-    """Validate the complete nested gallery before replacing any public image."""
-    output = docs_directory(output)
-    snapshots = tuple(sorted(staging.rglob('*.png')))
-    require(snapshots, 'documentation capture produced no images')
-    for source in snapshots:
-        require(source.is_file() and not source.is_symlink(), 'invalid staged image')
-        destination = output / source.relative_to(staging)
-        docs_directory(destination.parent)
-        require(not destination.is_symlink() and (not destination.exists() or destination.is_file()),
-                'invalid documentation image destination')
-    for source in snapshots:
-        destination = output / source.relative_to(staging)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(source.read_bytes())
-    return len(snapshots)
-
-
 async def history_route(route, base, errors):
     # Documentation capture cannot submit inference or operator mutations.
     # The purge count preview is the one read-only POST: the console's export
@@ -202,7 +163,7 @@ async def history_route(route, base, errors):
                     '/admin/purge/count',
                     '/metrics/bootstrap', '/metrics/agg/chart', '/metrics/agg/explorer',
                     '/metrics/agg/log', '/metrics/live/stream') and not (
-            path.startswith('/dash/') and path.endswith(('.js', '.css'))
+            path.startswith('/dash/') and path.endswith(DASHBOARD_ASSET_SUFFIXES)
             and all(part not in ('', '.', '..') for part in path[1:].split('/'))
             and '%' not in path and '\\' not in path):
         errors.append(f'documentation capture attempted a non-dashboard resource: {path}')
@@ -216,6 +177,9 @@ async def capture_history(args):
 
     This is separate from the synthetic regression above: no fixture requests,
     purge, configuration changes, raw history, or failure images are produced.
+    The plate list and capture strategies live in scripts/gallery and
+    tests/docs_capture; this function owns only the admission checks and the
+    atomic publication boundary.
     """
     base = guards.target(args.target)
     output = docs_directory(args.docs_history)
@@ -223,7 +187,8 @@ async def capture_history(args):
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch()
         try:
-            context = await browser.new_context(viewport={'width': 1440, 'height': 1000}, service_workers='block')
+            context = await browser.new_context(
+                viewport={'width': 1440, 'height': 1000}, service_workers='block')
             await context.route('**/*', lambda route: history_route(route, base, errors))
             await operator_signin(context, base)
             response = await context.request.get(base + '/admin/config', max_redirects=0)
@@ -242,142 +207,16 @@ async def capture_history(args):
             page = await context.new_page()
             page.on('pageerror', lambda error: errors.append(str(error)))
 
-            async def ready(dim):
-                await page.wait_for_function('''([dim,n]) => explorerAgg?.dim === dim &&
-                    explorerAgg.scope?.matches === n && kpiAgg?.requests === n &&
-                    chartAgg?.buckets.reduce((sum,b) => sum+b.req,0) === n &&
-                    lastData && _up && !_renderQueued && !_renderDirty''',
-                    arg=[dim, summary['records']], timeout=30000)
-                require(await page.evaluate('''() => kpiInFlight() === 0 &&
-                    !lastData.in_flight_records?.length && storageState?.dropped === 0'''),
-                    'history capture has pending work or storage loss')
-                require(not errors, errors)
-
             # Stage every image outside the repository. A failed guard leaves
             # the published gallery unchanged, and no failure image is retained.
             with tempfile.TemporaryDirectory(prefix='millivolt-docs-images-') as temporary:
                 staging = Path(temporary)
-                await page.goto(navigation(base, [], 'provider'), wait_until='domcontentloaded')
-                await pick_chart_control(page, '#chart-window', 'all')
-                await ready('provider')
-                await capture_image(page, staging / 'overview/dashboard.png')
-                # The rail scrolls inside a box capped by the viewport, so the
-                # capture viewport must be tall enough for all nine dimensions
-                # to be visible at once rather than clipped after four.
-                await page.set_viewport_size({'width': 1440, 'height': 1180})
-                await ready('provider')
-                await capture_image(page, staging / 'explorer/providers.png', '#explorer')
-
-                await page.goto(navigation(base, [], 'model'), wait_until='domcontentloaded')
-                await ready('model')
-                await capture_image(page, staging / 'explorer/models.png', '#explorer')
-
-                # Below the existing 1200px breakpoint, the chart spans the
-                # full content width. This is the app's layout, not injected CSS.
-                await page.set_viewport_size({'width': 1180, 'height': 1000})
-                for preset, filename in (('traffic', 'traffic.png'), ('errors', 'errors.png'),
-                                         ('tokens', 'tokens.png'), ('latency', 'speed-latency.png'),
-                                         ('cost', 'cost.png')):
-                    await pick_chart_control(page, '#chart-preset', preset)
-                    if preset == 'latency':
-                        await pick_chart_control(page, '#chart-pct', '95')
-                    await ready('model')
-                    await capture_image(page, staging / 'charts' / filename, '.traffic-card')
-
-                # The request table is content-sized now: give the docs capture
-                # enough width that the learned columns still fit without
-                # horizontal clipping, including font and subpixel variation.
-                await page.set_viewport_size(DOCS_CAPTURE_VIEWPORT)
-                await ready('model')
-                require(await page.locator('#tbl-requests').evaluate('el => el.scrollWidth <= el.clientWidth + 2'),
-                        'request-table capture would clip columns')
-                await capture_image(page, staging / 'requests/table.png', '.grid-pair > .card:last-child')
-                await page.set_viewport_size({'width': 1180, 'height': 850})
-                # The newest rows may carry no usage or timing (aborted and
-                # retried turns); the detail capture needs a finalized row
-                # that has both. Page the archive until one is visible
-                # instead of pinning a fixture position.
-                for _ in range(30):
-                    if await page.evaluate('''() => logVisible().some(r => !r.live && !r.debug &&
-                        r.usage?.output_tokens > 0 && r.ttft_ms > 0)'''):
-                        break
-                    await page.evaluate('''() => {
-                        const table = document.getElementById('tbl-requests');
-                        table.scrollTop = table.scrollHeight;
-                        table.dispatchEvent(new Event('scroll'));
-                    }''')
-                    await page.wait_for_timeout(300)
-                await page.wait_for_function('''() => logVisible().some(r => !r.live && !r.debug &&
-                    r.usage?.output_tokens > 0 && r.ttft_ms > 0)''', timeout=30000)
-                request_id = await page.evaluate('''() => {
-                    const candidates = logVisible().filter(r => !r.live && !r.debug &&
-                        r.usage?.output_tokens > 0 && r.ttft_ms > 0);
-                    return (candidates.find(r => r.attempts?.length) || candidates[0])?.id;
-                }''')
-                require(request_id, 'history has no visible finalized request with usage and timing')
-                await page.locator('#tbl-requests tr.exp-row:not(.retry-sub) [data-open-req="' + request_id + '"]').click()
-                await page.wait_for_function('''id => drawerId === id &&
-                    document.querySelector('#drawer').classList.contains('open')''', arg=request_id)
-                require(await page.locator('#drawer-debug').count() == 0, 'documentation drawer contains debug data')
-                await ready('model')
-                await capture_image(page, staging / 'requests/details.png', '#drawer')
-                await page.set_viewport_size({'width': 1180, 'height': 600})
-                await page.locator('#drawer-body [data-group-tab="usage"]').click()
-                await page.locator('#drawer-body').evaluate('''body => {
-                    const tokens = [...body.querySelectorAll('h4')].find(h => h.textContent === 'Tokens');
-                    if (!tokens) throw new Error('request detail has no token section');
-                    tokens.closest('.detail-section').scrollIntoView({block: 'start'});
-                }''')
-                await capture_image(page, staging / 'requests/performance.png', '#drawer')
-                await page.keyboard.press('Escape')
-                await page.wait_for_function('() => drawerId === null')
-
-                await page.set_viewport_size({'width': 1440, 'height': 900})
-                # The operator console is the one policy surface. Opening it and
-                # switching sections is read-only: no draft is committed and no
-                # filter is selected, so the capture stays a neutral starting
-                # state. The mutation and external-origin guards are unchanged.
-                for kind in ('overview', 'limits', 'pause', 'capture', 'export', 'system'):
-                    await page.locator('#btn-controls').click()
-                    await page.locator('#operator-console').wait_for(state='visible')
-                    await page.locator('.oc-rail-item[data-oc-section="' + kind + '"]').click()
-                    await page.wait_for_function('''kind => {
-                        const pane = document.getElementById('oc-pane');
-                        return pane && pane.dataset.section === kind && !document.querySelector('.oc-compose');
-                    }''', arg=kind)
-                    if kind == 'export':
-                        # The fact is the draft's mode, not a sentence the
-                        # receipt happens to paint: the receipt copy changed
-                        # when every export gained a count, and a captured
-                        # string pinned the old wording instead of the state.
-                        require(await page.evaluate('''() =>
-                            ocDrafts.export && ocDrafts.export.mode === 'all' '''),
-                                'documentation export section must start on all history')
-                        # The count is a read-only POST issued after a debounce;
-                        # capture the settled receipt, not "counting...".
-                        await page.wait_for_function('''() => ocDrafts.export &&
-                            !ocDrafts.export.counting''', timeout=15000)
-                    if kind == 'system':
-                        await page.wait_for_function('() => typeof restartServerState.available === "boolean"')
-                    await ready('model')
-                    await capture_image(page, staging / 'console' / (kind + '.png'), '#operator-console')
-                    await page.keyboard.press('Escape')
-                    await page.locator('#operator-console').wait_for(state='hidden')
-
-                await page.set_viewport_size({'width': 1440, 'height': 720})
-                await page.locator('#btn-settings').click()
-                for category in ('dashboard', 'queue', 'storage', 'providers'):
-                    await page.set_viewport_size({'width': 1440, 'height': 800 if category == 'queue' else 720})
-                    await page.locator('#settings-rail [data-st-cat="' + category + '"]').click()
-                    await page.wait_for_function('''category => settingsDoc && settingsCat === category &&
-                        document.querySelector('#btn-settings-apply').disabled''', arg=category)
-                    await ready('model')
-                    await capture_image(page, staging / 'settings' / (category + '.png'), '#settings-sheet')
+                await run_capture(page, base, staging, summary['records'], errors)
                 require(verify_docs_copy(database) == summary, 'history changed while capturing')
                 require(Path(document['path']).read_bytes() == public_config.read_bytes(),
                         'configuration changed while capturing')
                 require(not errors, errors)
-                image_count = publish_images(staging, output)
+                image_count = publish_capture(staging, output)
             print(json.dumps({'history': summary, 'images': image_count, 'browser_errors': errors}))
         finally:
             await browser.close()
