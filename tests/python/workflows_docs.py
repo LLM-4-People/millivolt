@@ -285,8 +285,9 @@ def docs_only_fail_open_errors(run: str) -> list[str]:
     """Prove docs-only classification follows the diff and fails closed.
 
     The promotion step is executed with a fake git. A code path must classify as
-    a full gate, a docs-only path as docs-only, and a failing diff must abort
-    before writing a classification. The step's own `set -euo pipefail` is
+    a full gate, a docs-only path as docs-only, a tooling path as full-gate but
+    release-free, and a docs-only shipped notice as release-bearing. A failing
+    diff must abort before writing a classification. The step's own `set -euo pipefail` is
     required as a command line and is never injected here: a missing `set -e`
     must fail the static contract instead of being masked by the harness. The
     classifier is inline, so a malicious `scripts/docs-paths.sh` in the
