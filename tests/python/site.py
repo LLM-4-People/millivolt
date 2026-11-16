@@ -286,34 +286,49 @@ def shell_asset_errors(site: Path) -> list[str]:
     return errors
 
 
-def docs_shell_layout_errors(site: Path) -> list[str]:
-    """The collapsed docs rail hands its column to the article.
+def css_declarations(block: str) -> dict[str, str]:
+    declarations: dict[str, str] = {}
+    for piece in block.split(";"):
+        key, separator, value = piece.partition(":")
+        if separator:
+            declarations[key.strip()] = value.strip()
+    return declarations
 
-    The open shell caps the article at a reading measure. Collapsing the menu
-    must release that cap, because tables and code otherwise wrap or scroll
-    inside a column the rail no longer occupies. Prose keeps its own 70ch
-    limit, so the extra width is spent on wide blocks rather than long lines.
+
+def docs_shell_layout_errors(site: Path) -> list[str]:
+    """Docs pages spend available width on the article, not on empty gutters.
+
+    Reference tables wrap cells when the article inherits the marketing
+    measure. The docs frame is wider than the marketing shell, every docs
+    header and footer shares it, and the article has no cap of its own. Prose
+    keeps its 70ch measure, so the extra width goes to tables and code.
     """
     name = referenced_shell(site, "site", "css")
     if not name:
         return ["no page references the site stylesheet"]
     css = (site / "assets" / name).read_text(encoding="utf-8")
-    collapsed = re.search(r"html\.nav-collapsed\s+\.doc-main\s*\{([^}]*)\}", css)
-    if not collapsed:
-        return ["site stylesheet has no collapsed docs article rule"]
-    declarations = {}
-    for piece in collapsed.group(1).split(";"):
-        key, separator, value = piece.partition(":")
-        if separator:
-            declarations[key.strip()] = value.strip()
     errors: list[str] = []
-    if declarations.get("max-width") != "none":
-        errors.append("a collapsed docs rail still caps the article width")
-    if declarations.get("justify-self") != "stretch":
-        errors.append("a collapsed docs rail does not stretch the article into the freed column")
-    open_rule = re.search(r"(?m)^\.doc-main\s*\{([^}]*)\}", css)
-    if not open_rule or "max-width: 780px" not in open_rule.group(1):
-        errors.append("the open docs rail no longer caps the article at the reading measure")
+    open_rule = re.findall(r"\.doc-main\s*\{([^}]*)\}", css)
+    if not open_rule:
+        errors.append("site stylesheet has no docs article rule")
+    for block in open_rule:
+        article = css_declarations(block)
+        if "max-width" in article:
+            errors.append(f"the docs article caps its width at {article['max-width']}")
+    shell_rule = re.search(r"(?m)^\.docs-shell\s*\{([^}]*)\}", css)
+    if not shell_rule:
+        errors.append("site stylesheet has no docs shell rule")
+    else:
+        shell = css_declarations(shell_rule.group(1))
+        if shell.get("width") != "var(--docs-width)":
+            errors.append("the docs shell does not use the shared docs frame width")
+    wrap_rule = re.search(r"body\.docs \.wrap\s*\{([^}]*)\}", css)
+    if not wrap_rule:
+        errors.append("the docs header and footer do not share the docs frame")
+    elif css_declarations(wrap_rule.group(1)).get("width") != "var(--docs-width)":
+        errors.append("the docs header and footer use a different width than the docs shell")
+    if not re.search(r"--docs-width:\s*min\(var\(--docs-max\),\s*calc\(100% - 48px\)\)", css):
+        errors.append("the docs frame width is not derived from --docs-max with the standard gutter")
     return errors
 
 

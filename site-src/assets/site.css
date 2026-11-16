@@ -41,6 +41,11 @@
   --radius: 14px;
   /* Site-only content width for the centered marketing and docs shell. */
   --max: 1200px;
+  /* Docs reference pages carry wide tables and code, so their frame is wider
+     than the marketing shell and every docs header, article and footer shares
+     it. The article itself carries no cap; prose keeps its 70ch measure. */
+  --docs-max: 1600px;
+  --docs-width: min(var(--docs-max), calc(100% - 48px));
   /* Display face for marketing and documentation titles. The app stays on the
      Instrument Sans/JetBrains Mono instrument pair; this editorial accent is
      site-only, so the dashboard palette stays the one owner of --sans/--mono. */
@@ -77,6 +82,7 @@ button, input { font: inherit; }
 }
 .skip-link:focus { top: 12px; }
 .wrap { width: min(var(--max), calc(100% - 48px)); margin-inline: auto; }
+body.docs .wrap { width: var(--docs-width); }
 
 .rail {
   position: sticky; top: 0; z-index: 80;
@@ -453,7 +459,7 @@ h1 {
 .footer-meta a:hover { color: var(--text); }
 
 .docs-shell {
-  width: min(var(--max), calc(100% - 48px)); margin-inline: auto;
+  width: var(--docs-width); margin-inline: auto;
   display: grid; grid-template-columns: 216px minmax(0, 1fr) 208px;
   grid-template-areas: "nav main toc";
   gap: 40px; align-items: start; padding: 34px 0 96px;
@@ -492,15 +498,13 @@ h1 {
 .docs-nav-reveal:hover { color: var(--text); border-color: var(--border-control); }
 .docs-nav-reveal::before { content: "\2261"; font-size: 14px; letter-spacing: 0; }
 html.nav-collapsed .docs-nav { display: none; }
+/* The article takes whatever the shell gives it. Prose keeps its 70ch measure,
+   so wide tables and code use the extra room instead of wrapping cells. */
 html.nav-collapsed .docs-shell {
   grid-template-columns: minmax(0, 1fr) 208px;
   grid-template-areas: "main toc";
 }
 html.nav-collapsed .docs-nav-reveal { display: inline-flex; }
-/* The collapsed rail frees its column, so the article takes it. Prose stays at
-   its reading measure; wide tables and code blocks get the room they need
-   instead of wrapping cells across lines. */
-html.nav-collapsed .doc-main { max-width: none; justify-self: stretch; }
 .nav-group { padding: 0 0 20px; }
 .nav-label { margin: 0 0 6px; color: var(--muted); font: 600 10px/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; }
 .docs-nav a {
@@ -515,7 +519,7 @@ html.nav-collapsed .doc-main { max-width: none; justify-self: stretch; }
   font-weight: 550;
 }
 
-.doc-main { grid-area: main; min-width: 0; max-width: 780px; }
+.doc-main { grid-area: main; min-width: 0; }
 .doc-content { padding-top: 4px; font-size: 16.5px; line-height: 1.7; }
 .doc-content > p, .doc-content li, .doc-content blockquote { max-width: 70ch; }
 .doc-content h1 {
@@ -636,8 +640,7 @@ html.nav-collapsed .doc-main { max-width: none; justify-self: stretch; }
     grid-template-columns: minmax(0, 1fr); grid-template-areas: "nav" "toc" "main";
     gap: 12px; padding-top: 22px;
   }
-  .doc-main { max-width: 780px; margin-inline: auto; width: 100%; }
-  .docs-nav, .toc { max-width: 780px; margin-inline: auto; width: 100%; }
+  .doc-main, .docs-nav, .toc { width: 100%; }
   .docs-nav {
     position: static; max-height: none; padding: 0; overflow: visible;
     border: 1px solid var(--border2); border-radius: 10px; background: var(--panel);
@@ -736,7 +739,8 @@ html.nav-collapsed .doc-main { max-width: none; justify-self: stretch; }
 @media (max-width: 640px) {
   html { scroll-padding-top: 74px; }
   body { background: var(--bg); font-size: 16px; }
-  .wrap, .docs-shell { width: calc(100% - 32px); }
+  body.docs { --docs-width: calc(100% - 32px); }
+  .wrap { width: calc(100% - 32px); }
   .rail-inner { min-height: 58px; gap: 10px; }
   .brand-mark { width: 26px; height: 26px; }
   .wordmark { font-size: 14px; }
