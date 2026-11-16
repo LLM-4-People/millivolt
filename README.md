@@ -12,12 +12,14 @@ a benchmark or a capacity measurement. Published measurements live in
 
 <picture>
   <source media="(min-width: 761px)" srcset="docs/images/brand/readme-spec.svg">
-  <img src="docs/images/brand/readme-spec-mobile.svg" alt="Readout: three client protocols, one Go binary, 22 MCP tools, one operator plane" width="800">
+  <img src="docs/images/brand/readme-spec-mobile.svg" alt="Readout: four upstream formats, one Go binary, 22 MCP tools, one operator plane" width="800">
 </picture>
 
 **See every AI request. Keep your own routing.** millivolt is a patch bay for
-model traffic. OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages
-clients plug in on one side. The upstream you choose answers on the other. It
+model traffic. OpenAI Chat Completions, OpenAI Responses and Anthropic Messages
+clients plug in on one side; a chat request can target the Cursor agent bridge,
+and any other HTTP client can use the same relay path with routing headers. The
+upstream you choose answers on the other. It
 can translate when the two ends disagree, pass the request through untouched,
 and measure the crossing: timing, tokens, cost, retries, outcome. Body capture
 only when you ask.

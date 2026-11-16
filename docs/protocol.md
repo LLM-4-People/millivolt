@@ -1,7 +1,8 @@
 # Protocol and client integration
 
 The client-facing interface accepts OpenAI Chat Completions, OpenAI Responses
-and Anthropic Messages. The upstream-facing protocol can differ from any of
+and Anthropic Messages; a Chat request can also target the Cursor Connect
+bridge. The upstream-facing protocol can differ from any of
 them. Per-request headers select the destination, credentials and optional
 native adapter. The [compatibility matrix](adapters.md#client-and-upstream-compatibility)
 maps the supported combinations; [cross-protocol translation](adapters.md#cross-protocol-translation)

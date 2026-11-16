@@ -754,7 +754,7 @@ def base_values(
         "canonical_tag": canonical_tag,
         "og_url": attr_escape(og_url),
         "og_image": attr_escape(og_image),
-        "og_image_alt": attr_escape("millivolt: See every AI request. Keep your own routing. A static dashboard band shows request count, total cost, cache hit rate and provider totals from redacted history; sample values, not a benchmark."),
+        "og_image_alt": attr_escape("millivolt: See every AI request. Keep your own routing. A static dashboard band shows request count, total cost, cache hit rate, throughput, latency and error rate from redacted history; sample values, not a benchmark."),
         "site_name": "millivolt",
         "root": root,
         "body": body,
@@ -818,8 +818,8 @@ def render_landing(*, version: str, base_url: str, theme_color: str, assets: dic
     }
     head_extra = '<script type="application/ld+json">' + json.dumps(schema, ensure_ascii=False) + "</script>"
     values = base_values(
-        title="millivolt: self-hosted OpenAI-compatible LLM proxy",
-        description="See every AI request. Keep your own routing with a self-hosted OpenAI-compatible proxy, live dashboard, and SQLite history.",
+        title="millivolt: self-hosted cross-protocol LLM proxy",
+        description="See every AI request. Keep your own routing with a self-hosted, cross-protocol inference proxy, live dashboard, and SQLite history. Previews use sample data, not benchmarks.",
         output="index.html",
         base_url=base_url,
         version=version,
