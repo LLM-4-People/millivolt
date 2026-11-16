@@ -51,9 +51,11 @@ def bundle() -> dict:
     query = []
     for field in ("provider", "model", "client", "key_hash", "conversation", "status"):
         query.append(bench(f"BenchmarkQueryBeforeEquality/{field}", "query",
-                           metrics={"B/op": 100.0, "allocs/op": 2.0}))
+                           metrics={"B/op": 100.0, "allocs/op": 2.0,
+                                    "fixture-rows": 100000.0, "fixture-page": 200.0}))
         query.append(bench(f"BenchmarkQueryBeforeEquality/{field}_cursor", "query",
-                           metrics={"B/op": 90.0, "allocs/op": 2.0}))
+                           metrics={"B/op": 90.0, "allocs/op": 2.0,
+                                    "fixture-rows": 100000.0, "fixture-page": 200.0}))
     return {
         "schema": 1,
         "generated_by": perf_docs.GENERATED_BY,
@@ -106,8 +108,6 @@ def bundle() -> dict:
             bench("BenchmarkProjectionProcessRSS/records=100000", "process_rss",
                  metrics={"MiB": 93.0, "projection-MiB": 76.0}),
             *query,
-            bench("BenchmarkQueryBeforeEquality", "query",
-                 metrics={"fixture-rows": 100000.0, "fixture-page": 200.0}),
             bench("BenchmarkRequestMetadata/bytes1024", "metadata",
                  metrics={"MB/s": 2500.0, "B/op": 16.0, "allocs/op": 1.0}),
             bench("BenchmarkRequestMetadata/bytes102400", "metadata",
@@ -228,6 +228,15 @@ class RendererTests(unittest.TestCase):
         with self.assertRaises(perf_docs.DataError):
             perf_docs.render(data)
 
+    def test_query_rows_must_agree_about_their_fixture(self):
+        data = bundle()
+        query = [entry for entry in data["benchmarks"]
+                 if entry["name"].startswith("BenchmarkQueryBeforeEquality/")]
+        self.assertTrue(query)
+        query[-1]["metrics"]["fixture-page"] = 50.0
+        with self.assertRaises(perf_docs.DataError):
+            perf_docs.render(data)
+
     def test_malformed_bundles_raise_a_data_error(self):
         for key in ("artifacts", "method", "benchmarks"):
             data = bundle()
@@ -284,8 +293,9 @@ class RendererTests(unittest.TestCase):
                 entry["input_tokens"] = 120
                 entry["cost_usd"] = 0.002
         for bench_entry in second["benchmarks"]:
-            if bench_entry["name"] == "BenchmarkQueryBeforeEquality":
-                bench_entry["metrics"] = {"fixture-rows": 5000.0, "fixture-page": 50.0}
+            if bench_entry["name"].startswith("BenchmarkQueryBeforeEquality/"):
+                bench_entry["metrics"]["fixture-rows"] = 5000.0
+                bench_entry["metrics"]["fixture-page"] = 50.0
         page = perf_docs.render(first)
         moved = perf_docs.render(second)
         for old, new in (

@@ -131,6 +131,31 @@ def _bytes_label(n: float) -> str:
     return f"{_num(n)} bytes"
 
 
+def _query_fixture(bundle: dict) -> dict:
+    """The seeded row count and page size every query row reports.
+
+    A sub-benchmark group has no result line of its own, so each row carries
+    the fixture it measured. Rows that disagree would make the sentence above
+    the table describe some rows and not others.
+    """
+    entries = [entry for entry in bundle.get("benchmarks", [])
+               if entry.get("name", "").startswith("BenchmarkQueryBeforeEquality/")]
+    if not entries:
+        raise DataError("bundle has no query benchmark rows")
+    shapes = set()
+    for entry in entries:
+        metrics = entry.get("metrics") or {}
+        rows = metrics.get("fixture-rows")
+        page = metrics.get("fixture-page")
+        if rows is None or page is None:
+            raise DataError(f"{entry['name']} does not report its fixture shape")
+        shapes.add((float(rows), float(page)))
+    if len(shapes) != 1:
+        raise DataError("query benchmark rows disagree about the fixture shape")
+    rows, page = shapes.pop()
+    return {"rows": rows, "page": page}
+
+
 def _records_in(name: str) -> float:
     """The record count a benchmark sub-name declares (`records=100000`)."""
     match = re.search(r"records=(\d+)", name)
@@ -376,7 +401,7 @@ def render(bundle: dict) -> str:
     meta1 = _bench(bundle, "BenchmarkRequestMetadata/bytes1024")
     meta100 = _bench(bundle, "BenchmarkRequestMetadata/bytes102400")
     meta1m = _bench(bundle, "BenchmarkRequestMetadata/bytes1048576")
-    query_fixture = _bench(bundle, "BenchmarkQueryBeforeEquality")
+    query_fixture = _query_fixture(bundle)
 
     fast_shape = _fixture_shape(fast, "fast")
     sustained_shape = _fixture_shape(sustained, "sustained")
@@ -640,8 +665,8 @@ retained analytical cost, not the loaded-process peak as a substitute.
 
 ## Query and metadata paths
 
-The query benchmarks seed a {_num(_metric(query_fixture, 'fixture-rows'))}-row
-scratch database and decode a {_num(_metric(query_fixture, 'fixture-page'))}-row
+The query benchmarks seed a {_num(query_fixture['rows'])}-row
+scratch database and decode a {_num(query_fixture['page'])}-row
 page. These are single-iteration measurements on a shared host, so small
 differences are not meaningful.
 

@@ -99,10 +99,6 @@ func benchmarkQueryBeforeStore(b *testing.B) *Store {
 // unique key hashes and conversation ids, and a rare status every 1,000 rows;
 // BenchmarkQueryBeforeCount isolates the same predicates without row decode.
 func BenchmarkQueryBeforeEquality(b *testing.B) {
-	// The fixture shape is published beside the result, so the benchmark reports
-	// it rather than leaving the page to restate these constants.
-	b.ReportMetric(benchQueryBeforeRows, "fixture-rows")
-	b.ReportMetric(benchQueryBeforePage, "fixture-page")
 	s := benchmarkQueryBeforeStore(b)
 	cursor := &LogCursor{StartMs: queryBeforeFixtureStartMs + 50_000, ID: "row-050000"}
 	for _, tc := range []struct {
@@ -126,6 +122,11 @@ func BenchmarkQueryBeforeEquality(b *testing.B) {
 		{"status_cursor", cursor, LogStatus, "500", benchQueryBeforeRows / queryBeforeRareStatusEvery / 2},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
+			// The fixture shape is published beside the result. The parent of a
+			// sub-benchmark group has no result line, so each row reports it and
+			// the page refuses rows that disagree.
+			b.ReportMetric(benchQueryBeforeRows, "fixture-rows")
+			b.ReportMetric(benchQueryBeforePage, "fixture-page")
 			filter := &LogFilter{All: []LogPredicate{{Field: tc.field, Value: tc.value}}}
 			b.ReportAllocs()
 			b.ResetTimer()
