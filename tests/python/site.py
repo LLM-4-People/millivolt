@@ -162,8 +162,8 @@ def entity_color_errors() -> list[str]:
 BRAND_IMAGE_CONTRACTS = {
     "docs/images/brand/readme-cover-dark.png": (1600, 640),
     "docs/images/brand/readme-cover-light.png": (1600, 640),
-    "docs/images/brand/readme-spec.svg": (1600, 144),
-    "docs/images/brand/readme-spec-mobile.svg": (800, 384),
+    "docs/images/brand/readme-spec.svg": (1600, 192),
+    "docs/images/brand/readme-spec-mobile.svg": (800, 447),
     "site-src/assets/og.png": (1200, 630),
     ".github/social-preview.png": (1280, 640),
 }
