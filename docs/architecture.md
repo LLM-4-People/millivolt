@@ -769,7 +769,12 @@ and settings sheet), `charts.css`, `requests.css` (including the shared
 semantic status fills) and `inspector.css`, with `themes.css` next, then
 `console.css` for the readout and operator console only, and the vendored uPlot
 sheet last. The link order is the
-cascade; `dashboard.css` remains the `:root` palette owner. Each palette owns
+cascade; `dashboard.css` remains the `:root` palette and type owner: its
+`@font-face` rules load the embedded Instrument Sans and JetBrains Mono faces
+from `static/fonts`, and its `--sans`/`--mono` tokens name the families every
+surface consumes. The docs build publishes the same files and adds Instrument
+Serif as the site-only display face for marketing and documentation titles, so
+neither surface makes a third-party font request. Each palette owns
 `--shadow-rgb` and `--veil-rgb`, and the mode veil tokens compose that hue, so
 cool Clear palettes get cool elevation and scrims. `chrome_settings.js` owns
 the Settings trigger, loader, open-state probe, shared status line and the

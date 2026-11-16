@@ -3,7 +3,7 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/readme-cover-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/brand/readme-cover-light.png">
-  <img src="docs/images/brand/readme-cover-dark.png" alt="Diagram showing OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages clients routing through one proxy to any configured upstream, with SQLite metadata below" width="1600">
+  <img src="docs/images/brand/readme-cover-dark.png" alt="millivolt cover: the headline See every AI request. Keep your own routing. beside a dashboard capture showing request count, total cost, cache hit rate, and provider totals" width="1600">
 </picture>
 
 <picture>

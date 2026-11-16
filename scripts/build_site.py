@@ -754,7 +754,7 @@ def base_values(
         "canonical_tag": canonical_tag,
         "og_url": attr_escape(og_url),
         "og_image": attr_escape(og_image),
-        "og_image_alt": attr_escape("millivolt: three client protocols in, any configured upstream out, every request recorded"),
+        "og_image_alt": attr_escape("millivolt: See every AI request. Keep your own routing. The dashboard band shows request count, total cost, cache hit rate, and provider totals from a redacted fixture capture."),
         "site_name": "millivolt",
         "root": root,
         "body": body,
