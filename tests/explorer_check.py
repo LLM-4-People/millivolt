@@ -301,7 +301,7 @@ async def check(args):
             await send('child-two', 'parent', 'fixture-retry429')
             payload = await wait_payload(context.request, base, label, 3)
             require(payload['conversation_summary'] == {'main': 1, 'sub': 2, 'unresolved': 0}, payload['conversation_summary'])
-            await page.goto(navigation(base, [('client', label)]), wait_until='domcontentloaded')
+            await page.goto(navigation(base, [('client', label)], 'conversation'), wait_until='domcontentloaded')
             await accepted_view(page, label, 'conversation', 3)
             require(await page.locator('[data-xp-dim="conversation"] .rail-n').text_content() == '1 main + 2 sub', 'initial main/sub rail summary')
             results['checks'].append('HTTP + browser: one observed main and two declared children')
@@ -370,7 +370,7 @@ async def check(args):
                             await page.locator('#explorer').screenshot(path=str(snapshot_dir / f'lineage-{viewport["width"]}.png'))
                     results['checks'].append({'width': viewport['width'], 'dimension': dim, 'cards': len(footers), 'overflow': measured['overflow']})
 
-                await page.goto(navigation(base, [('client', label)]), wait_until='domcontentloaded')
+                await page.goto(navigation(base, [('client', label)], 'conversation'), wait_until='domcontentloaded')
                 await accepted_view(page, label, 'conversation', 6)
                 child = page.locator('.xp-conversation-node').filter(has=page.locator('[data-xp-key="s:' + sessions['child-one'] + '"]'))
                 await child.locator('a.xp-conversation-parent').click()
@@ -401,7 +401,7 @@ async def check(args):
                 # Reload real server state after presentation-only regressions.
                 # Never manufacture chart history or publish failure captures.
                 await page.set_viewport_size({'width': 1440, 'height': 1000})
-                await page.goto(navigation(base, [('client', label)]), wait_until='domcontentloaded')
+                await page.goto(navigation(base, [('client', label)], 'conversation'), wait_until='domcontentloaded')
                 await accepted_view(page, label, 'conversation', 6)
                 await page.wait_for_function('''() => chartAgg && lastData && kpiAgg?.requests === 6 &&
                     !_renderQueued && !_renderDirty''')

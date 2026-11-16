@@ -22,7 +22,7 @@ READY_TIMEOUT = 40000
 CAPTURE_SETTLE = 250
 
 
-def navigation(base: str, filters=(), dim: str = "provider") -> str:
+def navigation(base: str, filters, dim: str) -> str:
     pairs = [*filters, ("by", dim)]
     return base + "/#/" + "/".join(
         quote(str(part), safe="") for pair in pairs for part in pair)
