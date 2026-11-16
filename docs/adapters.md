@@ -1,8 +1,7 @@
 # Upstream compatibility, adapters and token refresh
 
-The client-facing OpenAI-compatible interface is separate from the upstream
-protocol. Select an adapter with `X-Proxy-Format`; do not infer one from a
-provider label.
+The client-facing protocol is separate from the upstream protocol. Select an
+adapter with `X-Proxy-Format`; do not infer one from a provider label.
 See [protocol](protocol.md) for routing/auth headers and
 [operations](operations.md#known-limits) for current limitations.
 
