@@ -330,6 +330,14 @@ def docs_manifest_errors(site: Path, base_url: str) -> list[str]:
             if not section.get("id") or not section.get("heading"):
                 errors.append(f"docs.json page {record.get('path')} has an incomplete section")
                 break
+        page = site / record.get("output", "")
+        if not page.is_file():
+            errors.append(f"docs.json names a missing page: {record.get('output')}")
+        else:
+            href = Path(record["markdown"]).name
+            link = f'<link rel="alternate" type="text/markdown" href="{href}">'
+            if link not in page.read_text(encoding="utf-8"):
+                errors.append(f"{record['output']} does not advertise its Markdown twin")
     llms = site / "llms.txt"
     if not llms.is_file():
         errors.append("llms.txt was not generated")
@@ -339,9 +347,41 @@ def docs_manifest_errors(site: Path, base_url: str) -> list[str]:
             if record["markdown_url"] not in text:
                 errors.append(f"llms.txt does not link {record['markdown_url']}")
                 break
-    if not (site / "llms-full.txt").is_file():
+    full = site / "llms-full.txt"
+    if not full.is_file():
         errors.append("llms-full.txt was not generated")
+    else:
+        text = full.read_text(encoding="utf-8")
+        for record in pages:
+            if f"<!-- {record['path']} -->" not in text:
+                errors.append(f"llms-full.txt omits {record['path']}")
+                break
     return errors
+
+
+def image_size_errors() -> list[str]:
+    """The dimension reader owns WebP too, so a page cannot skip its check.
+
+    Every landing image must declare its intrinsic size. A format the reader
+    cannot parse would silently waive that rule, so the WebP header parse is
+    exercised directly rather than only through the current artwork.
+    """
+    from scripts.build_site import image_size
+
+    width, height = 1234, 567
+    header = (b"RIFF" + (30).to_bytes(4, "little") + b"WEBPVP8X"
+              + (10).to_bytes(4, "little") + b"\x00" * 4
+              + (width - 1).to_bytes(3, "little")
+              + (height - 1).to_bytes(3, "little") + b"\x00" * 2)
+    with tempfile.TemporaryDirectory(prefix="millivolt-webp-") as temp:
+        path = Path(temp) / "probe.webp"
+        path.write_bytes(header)
+        if image_size(path) != (width, height):
+            return [f"image_size does not read the WebP dimensions: {image_size(path)!r}"]
+    asset = image_size(ROOT / "site-src/assets/relay-field.webp")
+    if asset is None:
+        return ["relay-field.webp has no readable dimensions"]
+    return []
 
 
 def theme_asset_errors(site: Path) -> list[str]:
@@ -798,6 +838,7 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
         errors.append(f"missing referenced token stylesheet: assets/{tokens_name}")
 
     errors.extend(shell_asset_errors(site))
+    errors.extend(image_size_errors())
     errors.extend(theme_asset_errors(site))
     errors.extend(docs_manifest_errors(site, base_url))
     errors.extend(docs_shell_layout_errors(site))

@@ -398,7 +398,7 @@ def previous_next(current_output: str) -> tuple[tuple[str, str] | None, tuple[st
 
 
 def image_size(path: Path) -> tuple[int, int] | None:
-    """Read PNG or SVG dimensions without requiring an image library."""
+    """Read PNG, WebP or SVG dimensions without requiring an image library."""
     try:
         if path.suffix.lower() == ".png":
             data = path.read_bytes()[:24]
@@ -406,6 +406,28 @@ def image_size(path: Path) -> tuple[int, int] | None:
                 return None
             width, height = struct.unpack(">II", data[16:24])
             return width, height
+        if path.suffix.lower() == ".webp":
+            data = path.read_bytes()[:40]
+            if data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+                return None
+            chunk = data[12:16]
+            if chunk == b"VP8X":
+                width = 1 + int.from_bytes(data[24:27], "little")
+                height = 1 + int.from_bytes(data[27:30], "little")
+                return width, height
+            if chunk == b"VP8 ":
+                start = data.find(b"\x9d\x01\x2a", 20)
+                if start < 0 or start + 7 > len(data):
+                    return None
+                width = int.from_bytes(data[start + 3:start + 5], "little") & 0x3fff
+                height = int.from_bytes(data[start + 5:start + 7], "little") & 0x3fff
+                return width, height
+            if chunk == b"VP8L":
+                if len(data) < 25 or data[20] != 0x2f:
+                    return None
+                bits = int.from_bytes(data[21:25], "little")
+                return 1 + (bits & 0x3fff), 1 + ((bits >> 14) & 0x3fff)
+            return None
         if path.suffix.lower() == ".svg":
             head = path.read_text(encoding="utf-8", errors="replace")[:1000]
             width = re.search(r'\bwidth="(\d+)"', head)
@@ -922,8 +944,11 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
         theme_color=theme_color,
         active="docs",
         assets=assets,
+        # The twin sits beside the rendered page, so the href is its basename.
+        # A root-relative path would break a subpath deployment, and the full
+        # output path would resolve to docs/docs/<page>.md.
         head_extra='<link rel="alternate" type="text/markdown" href="'
-        + attr_escape(site_llm.markdown_name(page.output)) + '">',
+        + attr_escape(Path(site_llm.markdown_name(page.output)).name) + '">',
     )
     return render_base(values), {
         "title": title,
