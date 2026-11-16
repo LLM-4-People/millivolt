@@ -7,55 +7,18 @@ section in operations owns the implementation cost model and `go_memory_limit`
 behavior.
 
 These are scoped local measurements of the native proxy process, not deployment
-guarantees. They were taken on 2026-10-20 UTC. The footprint, fast-response,
-streaming concurrency, writer, storage and query tables used source revision
-[`facb699`](https://github.com/LLM-4-People/millivolt/commit/facb69900ac64c19ec3262fcb88b6428d33a68d2);
-the sustained-capacity table used revision `54d1276`; the streaming throughput
-table used revision `ca6ead9` on branch `perf/e2e-streaming`. Measurements used
-Go 1.27.2 on Linux/amd64 under WSL2. The host was a shared Intel Core Ultra
-9 285H with 12 visible logical CPUs and 62 GiB of visible RAM. The earlier tables
-were measured with builds and tests finished; the streaming throughput ramp ran
-under variable background load. The public example configuration was used, with
-private listen and database paths supplied by `scripts/dev.sh`. Debug captures
-and body previews were off. No browser or live observer was attached during the
-load stages. CPU and RSS describe the native Go process, not Docker's
-container-wide accounting. Percentiles are nearest-rank; RSS was sampled every
-100 ms unless stated otherwise.
-
-## Method
-
-| Item | Setting |
-| --- | --- |
-| Date | 2026-10-20 UTC |
-| Source revision, footprint and ramps | `facb69900ac64c19ec3262fcb88b6428d33a68d2` |
-| Source revision, sustained capacity | `54d1276` |
-| Source revision, streaming throughput | `ca6ead9` (`perf/e2e-streaming`) |
-| Streaming throughput load | Shared host, 1-minute load average 2.6 to 13.1 |
-| Go toolchain | 1.27.2, `CGO_ENABLED=0` |
-| Platform | Linux/amd64 under WSL2 |
-| CPU | Intel Core Ultra 9 285H, 12 visible logical CPUs |
-| Visible RAM | 62 GiB |
-| Configuration | Public example with private listen and database paths |
-| Debug and body previews | Off |
-| Browser and live observer | None during load stages |
-| Upstream | Local synthetic server on loopback |
-| Load shape | Closed-loop HTTP stages, then drain |
-| RSS sampling | 100 ms unless the idle sample states otherwise |
-| CPU unit | 100% equals one logical CPU |
-| Accounting check | Durable rows, tokens, cost and drop delta |
+guarantees. The page was regenerated from the result bundle on
+2026-11-16 UTC.
 
 ## Artifact and idle footprint
 
-The image was built from the current Dockerfile. The binary was built with
-`CGO_ENABLED=0`, `-trimpath`, `-buildvcs=false`, and `-ldflags="-s -w"`.
-
 | Artifact or state | Bytes | Display | Notes |
 | --- | ---: | ---: | --- |
-| Static amd64 binary | 19,611,808 | 18.7 MiB | Stripped, no CGO |
-| amd64 runtime image | 35,109,551 | 33.5 MiB | Docker-reported content size |
-| Compressed image archive | 9,047,520 | 8.63 MiB | `docker save` piped through `gzip -9` |
-| Idle process, empty SQLite | 27,004 KiB | 26.4 MiB | After a 15-second quiet interval |
-| Idle process CPU | 2 scheduler ticks | 0.067% | Two ticks over 30 seconds at 100 Hz |
+| Static amd64 binary | 21,663,904 | 20.7 MiB | Stripped, no CGO |
+| amd64 runtime image | 38,022,232 | 36.3 MiB | Docker-reported content size |
+| Compressed image archive | 9,887,262 | 9.4 MiB | `docker save` piped through `gzip -9` |
+| Idle process, empty SQLite | 30,204 KiB | 29.5 MiB | After a 15-second quiet interval |
+| Idle process CPU | 2 scheduler ticks | 0.067% | 2 ticks over 30 seconds |
 
 The image size includes the distroless base, dependency notices, and the
 embedded UI. It is not a compressed download size, a registry digest, or a
@@ -63,65 +26,104 @@ persistent-volume estimate. Idle RSS and CPU describe one process on this host.
 A short sample cannot prove that a longer idle period uses exactly the same
 resources.
 
+## Method
+
+| Item | Setting |
+| --- | --- |
+| Date | 2026-11-16 |
+| Source revision | [`22c0b6b73655`](https://github.com/LLM-4-People/millivolt/commit/22c0b6b73655a349e086c345bc80907efbe16822) |
+| Go toolchain | go1.27.4, `CGO_ENABLED=0` |
+| Platform | Linux/amd64 under WSL2 |
+| CPU | Intel(R) Core(TM) Ultra 9 285H, 12 visible logical CPUs |
+| Visible RAM | 62 GiB |
+| Configuration | Public example with private listen and database paths |
+| Debug captures | Off |
+| Body previews | Off |
+| Browser and live observer | None during load stages |
+| Upstream | Local synthetic server on loopback |
+| Load shape | Closed-loop HTTP stages, then drain |
+| RSS sampling | 100 ms |
+| CPU unit | 100% equals one logical CPU |
+| Accounting check | Exact stages reconcile rows, tokens and cost; a dropping stage reconciles durable plus dropped |
+| Host load (1-minute) | 23.36 at start, 13.38 at end |
+
+The public example configuration was used, with private listen and database
+paths supplied by `scripts/dev.sh`. The method table records the harness
+declarations for captures, previews, the observer and the upstream. CPU and RSS
+describe the native Go process, not Docker's container-wide accounting.
+Percentiles are nearest-rank.
+
 ## Fast-response throughput
 
 Each stage used a fresh disposable database and the same synthetic response:
-ten content frames, usage `100/10`, and fixture cost `0.001`. The upstream added
-no intentional delay. Each stage started requests for five seconds, then let
-active requests drain. The final row is a separate ten-second run used to reach
-about 90,000 durable rows without a storage drop.
+10 content frames, usage `100/10`, and fixture cost `0.001`. The upstream added no intentional delay. Each stage started
+requests for 5 seconds, then let active requests drain. The final
+row is a separate
+10-second run used
+to reach about 129,442 durable rows
+without a storage drop.
 
 | Client workers | HTTP requests | Requests/s | p50 | p95 | p99 | Proxy CPU | Peak proxy RSS | Durable rows |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 1 | 4,259 | 851.5 | 0.99 ms | 2.24 ms | 3.41 ms | 42.8% | 47.8 MiB | Exact, 4,259 |
-| 8 | 14,997 | 2,998.0 | 1.62 ms | 8.32 ms | 15.03 ms | 150.1% | 85.6 MiB | Exact, 14,997 |
-| 32 | 35,746 | 7,147.0 | 3.66 ms | 9.61 ms | 13.66 ms | 322.9% | 98.0 MiB | Exact, 35,746 |
-| 128 | 55,713 | 11,114.5 | 10.37 ms | 23.04 ms | 32.88 ms | 492.8% | 114.3 MiB | Exact, 55,713 |
-| 128, 10 s | 90,620 | 9,055.1 | 12.42 ms | 29.92 ms | 42.77 ms | 404.4% | 115.0 MiB | Exact, 90,620 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 6,879 | 1,375.7 | 0.66 ms | 1.09 ms | 1.66 ms | 52.6% | 61.5 MiB | Exact, 6,879 |
+| 8 | 30,264 | 6,050.9 | 1.17 ms | 2.28 ms | 4.06 ms | 239.3% | 88.3 MiB | Exact, 30,264 |
+| 32 | 53,081 | 10,567.2 | 2.55 ms | 6.01 ms | 8.63 ms | 374.3% | 93.0 MiB | Exact, 53,081 |
+| 128 | 66,813 | 13,346.4 | 8.40 ms | 20.19 ms | 28.29 ms | 465.2% | 119.0 MiB | Exact, 66,813 |
+| 128, 10 s | 129,442 | 12,931.5 | 8.50 ms | 21.30 ms | 31.58 ms | 459.7% | 124.5 MiB | Exact, 129,442 |
 
-All HTTP responses succeeded in these stages, including the 128-worker stage.
-That is not a promise that every configuration and history size stays exact
-under overload. The durable queue is bounded and best-effort; the deliberate
-overload fixture below shows what a drop result looks like.
+The exact fast-response point is 13,346.4 requests/s at 128 workers, with p95 20.19 ms and p99 28.29 ms. The 128-worker 10-second stage used 227.3% CPU and 33.7 MiB peak RSS in the separate load generator and synthetic upstream process.
 
-At the ten-second 128-worker stage, the separate load generator and synthetic
-upstream process used 218.8% CPU and 31.8 MiB peak RSS. The proxy figure
-excludes that process.
+All HTTP responses succeeded in these stages, including the
+128-worker stage. That is not a
+promise that every configuration and history size stays exact under overload.
+The durable queue is bounded and best-effort; the deliberate overload fixture
+below shows what a drop result looks like.
 
 ## Sustained capacity
 
 The sustained capacity point is the highest tested closed-loop level that
-completed five minutes with zero durable drops and exact accounting. Each level
-started from a fresh disposable database. The upstream response and client
-shape were the same as the fast-response table: ten content frames, usage
-`100/10`, and fixture cost `0.001`. A level that dropped rows is an overload
-observation, not a capacity result.
+completed a 300-second run with zero durable drops and exact
+accounting. Each level started from a fresh disposable database. The upstream
+response and client shape were the same as the fast-response table:
+10 content frames, usage `100/10`, and fixture cost `0.001`.
 
 | Workers | Duration | HTTP requests | Requests/s | p50 | p95 | p99 | Proxy CPU | Peak proxy RSS | Durable rows | Drops |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| 32 | 300.0 s | 3,745,048 | 12,483.4 | 2.12 ms | 5.13 ms | 11.49 ms | 409.9% | 99.4 MiB | Exact, 3,745,048 | 0 |
-| 48 | 300.0 s | 4,249,881 | 14,166.2 | 2.84 ms | 6.96 ms | 13.14 ms | 475.8% | 113.7 MiB | Exact, 4,249,881 | 0 |
-| 64 | 300.0 s | 4,138,385 | 13,794.5 | 3.89 ms | 9.66 ms | 16.85 ms | 456.9% | 117.4 MiB | 4,088,177 | 50,208 |
-| 128 | 300.0 s | 3,789,537 | 12,631.5 | 8.28 ms | 23.15 ms | 40.91 ms | 415.5% | 134.7 MiB | 3,355,678 | 433,859 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 300.00 s | 2,584,965 | 8,616.5 | 2.54 ms | 9.93 ms | 19.71 ms | 289.1% | 107.0 MiB | Exact, 2,584,965 | 0 |
+| 48 | 300.01 s | 3,683,159 | 12,276.8 | 3.12 ms | 8.92 ms | 15.68 ms | 421.1% | 121.9 MiB | Exact, 3,683,159 | 0 |
+| 64 | 300.00 s | 4,649,811 | 15,499.2 | 3.62 ms | 8.18 ms | 12.03 ms | 522.6% | 125.8 MiB | 4,602,957 kept | 46,854 |
+| 128 | 300.03 s | 4,169,782 | 13,897.8 | 7.77 ms | 20.25 ms | 32.11 ms | 451.4% | 141.1 MiB | 3,775,709 kept | 394,073 |
 
-The separate load generator and synthetic upstream used 249.0% CPU and 230.9
-MiB peak RSS at the 48-worker exact point, and 206.5% CPU and 186.1 MiB at the
-128-worker overload point. The proxy figures exclude that process.
-
-The exact five-minute result is 14,166.2 requests/s at 48 workers, with p95
-6.96 ms and p99 13.14 ms. The 64-worker point produced 50,208 drops (1.2% of
-successful requests) and the 128-worker point produced 433,859 drops (11.4%).
-Those rows show that the bounded durable queue is not a promise of lossless
-storage at every load. They are not evidence of a universal capacity ceiling;
-host, configuration, response size, history growth, and attached observers all
-change the result.
+The exact 300-second point is 12,276.8 requests/s at 48 workers, with p95 8.92 ms and p99 15.68 ms. The 64-worker point dropped 46,854 rows (1.0% of its requests). A level that drops is an overload observation, not a capacity result; the bounded durable queue is not lossless at every load.
 
 ## Streaming concurrency
 
-The synthetic upstream emitted ten content frames across approximately one
-second, followed by usage and a terminator. Each stage started requests for five
-seconds and then drained. Latency includes the intentional upstream delay, so
-these numbers are not proxy-only overhead.
+The synthetic upstream emitted 10-frame response across approximately
+1-second stream, followed by usage and a terminator. Each stage started its
+fixed number of requests and then drained. Latency includes the intentional
+upstream delay, so these numbers are not proxy-only overhead.
+
+| Workers | HTTP requests | Requests/s | SSE events/s | Output tokens/s | Response KiB/s | p50 | p95 | p99 | First-byte p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 5 | 1.0 | 12 | 10 | 0.6 | 1,009.61 ms | 1,010.49 ms | 1,010.49 ms | 2.22 ms |
+| 8 | 40 | 7.9 | 95 | 79 | 4.7 | 1,007.21 ms | 1,009.82 ms | 1,010.22 ms | 3.59 ms |
+| 32 | 160 | 31.4 | 377 | 314 | 18.8 | 1,007.57 ms | 1,016.44 ms | 1,059.19 ms | 8.23 ms |
+| 64 | 320 | 62.9 | 755 | 629 | 37.6 | 1,008.33 ms | 1,037.34 ms | 1,054.23 ms | 31.17 ms |
+| 128 | 640 | 124.5 | 1,494 | 1,245 | 74.4 | 1,009.33 ms | 1,074.57 ms | 1,107.40 ms | 69.27 ms |
+| 256 | 1,280 | 248.0 | 2,976 | 2,480 | 148.2 | 1,010.96 ms | 1,093.08 ms | 1,119.54 ms | 89.49 ms |
+| 512 | 2,560 | 490.0 | 5,880 | 4,900 | 292.9 | 1,008.64 ms | 1,150.71 ms | 1,153.58 ms | 145.75 ms |
+| 1,024 | 3,072 | 494.8 | 5,938 | 4,948 | 295.7 | 2,016.27 ms | 2,144.02 ms | 2,157.64 ms | 1,133.32 ms |
+
+| Workers | Proxy CPU | Peak proxy RSS | Upstream peak | Durable rows | Drops |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.2% | 31.7 MiB | 1 | Exact, 5 | 0 |
+| 8 | 1.0% | 32.7 MiB | 8 | Exact, 40 | 0 |
+| 32 | 3.7% | 36.7 MiB | 32 | Exact, 160 | 0 |
+| 64 | 6.9% | 40.2 MiB | 64 | Exact, 320 | 0 |
+| 128 | 13.2% | 49.8 MiB | 128 | Exact, 640 | 0 |
+| 256 | 24.6% | 67.4 MiB | 256 | Exact, 1,280 | 0 |
+| 512 | 48.6% | 103.7 MiB | 512 | Exact, 2,560 | 0 |
+| 1,024 | 48.6% | 137.9 MiB | 512 | Exact, 3,072 | 0 |
 
 These stages measure concurrency and end-to-end latency for that fixed fixture.
 They do not measure SSE event rate, bytes per second, token throughput, TTFT,
@@ -129,84 +131,50 @@ chunk-size or hold-duration effects, sustained streaming, or the point where
 streaming saturates. First-byte p95 is the first response byte, not the first
 generated token.
 
-| Client workers | HTTP requests | Requests/s | p50 | p95 | p99 | First-byte p95 | Proxy CPU | Peak proxy RSS | Durable rows |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 1 | 5 | 1.0 | 1,009 ms | 1,010 ms | 1,010 ms | 2.86 ms | 0.6% | 27.9 MiB | Exact, 5 |
-| 8 | 40 | 7.9 | 1,013 ms | 1,023 ms | 1,024 ms | 10.31 ms | 2.0% | 30.3 MiB | Exact, 40 |
-| 32 | 160 | 31.5 | 1,011 ms | 1,017 ms | 1,028 ms | 10.62 ms | 6.5% | 35.6 MiB | Exact, 160 |
-| 128 | 640 | 124.7 | 1,010 ms | 1,051 ms | 1,090 ms | 41.30 ms | 21.6% | 45.7 MiB | Exact, 640 |
-| 512 | 2,560 | 490.5 | 1,014 ms | 1,114 ms | 1,137 ms | 101.64 ms | 74.1% | 99.1 MiB | Exact, 2,560 |
-
-The 512-worker stage reached 512 upstream connections and remained exact. This
-is a configured concurrency result on one host, not a universal request-capacity
-ceiling. The 512 level also matches the example configuration's
-`max_conns_per_host`. No higher level, sustained streaming stage, or automatic
-saturation sweep was run; see [Limitations](#limitations). The generator and
-upstream used 69.9% CPU and 65.8 MiB peak RSS at that stage.
+The 1,024-worker stage reached
+512 upstream connections
+and remained exact. This is a configured concurrency result on one host, not a
+universal request-capacity ceiling. The largest level also matches the example
+configuration's `max_conns_per_host` of 512. No higher level, sustained
+streaming stage, or automatic saturation sweep was run; see
+[Limitations](#limitations).
 
 ## Streaming throughput
 
 `scripts/perf.sh streaming` runs the longer end-to-end throughput ramp. Each
 level starts a fresh private `scripts/dev.sh` instance and sends requests
-through the real proxy to a local synthetic SSE upstream. The defaults are 1, 8,
-32, 64, 128, 256, 512 and 1024 clients for 60 seconds per level, with 100 content
-frames over a roughly one-second stream.
-
-Each result line reports requests/s, SSE events/s, response bytes/s, output
-tokens/s, end-to-end latency, first-byte p95, proxy CPU/RSS and durable rows.
-The event, byte and token counts come from responses the client compared
-byte-for-byte with the fixture, so they describe what the client received; a
-failed response does not contribute. The ramp stops at the first failed stage or
-durable drop. The per-level JSON carries `sse_events_per_second`,
-`stream_bytes_per_second` and `output_tokens_per_second` alongside the existing
-request and latency fields.
-
-This fixture emits 100 content frames per one-second stream, ten times the
-ten-frame concurrency fixture above, so its CPU and byte rates are not directly
-comparable to that table. The 2026-10-20 run measured:
+through the real proxy to a local synthetic SSE upstream. Each level ran for
+60 seconds
+with 100 content frames over a roughly 1-second
+stream.
 
 | Workers | HTTP requests | Requests/s | SSE events/s | Output tokens/s | Response KiB/s | p50 | p95 | p99 | First-byte p95 |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 56 | 0.9 | 95 | 93 | 4.7 | 1,073 ms | 1,083 ms | 1,085 ms | 3.15 ms |
-| 8 | 456 | 7.5 | 767 | 752 | 38.2 | 1,063 ms | 1,074 ms | 1,083 ms | 2.59 ms |
-| 32 | 1,824 | 30.2 | 3,076 | 3,016 | 153.3 | 1,061 ms | 1,067 ms | 1,073 ms | 3.89 ms |
-| 64 | 3,648 | 60.1 | 6,130 | 6,010 | 305.4 | 1,064 ms | 1,074 ms | 1,096 ms | 4.58 ms |
-| 128 | 7,296 | 120.2 | 12,256 | 12,016 | 610.5 | 1,064 ms | 1,071 ms | 1,105 ms | 5.29 ms |
-| 256 | 14,080 | 231.6 | 23,620 | 23,157 | 1,176.6 | 1,066 ms | 1,267 ms | 1,447 ms | 19.13 ms |
-| 512 | 29,184 | 479.3 | 48,884 | 47,925 | 2,435.1 | 1,064 ms | 1,078 ms | 1,165 ms | 9.17 ms |
-| 1024 | 29,381 | 473.0 | 48,243 | 47,297 | 2,403.2 | 2,135 ms | 2,183 ms | 2,241 ms | 1,097.42 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 57 | 0.9 | 96 | 94 | 4.8 | 1,067.07 ms | 1,079.25 ms | 1,085.80 ms | 3.02 ms |
+| 8 | 448 | 7.5 | 760 | 746 | 37.9 | 1,066.92 ms | 1,125.67 ms | 1,146.53 ms | 6.08 ms |
+| 32 | 1,824 | 30.3 | 3,086 | 3,026 | 153.7 | 1,055.96 ms | 1,067.91 ms | 1,073.94 ms | 3.17 ms |
+| 64 | 3,648 | 60.2 | 6,140 | 6,020 | 305.9 | 1,061.67 ms | 1,072.37 ms | 1,088.48 ms | 3.88 ms |
+| 128 | 7,296 | 120.5 | 12,291 | 12,050 | 612.3 | 1,060.13 ms | 1,069.44 ms | 1,113.02 ms | 5.44 ms |
+| 256 | 14,592 | 239.2 | 24,395 | 23,916 | 1,215.2 | 1,061.58 ms | 1,138.38 ms | 1,174.13 ms | 11.75 ms |
+| 512 | 28,789 | 471.5 | 48,094 | 47,151 | 2,395.8 | 1,063.37 ms | 1,141.20 ms | 1,300.62 ms | 15.32 ms |
+| 1,024 | 29,696 | 478.6 | 48,819 | 47,861 | 2,431.9 | 2,128.84 ms | 2,162.96 ms | 2,285.10 ms | 1,091.76 ms |
 
 | Workers | Proxy CPU | Peak proxy RSS | Upstream peak | Durable rows | Drops |
-| ---: | ---: | ---: | ---: | ---: | --- |
-| 1 | 1.4% | 28.3 MiB | 1 | Exact, 56 | 0 |
-| 8 | 6.2% | 32.7 MiB | 8 | Exact, 456 | 0 |
-| 32 | 15.9% | 42.7 MiB | 32 | Exact, 1,824 | 0 |
-| 64 | 26.8% | 54.6 MiB | 64 | Exact, 3,648 | 0 |
-| 128 | 54.3% | 76.8 MiB | 128 | Exact, 7,296 | 0 |
-| 256 | 94.2% | 109.3 MiB | 256 | Exact, 14,080 | 0 |
-| 512 | 220.0% | 147.4 MiB | 512 | Exact, 29,184 | 0 |
-| 1024 | 217.5% | 183.4 MiB | 512 | Exact, 29,381 | 0 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1.2% | 31.5 MiB | 1 | Exact, 57 | 0 |
+| 8 | 5.5% | 37.1 MiB | 8 | Exact, 448 | 0 |
+| 32 | 14.9% | 47.8 MiB | 32 | Exact, 1,824 | 0 |
+| 64 | 28.2% | 59.0 MiB | 64 | Exact, 3,648 | 0 |
+| 128 | 57.9% | 81.3 MiB | 128 | Exact, 7,296 | 0 |
+| 256 | 115.1% | 114.9 MiB | 256 | Exact, 14,592 | 0 |
+| 512 | 233.1% | 152.2 MiB | 513 | Exact, 28,789 | 0 |
+| 1,024 | 239.9% | 189.4 MiB | 512 | Exact, 29,696 | 0 |
 
-At 512 clients the proxy reached 479.3 requests/s, 48,884 SSE events/s,
-2,435.1 KiB/s (about 2.4 MiB/s) and 47,925 output tokens/s with exact accounting
-and no drops. At 1024 clients the upstream peak stayed at 512, throughput
-stayed flat (473.0 requests/s, 48,243 events/s), and p50 latency doubled from
-about 1.06 s to 2.14 s; first-byte p95 rose from 9.17 ms to 1,097.42 ms. The
-extra clients queued behind the configured 512 upstream connections. The proxy
-used about 2.2 CPU cores at both levels, so this plateau is the configured
-connection cap, not a demonstrated proxy CPU ceiling. Every level completed with
-exact durable accounting and zero drops.
+Throughput peaked at 478.6 requests/s at 1,024 workers. At 1,024 workers the upstream peak stayed at 512, throughput was 478.6 requests/s against 471.5 at 512 workers, and p50 latency rose from 1.06 s to 2.13 s. The extra clients queued behind the configured 512 upstream connections.
 
-This run was taken under variable background load (1-minute load average 2.6 at
-the start and 13.1 at the end), so its absolute rates are lower and noisier than
-a quiet-host run. The plateau and the doubled 1024-client latency are the
-same-host comparison; do not compare the absolute numbers across hosts.
-
-The 1024-client level is deliberately above the example configuration's
-`max_conns_per_host` of 512. It measures queueing and the throughput plateau,
-not 1024 simultaneous upstream connections. This is a fixed-level ramp, not an
-automatic saturation search; override the levels with
-`PERF_STREAMING_LEVELS` when a different range is needed.
+Every level completed with exact durable accounting unless its row reports
+drops. This run started under the host load the harness recorded, so absolute
+rates are comparable only within this page and this host.
 
 ## Durable writer and overload
 
@@ -217,13 +185,13 @@ result, not a recommended operating point.
 
 | Path | Durable rows/s | Allocations |
 | --- | ---: | ---: |
-| Direct batch insert, 256 records per batch | 15,397 | 436,164 B/op, 7,281 allocs/op |
-| Queued `Record` plus `Flush`, 8,192 records per batch | 31,608 | 13,649,079 B/op, 232,863 allocs/op |
+| Direct batch insert at the configured batch capacity | 62,921 | 425,396 B/op, 7,279 allocs/op |
+| Queued `Record` plus `Flush` at the queue capacity | 56,055 | 13,594,117 B/op, 232,920 allocs/op |
 
 | Overload fixture | Wire requests/s | Durable rows/s | Dropped rows |
 | --- | ---: | ---: | ---: |
-| 32 workers | 74,840 | 15,760 | 136,067 |
-| 128 workers | 70,620 | 13,157 | 101,213 |
+| 32 workers | 72,619 | 19,994 | 101,507 |
+| 128 workers | 64,161 | 14,605 | 113,242 |
 
 The overload fixture confirms the accounting invariant `durable + dropped =
 successful requests`. Increasing queue capacity alone cannot make sustained
@@ -238,68 +206,128 @@ shared-memory sidecar after a final flush.
 
 | Measure | 10,000 records | 100,000 records |
 | --- | ---: | ---: |
-| SQLite bytes total | 6.66 MiB | 45.35 MiB |
-| SQLite bytes per record | 698.4 | 475.5 |
+| SQLite bytes total | 6.84 MiB | 49.20 MiB |
+| SQLite bytes per record | 717.3 | 515.9 |
 | Projection retained, built | 449.6 B/record | 470.8 B/record |
-| Projection interned dimensions | 441.9 B/record | 429.0 B/record |
-| Projection scanned decode | 571.1 B/record | 566.6 B/record |
-| Projection transient allocation | 2,815 B/record | 3,045 B/record |
+| Projection interned dimensions | 442.0 B/record | 429.1 B/record |
+| Projection scanned decode | 580.3 B/record | 576.0 B/record |
+| Projection transient allocation | 3,125 B/record | 3,434 B/record |
 
 The projection process benchmark is a relative measure inside the test binary,
-not the deployed proxy's RSS. At 100,000 records it measured 93.84 MiB process
-RSS and a 76.50 MiB projection delta; at 10,000 records it measured 37.61 MiB
-process RSS and a 20.27 MiB delta. The test binary and its linked packages are
-part of the absolute figure.
+not the deployed proxy's RSS. At 100,000 records it
+measured 94.6 MiB process RSS and a
+66.0 MiB projection delta; at
+10,000 records it measured
+40.6 MiB process RSS and a
+12.0 MiB delta. The test binary and its
+linked packages are part of the absolute figure.
 
-A loaded proxy run reached a 115.0 MiB peak with 90,620 durable rows while no
-dashboard projection was preloaded. A full dashboard preload over an authorized
-100,000-row history was not remeasured for this page. Use the projection delta
-above for the retained analytical cost, not the loaded-process peak as a
-substitute.
+A fast-response run reached a 119.0 MiB
+peak with 66,813 durable rows while no
+dashboard projection was preloaded. Use the projection delta above for the
+retained analytical cost, not the loaded-process peak as a substitute.
 
 ## Query and metadata paths
 
-The query benchmarks seed a 100,000-row scratch database and decode a 200-row
+The query benchmarks seed a 100,000-row
+scratch database and decode a 200-row
 page. These are single-iteration measurements on a shared host, so small
 differences are not meaningful.
 
 | Query | Before cursor | With cursor | Allocations before cursor |
-| --- | ---: | ---: | ---: |
-| Provider equality | 4.76 ms | 4.48 ms | 1.39 MB, 5,858 allocs |
-| Model equality | 4.25 ms | 4.55 ms | 1.38 MB, 5,848 allocs |
-| Client equality | 57.06 ms | 32.16 ms | 1.38 MB, 5,846 allocs |
-| Key-hash equality | 47.20 ms | 26.54 ms | 23.7 KB, 269 allocs |
-| Conversation equality | 60.58 ms | 36.11 ms | 23.7 KB, 268 allocs |
-| Status equality | 56.06 ms | 33.68 ms | 700 KB, 3,145 allocs |
+| --- | ---: | ---: | --- |
+| Provider equality | 4.24 ms | 3.85 ms | 1.38 MB, 5,455 allocs |
+| Model equality | 2.81 ms | 2.93 ms | 1.38 MB, 5,445 allocs |
+| Client equality | 36.52 ms | 18.73 ms | 1.38 MB, 5,442 allocs |
+| Key-hash equality | 33.68 ms | 18.28 ms | 23.5 KB, 265 allocs |
+| Conversation equality | 40.16 ms | 21.73 ms | 23.2 KB, 264 allocs |
+| Status equality | 38.98 ms | 20.99 ms | 698.1 KB, 2,942 allocs |
 
-The request metadata path was measured separately. It performs one bounded
-metadata decode and allocates 16 bytes per call.
+The request metadata path performs one bounded metadata decode; the allocation
+column is measured per call.
 
 | Metadata body | Time per request | Throughput | Allocations |
-| ---: | ---: | ---: | ---: |
-| 1 KiB | 431.9 ns | 2,558.6 MB/s | 16 B, 1 alloc |
-| 100 KiB | 7,504 ns | 13,657.6 MB/s | 16 B, 1 alloc |
-| 1 MiB | 108,203 ns | 9,691.5 MB/s | 16 B, 1 alloc |
+| --- | ---: | ---: | ---: |
+| 1 KiB | 428 ns | 2,580.8 MB/s | 16 B, 1 alloc |
+| 100 KiB | 4,808 ns | 21,314.0 MB/s | 16 B, 1 alloc |
+| 1 MiB | 75,397 ns | 13,908.4 MB/s | 16 B, 1 alloc |
 
-The 1 MiB case is about 108 microseconds on this host. It is a metadata decode
-measurement, not a promise that every 1 MiB request body is fully processed in
-that time.
+## Implementation benchmarks
+
+These are the isolated benchmark results the design notes cite. They are current
+measurements from the same run as the tables above, not a historical before and
+after across revisions.
+
+| Benchmark | Time | Bytes per op | Allocs per op |
+| --- | --- | --- | --- |
+| `BenchmarkAggregateFold/chart` | 2.74 ms | 136,736 B | 28 |
+| `BenchmarkAggregateFold/explorer` | 4.38 ms | 209,696 B | 37 |
+| `BenchmarkAggregateFold/explorer_tool` | 3.73 ms | 807,840 B | 38 |
+| `BenchmarkAggregateFold/chart_window` | 413,833 ns | 17,616 B | 28 |
+| `BenchmarkHandleLogPage/empty/limit_60` | 1.70 ms | 987,376 B | 3,533 |
+| `BenchmarkHandleLogPage/sql_provider/limit_60` | 1.95 ms | 550,080 B | 2,645 |
+| `BenchmarkHandleLogPage/go_status_class/limit_60` | 1.89 ms | 903,504 B | 2,686 |
+| `BenchmarkHandleLogPage/go_status_class_5xx/limit_60` | 4.88 ms | 1,819,616 B | 21,125 |
+| `BenchmarkHandleLogPage/go_tool_missing/limit_60` | 5.00 ms | 1,883,032 B | 29,360 |
+| `BenchmarkHandleLogPage/empty/limit_200` | 4.26 ms | 2,889,608 B | 7,999 |
+| `BenchmarkHandleLogPage/sql_provider/limit_200` | 4.92 ms | 2,888,720 B | 7,993 |
+| `BenchmarkHandleLogPage/go_status_class/limit_200` | 4.14 ms | 2,890,912 B | 8,015 |
+| `BenchmarkHandleLogPage/go_status_class_5xx/limit_200` | 3.88 ms | 1,889,744 B | 21,029 |
+| `BenchmarkHandleLogPage/go_tool_missing/limit_200` | 4.72 ms | 1,957,512 B | 29,258 |
+| `BenchmarkProjectionMetricAppend/history_100000` | 11,393 ns | 960 B | 5 |
+| `BenchmarkProjectionMetricAppend/history_1000000` | 11,716 ns | 960 B | 5 |
+| `BenchmarkProjectionMetricAppend/append_cross_100000` | 1.58 ms | 3,956,976 B | 14 |
+| `BenchmarkProjectionMetricAppend/append_cross_1000000` | 1.54 ms | 3,956,976 B | 14 |
+| `BenchmarkAggregateUnchanged/identity_marshal` | 33,009 ns | 6,456 B | 6 |
+| `BenchmarkAggregateUnchanged/unchanged` | 1,338 ns | 0 B | 0 |
+| `BenchmarkKPI/records_10000/miss` | 403,272 ns | 83,632 B | 6 |
+| `BenchmarkKPI/records_10000/hit` | 1,024 ns | 32 B | 3 |
+| `BenchmarkKPI/records_100000/miss` | 7.47 ms | 804,528 B | 6 |
+| `BenchmarkKPI/records_100000/hit` | 1,986 ns | 32 B | 3 |
+| `BenchmarkKPI/records_1000000/miss` | 91.84 ms | 8,005,296 B | 6 |
+| `BenchmarkKPI/records_1000000/hit` | 2,153 ns | 32 B | 3 |
+| `BenchmarkObserveModelNames4096` | 7.59 ms | 3,613,216 B | 70,975 |
+| `BenchmarkObserveModelNameEvent/rules0` | 29,568 ns | 3,136 B | 19 |
+| `BenchmarkObserveModelNameEvent/rules64` | 99,814 ns | 26,992 B | 29 |
+| `BenchmarkObserveModelNameEventWired/rules0` | 15,688 ns | 3,136 B | 19 |
+| `BenchmarkObserveModelNameEventWired/rules64` | 76,644 ns | 31,088 B | 30 |
+| `BenchmarkSkipJSONString/plain/102400` | 9,647 ns | 0 B | 0 |
+| `BenchmarkSkipJSONString/escaped/102400` | 8,821 ns | 0 B | 0 |
+| `BenchmarkSkipJSONString/tail/102400` | 6,882 ns | 0 B | 0 |
+| `BenchmarkSkipJSONString/plain/1048576` | 84,535 ns | 0 B | 0 |
+| `BenchmarkSkipJSONString/escaped/1048576` | 86,790 ns | 0 B | 0 |
+| `BenchmarkSkipJSONString/tail/1048576` | 67,966 ns | 0 B | 0 |
+| `BenchmarkRequestMetadataShapes/escaped` | 629,819 ns | 35,552 B | 370 |
+| `BenchmarkRequestMetadataShapes/many_messages` | 254,854 ns | 32,280 B | 30 |
+| `BenchmarkRequestMetadataShapes/multimodal` | 168,469 ns | 16,240 B | 73 |
+| `BenchmarkRequestMetadataShapes/tool_schema` | 85,121 ns | 3,480 B | 22 |
+| `BenchmarkRequestMetadataShapes/digit_description` | 73,440 ns | 2,648 B | 6 |
+| `BenchmarkAnalyzerFeed/content` | 3,503 ns | 0 B | 0 |
+| `BenchmarkAnalyzerFeed/reasoning` | 2,881 ns | 0 B | 0 |
+| `BenchmarkAnalyzerFeed/tool_call` | 6,972 ns | 240 B | 1 |
+| `BenchmarkAnalyzerFeed/usage` | 3,131 ns | 0 B | 0 |
+| `BenchmarkAnalyzerFeed/negative` | 1,798 ns | 0 B | 0 |
+| `BenchmarkAnalyzerToolNameDedupe/10000` | 4.88 ms | 192,096 B | 10,121 |
+| `BenchmarkAnalyzerToolNameDedupe/100000` | 48.39 ms | 694,264 B | 100,220 |
 
 ## Reproduce
 
 `scripts/perf.sh` owns the repeatable local run: `bench`, `stress`, `streaming`,
-`sustained`, `image`, or `all`. It uses a fresh private `scripts/dev.sh` instance
-for each stress mode and stops it through the script's own lifecycle owner.
+`sustained`, `image`, or `all`. `scripts/perf.sh docs` runs the full set,
+writes `perf/results.json`, and regenerates this page. It refuses a dirty tree
+unless `PERF_ALLOW_DIRTY=1` is set, because published numbers must name a
+commit.
 
-`streaming` runs the end-to-end SSE throughput ramp: levels 1, 8, 32, 64, 128,
-256, 512 and 1024 for 60 seconds each, with 100 content frames over a one-second
-stream. `PERF_STREAMING_LEVELS`, `PERF_STREAMING_DURATION`,
-`PERF_STREAMING_HOLD`, `PERF_STREAMING_CHUNKS` and `PERF_STREAMING_TIMEOUT`
-override those defaults.
-
-`sustained` runs the fast-response fixture for five minutes at each level in
-`PERF_SUSTAINED_LEVELS` (default `128`), with `PERF_SUSTAINED_DURATION`
-defaulting to `300s`. It does not run the held streaming fixture.
+The full run uses the documented levels and durations:
+5 seconds for each
+fast stage, 300
+seconds for each sustained level, and
+60 seconds for
+each streaming throughput level. Override the level lists and durations with
+`PERF_FAST_LEVELS`, `PERF_SUSTAINED_LEVELS`, `PERF_STREAMING_LEVELS`,
+`PERF_FAST_DURATION`, `PERF_SUSTAINED_DURATION`, `PERF_STREAMING_DURATION`,
+`PERF_STREAMING_HOLD` and `PERF_STREAMING_CHUNKS`. The bundle records what ran;
+a changed run changes the page.
 
 The individual commands below are the same evidence path. Use a fresh
 `DEV_COPY_DB=0` instance for each workload. Never target the main instance on
@@ -317,19 +345,6 @@ port 8080. The stress harness verifies that the target is the private
 )
 ```
 
-Use a separate fresh instance for the streaming ramp:
-
-```sh
-(
-  set -e
-  trap 'scripts/dev.sh stop' EXIT
-  export MILLIVOLT_OPERATOR_TOKEN='dev-instance-credential'
-  DEV_COPY_DB=0 scripts/dev.sh
-  go run ./cmd/stress -target http://127.0.0.1:8081 \
-    -concurrency 1,8,32,128,512 -duration 5s -stream-duration 1s
-)
-```
-
 The isolated benchmarks use the test overlay:
 
 ```sh
@@ -339,7 +354,7 @@ scripts/check.sh go test -run='^$' -bench='BenchmarkProjectionProcessRSS' \
   -benchtime=1x -count=1 ./internal/web
 scripts/check.sh go test -run='^$' -bench='BenchmarkStorageWriter' \
   -benchtime=2s -benchmem -count=1 ./internal/storage
-scripts/check.sh go test -run='^$' -bench='Benchmark(QueryBeforeEquality|QueryBeforeCount)' \
+scripts/check.sh go test -run='^$' -bench='BenchmarkQueryBeforeEquality' \
   -benchtime=1x -benchmem -count=1 ./internal/storage
 scripts/check.sh go test -run='^$' -bench='Benchmark(RequestMetadata|ProxyDurableContention)' \
   -benchtime=2s -benchmem -count=1 ./internal/proxy
@@ -353,10 +368,6 @@ docker image inspect millivolt-perf --format '{{.Size}}'
 docker save millivolt-perf | gzip -9 | wc -c
 ```
 
-Idle RSS and CPU were sampled from `/proc/<pid>/status` and
-`/proc/<pid>/stat` after a 15-second settle. The process was started and stopped
-only through `scripts/dev.sh`.
-
 ## Limitations
 
 - The host was shared. Other workloads can change absolute rates and latency.
@@ -364,30 +375,29 @@ only through `scripts/dev.sh`.
   payload shape, and real identity cardinality are not represented.
 - These are short closed-loop bursts, not sustained production capacity. No
   result here is a capacity ceiling or a guarantee.
-- The streaming concurrency table is a five-second ramp on a ten-frame, roughly
-  one-second fixture at 1, 8, 32, 128 and 512 workers. The streaming throughput
-  table is a 60-second-per-level ramp on a 100-frame, roughly one-second fixture
-  at 1, 8, 32, 64, 128, 256, 512 and 1024 workers. Both are synthetic-fixture
-  measurements, not universal maxima. The throughput table's 1024 level is
-  above the example `max_conns_per_host` of 512 and measures queueing; it is a
+- The streaming concurrency table is a short ramp on a 10-frame, roughly
+  1-second fixture. The streaming throughput table is a
+  60-second
+  per-level ramp on a
+  100-frame, roughly 1-second
+  fixture. Both are synthetic-fixture measurements, not universal maxima. The
+  throughput table's
+  1,024-client level is above the
+  example `max_conns_per_host` of 512 and measures queueing; it is a
   fixed level list, not an automatic saturation search. Its token rate is the
-  fixture's usage count, not provider-token throughput, and the run was taken
-  under variable background load.
-- The five-minute sustained sweep uses the fast-response fixture with no
-  intentional stream hold (`-stream-duration 0`) at 32, 48, 64 and 128 workers.
-  Its 64-worker durable-drop boundary is a writer/accounting boundary, not a
-  maximum streaming rate. The streaming throughput ramp is the only sustained
-  held-stream run; it stops at its fixed levels and does not search beyond 1024.
-- Performance checks are manual (`scripts/perf.sh`), not CI. Each level is one
-  run per invocation on one host; there is no repetition or variance study.
+  fixture's usage count, not provider-token throughput.
+- The 300-second sustained sweep uses the fast-response fixture with no
+  intentional stream hold (`-stream-duration 0`). A level with durable drops is
+  an overload observation, not a maximum streaming rate. The streaming
+  throughput ramp is the only sustained held-stream run; it stops at its fixed
+  levels and does not search beyond the largest listed level.
+- Performance checks are manual (`scripts/perf.sh docs`), not CI. Each level is
+  one run per invocation on one host; there is no repetition or variance study.
 - Durable accounting is best-effort. The fast stages happened to remain exact;
   the overload benchmark intentionally does not.
 - Container-wide CPU/RSS, cold-start time, browser rendering, arm64 image size,
   disk throughput, and a full dashboard preload over a large authorized history
   were not measured for this page.
 - The image archive is a local artifact, not a published registry digest.
-- The source revision is the runtime tree before the later documentation, site,
-  test, and login-page color commits in the same change set. Those commits do
-  not change the request accounting or storage paths measured here.
-- The current numbers supersede the older v0.1.0 example. Do not compare them
-  directly across differing hosts, workloads, or revisions.
+- Do not compare these numbers directly across differing hosts, workloads, or
+  revisions.

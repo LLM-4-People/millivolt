@@ -50,30 +50,30 @@ module.exports = async function restartProviders(H) {
     restartPending = w.restartProxy();
   } finally { w.ocConfirm = savedConfirm; }
   check('restart action disables immediately while its status check is pending',
-    await settleUntil(() => restartAction().disabled &&
+    await settleUntil(() => restartAction()?.disabled &&
       d.getElementById('op-readout').dataset.state === 'busy'));
   await w.restartProxy(); // a rapid second call must not issue another POST
   releaseRestartStatus();
   state.restartState.statusGate = null;
   check('only one restart POST is issued and the pending request stays disabled',
-    await settleUntil(() => state.restartState.postCount === 1 && restartAction().disabled &&
-      restartAction().textContent.includes('restarting')));
+    await settleUntil(() => state.restartState.postCount === 1 && restartAction()?.disabled &&
+      restartAction()?.textContent.includes('restarting')));
   check('the readout keeps the restart visible while busy',
     d.getElementById('op-readout-state').textContent.startsWith('restarting') &&
     d.getElementById('op-readout').dataset.state === 'busy');
   await w.fetchRestartStatus();
-  check('an idle status refresh cannot re-enable a locally pending restart', restartAction().disabled);
+  check('an idle status refresh cannot re-enable a locally pending restart', restartAction()?.disabled);
   releaseRestartPost();
   state.restartState.postGate = null;
   await restartPending;
   check('restart POST hit the endpoint', state.restartState.restarted);
   check('restart poll detects the fresh process via started_at',
-    d.getElementById('restart-count').textContent.includes('restarted'));
+    d.getElementById('restart-count')?.textContent.includes('restarted'));
   check('a successful restart records the ledger phrase and leaves the console open',
     d.getElementById('oc-change').textContent === 'restarted the proxy' &&
     !systemShell.hidden && w.menuIsOpen(systemShell));
   check('completed restart restores the action',
-    !restartAction().disabled && restartAction().textContent === 'restart now');
+    restartAction()?.disabled === false && restartAction()?.textContent === 'restart now');
   {
     // The step tracker: the POST's status seeds it; completion marks every
     // step done. Drain renders its live window; a failure turns the step red.
@@ -138,15 +138,15 @@ module.exports = async function restartProviders(H) {
   for (const [rank, phase] of ['building', 'draining', 'flushing', 'handoff'].entries()) {
     state.restartState.status = { phase, rank };
     await w.fetchRestartStatus();
-    check(`server-reported ${phase} disables the restart action`, restartAction().disabled);
+    check(`server-reported ${phase} disables the restart action`, restartAction()?.disabled);
     check(`server-reported ${phase} names its step in the readout`,
       d.getElementById('op-readout-state').textContent.startsWith('restarting · step ' + (rank + 1)));
   }
   state.restartState.status = { phase: 'idle', error: 'build failed', rank: 0 };
   await w.fetchRestartStatus();
   check('failed restart restores the action and reports the error',
-    !restartAction().disabled && d.getElementById('restart-count').textContent.includes('build failed') &&
-    d.getElementById('restart-count').dataset.err === '1');
+    restartAction()?.disabled === false && d.getElementById('restart-count')?.textContent.includes('build failed') &&
+    d.getElementById('restart-count')?.dataset.err === '1');
   // A restart already running is a refusal, not a no-op. The reachable case
   // is a stale tab: this page still believes the proxy is idle while another
   // one started a restart, so the top guard passes, the operator confirms, and
@@ -165,8 +165,8 @@ module.exports = async function restartProviders(H) {
     } finally { w.ocConfirm = savedConfirm2; }
     check('a restart another tab started refuses out loud and sends nothing',
       state.restartState.postCount === postsBefore &&
-      d.getElementById('restart-count').textContent === 'a restart is already running' &&
-      d.getElementById('restart-count').dataset.err === '1');
+      d.getElementById('restart-count')?.textContent === 'a restart is already running' &&
+      d.getElementById('restart-count')?.dataset.err === '1');
     state.restartState.status = {};
     w.eval('restartServerState = {}');
     w.syncRestartControls();
@@ -175,15 +175,15 @@ module.exports = async function restartProviders(H) {
   state.restartState.status = { available: false, reason: 'source unavailable' };
   await w.fetchRestartStatus();
   check('unavailable restart stays disabled and names the reason',
-    restartAction().disabled && d.getElementById('restart-count').textContent === 'source unavailable' &&
-    d.getElementById('restart-count').dataset.err === '1');
+    restartAction()?.disabled && d.getElementById('restart-count')?.textContent === 'source unavailable' &&
+    d.getElementById('restart-count')?.dataset.err === '1');
   // A binary that can never restart is not OFFERED: the system section says
   // why in place (.oc-warning) and disables the action.
   w.operatorConsoleSync('system');
   check('an ineligible build shows the system warning and a disabled action',
     !!d.querySelector('#oc-pane .oc-warning') &&
-    d.querySelector('#oc-pane .oc-warning').textContent.includes('source unavailable') &&
-    restartAction().disabled);
+    d.querySelector('#oc-pane .oc-warning')?.textContent.includes('source unavailable') &&
+    restartAction()?.disabled);
   // The boot payload is the only pre-console signal. An absent or unusable
   // section changes nothing; an explicit verdict folds into restartServerState
   // and the system warning.
@@ -191,21 +191,21 @@ module.exports = async function restartProviders(H) {
   w.applyRestartState(null);
   w.applyRestartState({ reason: 'no verdict here' });
   check('a bootstrap without a verdict keeps the last availability',
-    w.eval('restartServerState.available') === true && !restartAction().disabled);
+    w.eval('restartServerState.available') === true && restartAction()?.disabled === false);
   w.applyRestartState({ available: false, reason: 'built with -trimpath, so the binary cannot locate its own source; self-restart is unavailable (restart via your process manager)' });
   check('the bootstrap fold lands in restartServerState.available',
-    w.eval('restartServerState.available') === false && restartAction().disabled);
+    w.eval('restartServerState.available') === false && restartAction()?.disabled);
   w.operatorConsoleSync('system');
   check('the bootstrap verdict reaches the open system warning',
-    !!d.querySelector('#oc-pane .oc-warning') && restartAction().disabled);
+    !!d.querySelector('#oc-pane .oc-warning') && restartAction()?.disabled);
   w.applyRestartState({ available: true, reason: '' });
   w.operatorConsoleSync('system');
   check('the bootstrap fold offers the action for an eligible binary',
-    w.eval('restartServerState.available') === true && !restartAction().disabled &&
+    w.eval('restartServerState.available') === true && restartAction()?.disabled === false &&
     !d.querySelector('#oc-pane .oc-warning'));
   state.restartState.status = {};
   await w.fetchRestartStatus();
-  check('an available status offers the action again', !restartAction().disabled);
+  check('an available status offers the action again', restartAction()?.disabled === false);
   // The refusal path through operatorErrorBody: a non-2xx whose body is not
   // JSON-with-an-error (a plain-text operator denial, an HTML 502) must
   // reject with the restart site's designed fallback text, marked as a
@@ -222,8 +222,8 @@ module.exports = async function restartProviders(H) {
   const restartStatusLine = d.getElementById('restart-count');
   check('a non-JSON 502 restart refusal shows the designed fallback, never an empty error',
     state.restartState.postCount === refusalPostCount + 1 &&
-    restartStatusLine.textContent === 'restart failed (502)' &&
-    restartStatusLine.dataset.err === '1');
+    restartStatusLine?.textContent === 'restart failed (502)' &&
+    restartStatusLine?.dataset.err === '1');
   state.restartState.postFail = null;
   w.closeOperatorConsole();
   check('restart section closes with the console', systemShell.hidden);
@@ -262,10 +262,18 @@ module.exports = async function restartProviders(H) {
   await new Promise(resolve => w.requestAnimationFrame(() => resolve()));
   w.eval('settingsCat = "providers"; showSettingsCat()');
   await settleUntil(() => d.querySelector('.st-row[data-key="providers"] .st-prov'));
-  const provRow = d.querySelector('.st-row[data-key="providers"]');
-  const card = provRow && provRow.querySelector('.st-prov');
+  // The card is captured in the tick that proves it painted, so a later repaint
+  // cannot hand the assertions a null, and the row is proven to hold it.
+  let provRow = null;
+  let card = null;
+  await settleUntil(() => {
+    provRow = d.querySelector('.st-row[data-key="providers"]');
+    card = provRow && provRow.querySelector('.st-prov');
+    return !!card;
+  });
   check('providers field renders the card editor', !!card);
-  check('provider card shows label + cost chip + usage row', card.querySelector('.sp-label').value === 'epsilon.example' &&
+  check('provider card shows label + cost chip + usage row',
+    card.querySelector('.sp-label').value === 'epsilon.example' &&
     card.querySelector('.prov-chip').dataset.cost === 'x_billing_pricing.cost' &&
     card.querySelector('.prov-urow .sp-ufield').value === 'input_tokens');
   check('canonical dropdown is the server-owned field list', card.querySelectorAll('.prov-urow .sp-ufield option').length === 6);
@@ -286,6 +294,11 @@ module.exports = async function restartProviders(H) {
   check('usage mapping added via the canonical dropdown', [...card.querySelectorAll('.prov-urow .sp-ufield')].some(s => s.value === 'output_tokens'));
   // Add provider: a "+ add provider" button in the title row (top right),
   // opening a dropdown that only offers seen providers NOT already mapped.
+  // The seen vocabulary is the pause document's, which the live poll serves from
+  // the page's own state, so seed it instead of relying on a canned poll copy.
+  w.applyPauseState({ok: true, paused: false, holds: [], clients: [], providers: [],
+    known_clients: [], known_providers: ['epsilon.example', 'p'], until: null, queued: 0,
+    default_max_queued: 0});
   const prow = card.closest('.st-row');
   const topBtn = prow.querySelector('.st-name [data-prov-menu-toggle]');
   const menu = prow.querySelector('.prov-menu');

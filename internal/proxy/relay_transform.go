@@ -135,6 +135,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 					FallbackModel: rec.Model,
 					ToolBlocksMax: s.cfg().StreamToolCallsMax,
 					EventMaxBytes: eventMax,
+					ToolNames:     t.toolNames,
 				})
 				pw.CloseWithError(translationErr)
 			}()

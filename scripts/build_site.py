@@ -11,12 +11,14 @@ files.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import textwrap
 from dataclasses import dataclass
@@ -31,7 +33,11 @@ from markdown.extensions.toc import TocExtension
 ROOT = Path(__file__).resolve().parent.parent
 SITE_SRC = ROOT / "site-src"
 TEMPLATES = SITE_SRC / "templates"
-DEFAULT_BASE_URL = "https://llm-4-people.github.io/millivolt/"
+# The published site's canonical origin. The Pages workflow passes the live base
+# URL from `actions/configure-pages`, so a preview or a fork builds with its own
+# origin; the repository default is the one the site is published at.
+CUSTOM_DOMAIN = "millivolt.llm4people.dev"
+DEFAULT_BASE_URL = f"https://{CUSTOM_DOMAIN}/"
 GITHUB_REPOSITORY = "https://github.com/LLM-4-People/millivolt"
 GITHUB_BRANCH = "main"
 GITHUB_BLOB = f"{GITHUB_REPOSITORY}/blob/{GITHUB_BRANCH}/"
@@ -39,6 +45,7 @@ GITHUB_TREE = f"{GITHUB_REPOSITORY}/tree/{GITHUB_BRANCH}/"
 GITHUB_EDIT = f"{GITHUB_REPOSITORY}/edit/{GITHUB_BRANCH}/"
 
 sys.path.insert(0, str(ROOT))
+from scripts.perf_docs import DataError, landing_metrics  # noqa: E402
 from tests.repository_check import heading_slug  # noqa: E402
 from tests.support import root_custom_properties  # noqa: E402
 
@@ -67,43 +74,53 @@ ROOT_PAGE_MAP = {
     "CONTRIBUTING.md": "contributing.html",
     "SECURITY.md": "security.html",
     "LICENSE": "license.html",
+    "SUPPORT.md": "support.html",
     "THIRD_PARTY_NOTICES.md": "third-party.html",
     "docs/README.md": "docs/index.html",
 }
 
 NAV_GROUPS = (
     (
-        "Get started",
+        "Start",
         (
             ("Documentation", "docs/index.html", "docs/README.md"),
-            ("Quickstart", "index.html#quickstart", None),
-            ("Dashboard", "docs/dashboard.html", "docs/dashboard.md"),
-            ("Protocol", "docs/protocol.html", "docs/protocol.md"),
+            ("Install and first run", "docs/install.html", "docs/install.md"),
+            ("Dashboard tour", "docs/dashboard.html", "docs/dashboard.md"),
+            ("Protocol and clients", "docs/protocol.html", "docs/protocol.md"),
         ),
     ),
     (
-        "Guides",
+        "Integrate",
         (
             ("Adapters", "docs/adapters.html", "docs/adapters.md"),
-            ("Reverse proxy", "docs/reverse-proxy.html", "docs/reverse-proxy.md"),
             ("MCP server", "docs/mcp.html", "docs/mcp.md"),
             ("Operator CLI", "docs/cli.html", "docs/cli.md"),
+        ),
+    ),
+    (
+        "Operate",
+        (
+            ("Operations", "docs/operations.html", "docs/operations.md"),
+            ("Configuration", "docs/configuration.html", "docs/configuration.md"),
+            ("Settings reference", "docs/settings.html", "docs/settings.md"),
+            ("Containers and data", "docs/containers.html", "docs/containers.md"),
+            ("Routes and debugging", "docs/routes.html", "docs/routes.md"),
+            ("Reverse proxy", "docs/reverse-proxy.html", "docs/reverse-proxy.md"),
+            ("Performance", "docs/performance.html", "docs/performance.md"),
             ("Security", "security.html", "SECURITY.md"),
         ),
     ),
     (
-        "Reference",
+        "Extend",
         (
-            ("Operations", "docs/operations.html", "docs/operations.md"),
-            ("Performance", "docs/performance.html", "docs/performance.md"),
             ("Architecture", "docs/architecture.html", "docs/architecture.md"),
+            ("Contributing", "contributing.html", "CONTRIBUTING.md"),
         ),
     ),
     (
         "Project",
         (
-            ("Contributing", "contributing.html", "CONTRIBUTING.md"),
-            ("Support", "https://github.com/LLM-4-People/millivolt/blob/main/SUPPORT.md", None),
+            ("Support", "support.html", "SUPPORT.md"),
             ("License", "license.html", "LICENSE"),
             ("Third-party notices", "third-party.html", "THIRD_PARTY_NOTICES.md"),
         ),
@@ -345,6 +362,15 @@ def nav_links(current_output: str) -> str:
     return "".join(blocks)
 
 
+def nav_group_of(output: str) -> str:
+    """Return the nav group a page belongs to, for its breadcrumb."""
+    for label, entries in NAV_GROUPS:
+        for _text, target, _source in entries:
+            if target.split("#", 1)[0] == output:
+                return label
+    return "Docs"
+
+
 def flatten_nav() -> list[tuple[str, str, str]]:
     pages: list[tuple[str, str, str]] = []
     for _label, entries in NAV_GROUPS:
@@ -515,6 +541,50 @@ def markdown_engine() -> markdown.Markdown:
     )
 
 
+# GitHub alert syntax: a blockquote whose first paragraph opens with
+# `[!KIND]`. The set is closed because each kind maps to one label and one
+# icon; an unknown marker stays a plain blockquote rather than inventing a
+# callout nobody styled.
+CALLOUT_KINDS = {
+    "NOTE": ("Note", '<circle cx="7" cy="7" r="5.4"/><path d="M7 6.5v4"/><circle cx="7" cy="4.3" r=".7" fill="currentColor" stroke="none"/>'),
+    "TIP": ("Tip", '<path d="M4.6 10.4a4 4 0 1 1 4.8 0v1.4H4.6z"/><path d="M6 13.4h2"/>'),
+    "IMPORTANT": ("Important", '<path d="M7 1.9 13 12H1z"/><path d="M7 5.6v3.3"/><circle cx="7" cy="10.7" r=".6" fill="currentColor" stroke="none"/>'),
+    "WARNING": ("Warning", '<path d="M7 1.9 13 12H1z"/><path d="M7 5.6v3.3"/><circle cx="7" cy="10.7" r=".6" fill="currentColor" stroke="none"/>'),
+    "CAUTION": ("Caution", '<path d="M7 1.9 13 12H1z"/><path d="M7 5.6v3.3"/><circle cx="7" cy="10.7" r=".6" fill="currentColor" stroke="none"/>'),
+}
+# Raw-Markdown form of the same alerts, used when a page's description is
+# derived before rendering. The blockquote's own continuation lines go with the
+# marker, so a warning never becomes the page summary.
+CALLOUT_SOURCE = re.compile(
+    r"^>\s*\[!(?:NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][^\n]*(?:\n>.*)*\n*", re.M
+)
+CALLOUT_BLOCK = re.compile(
+    r"<blockquote>\s*<p>\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*?)</p>(.*?)</blockquote>",
+    re.S,
+)
+
+
+def render_callouts(content: str) -> str:
+    """Turn GitHub alert blockquotes into the docs callout vocabulary.
+
+    Runs after sanitizing and link rewriting, so the blockquote and its inner
+    content are already final and this only wraps them in build-owned markup.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        kind = match.group(1)
+        label, icon = CALLOUT_KINDS[kind]
+        first, rest = match.group(2), match.group(3)
+        return (
+            f'<aside class="callout callout-{kind.lower()}" role="note">'
+            f'<p class="callout-label"><svg class="callout-icon" viewBox="0 0 14 14" '
+            f'aria-hidden="true">{icon}</svg>{label}</p>'
+            f"<p>{first}</p>{rest}</aside>"
+        )
+
+    return CALLOUT_BLOCK.sub(replace, content)
+
+
 def render_fragment(
     md: markdown.Markdown, text: str, source: Path, output: str, site_root: Path
 ) -> str:
@@ -530,6 +600,7 @@ def render_fragment(
     content = sanitize_content(content)
     content = rewrite_content_urls(content, source, output)
     content = enhance_images_with_root(content, output, site_root)
+    content = render_callouts(content)
     return content
 
 
@@ -543,10 +614,48 @@ def render_markdown(source: Path, output: str, site_root: Path) -> tuple[str, st
     title = strip_html(heading.group(1)) if heading else source.stem.replace("-", " ").title()
     md = markdown_engine()
     content = render_fragment(md, text, source, output, site_root)
-    first_paragraph = PARAGRAPH.search(content)
+    # A page lede describes the page, not the warning that leads it. Callouts
+    # are build-owned asides and are skipped so a page whose first blocks are
+    # `[!WARNING]` still gets a real description for search and social cards.
+    described = re.sub(r'<aside class="callout.*?</aside>', "", content, flags=re.S)
+    first_paragraph = PARAGRAPH.search(described)
     description = plain_text(first_paragraph.group(1)) if first_paragraph else title
     description = summarize(description)
     return title, description, content, md.toc_tokens
+
+
+# Search indexes a page as its lede plus one document per h2. The split is on the
+# rendered heading, which is where the sanitizer has already closed the markup,
+# so a section's text is exactly what a reader sees between two headings.
+SEARCH_SECTION = re.compile(r'<h([23])\b[^>]*\bid="([^"]+)"[^>]*>', re.S)
+SEARCH_TEXT_MAX = 1200
+
+
+def search_sections(content: str) -> list[dict]:
+    """Split one rendered document into its sections for the search index.
+
+    A section starts at an h2 or an h3 and ends at the next heading, so its text
+    is what a reader sees under that heading and no text is indexed twice. An h3
+    carries its h2 as context, which is what the result list shows.
+    """
+    matches = list(SEARCH_SECTION.finditer(content))
+    sections: list[dict] = []
+    parent = ""
+    for index, match in enumerate(matches):
+        level, anchor = match.group(1), match.group(2)
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        chunk = content[match.end():end]
+        heading_html, _, body = chunk.partition("</h" + level + ">")
+        heading = strip_html(heading_html).rstrip("#\u00b6 ").strip()
+        if level == "2":
+            parent = heading
+        sections.append({
+            "heading": heading,
+            "id": anchor,
+            "text": plain_text(body)[:SEARCH_TEXT_MAX],
+            "context": "" if level == "2" else parent,
+        })
+    return sections
 
 
 def toc_html(tokens: list[dict]) -> str:
@@ -585,7 +694,8 @@ def page_for_source(source: Path, *, kind: str) -> Page:
         text = source.read_text(encoding="utf-8")
         heading = HEADING.search(text)
         title = strip_html(heading.group(1)) if heading else source.stem.replace("-", " ").title()
-        paragraph = PARAGRAPH.search(markdown.markdown(text, extensions=["extra"]))
+        described = CALLOUT_SOURCE.sub("", text)
+        paragraph = PARAGRAPH.search(markdown.markdown(described, extensions=["extra"]))
         description = plain_text(paragraph.group(1)) if paragraph else title
         description = summarize(description)
     return Page(source=source, output=output, title=title, description=description, kind=kind)
@@ -612,6 +722,7 @@ def base_values(
     active: str = "docs",
     root_override: str | None = None,
     include_canonical: bool = True,
+    assets: dict[str, str] | None = None,
 ) -> dict[str, str]:
     canonical_path = "" if output == "index.html" else output
     canonical = urljoin(base_url, canonical_path)
@@ -632,7 +743,7 @@ def base_values(
     if include_canonical:
         canonical_tag = f'<link rel="canonical" href="{attr_escape(canonical)}">'
     og_url = base_url if output == "404.html" else canonical
-    return {
+    values = {
         "title": html.escape(title),
         "description": attr_escape(description),
         "canonical": attr_escape(canonical),
@@ -649,8 +760,9 @@ def base_values(
         "version": html.escape(version),
         "nav_overview": ' aria-current="page"' if active == "overview" else "",
         "nav_docs": ' aria-current="page"' if active == "docs" else "",
-        "nav_dashboard": ' aria-current="page"' if active == "dashboard" else "",
     }
+    values.update(assets or {})
+    return values
 
 
 def render_base(values: dict[str, str]) -> str:
@@ -659,51 +771,19 @@ def render_base(values: dict[str, str]) -> str:
 
 
 def performance_headline() -> dict[str, str]:
-    """Read the landing's four headline values from the canonical measured page.
+    """The landing's four headline values, from the measured result bundle.
 
-    The performance page owns every published number. Parsing labelled table
-    rows keeps the landing cards from becoming a second source; a renamed or
-    removed row fails the build instead of silently drifting.
-
-    Each value is escaped here because these cells are the one doc-derived text
-    that does not travel through `sanitize_content`: the landing page is built
-    from the template, not from `md.convert`. A table cell is author-controlled
-    Markdown text, so it must never reach the template as markup.
+    perf/results.json is the only source of published performance numbers;
+    docs/performance.md is rendered from it by scripts/perf_docs.py. Reading the
+    bundle here keeps the landing from becoming a second parser of the page.
     """
-    page = DOCS / "performance.md"
-    if not page.is_file():
-        raise BuildError("missing canonical performance page: docs/performance.md")
-    rows = {}
-    for line in page.read_text(encoding="utf-8").splitlines():
-        if not line.startswith("| "):
-            continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if cells:
-            rows.setdefault(cells[0], cells)
-    def cells(label: str) -> list[str]:
-        if label not in rows:
-            raise BuildError(f"docs/performance.md has no table row labelled {label!r}")
-        return rows[label]
-    image = cells("amd64 runtime image")
-    idle = cells("Idle process, empty SQLite")
-    fast = cells("128")
-    sustained = cells("48")
-    if len(image) < 3 or len(idle) < 3 or len(fast) < 8 or len(sustained) < 4:
-        raise BuildError("docs/performance.md table rows are missing headline cells")
-    # Display text only: strip any inline Markdown/HTML the cell carries, then
-    # escape what remains.
-    def display(cell: str) -> str:
-        return html.escape(strip_html(cell))
-
-    return {
-        "perf_image": display(image[2]),
-        "perf_idle": display(idle[2]),
-        "perf_loaded": display(fast[7]),
-        "perf_rps": display(sustained[3]),
-    }
+    try:
+        return landing_metrics(ROOT)
+    except DataError as exc:
+        raise BuildError(f"cannot read the performance bundle: {exc}") from exc
 
 
-def render_landing(*, version: str, base_url: str, theme_color: str) -> str:
+def render_landing(*, version: str, base_url: str, theme_color: str, assets: dict[str, str]) -> str:
     body = (TEMPLATES / "landing.html").read_text(encoding="utf-8")
     perf = performance_headline()
     schema = {
@@ -744,12 +824,14 @@ def render_landing(*, version: str, base_url: str, theme_color: str) -> str:
         theme_color=theme_color,
         head_extra=head_extra,
         active="overview",
+        assets=assets,
     )
-    values.update(perf)
+    values.update({key: html.escape(value) for key, value in perf.items()})
     return render_base(values)
 
 
-def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, site_root: Path) -> tuple[str, dict]:
+def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, site_root: Path,
+               assets: dict[str, str]) -> tuple[str, dict]:
     assert page.source is not None
     title, description, content, tokens = render_markdown(page.source, page.output, site_root)
     title = page.title or title
@@ -770,32 +852,56 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
     source_key = page.source.relative_to(ROOT).as_posix()
     edit_url = GITHUB_EDIT + source_key
     source_url = GITHUB_BLOB + source_key
+    group = nav_group_of(page.output)
+    crumbs = "" if page.output == "docs/index.html" else (
+        '<nav class="crumbs" aria-label="Breadcrumb">'
+        f'<a href="{attr_escape(page_relative("docs/index.html", page.output))}">Docs</a>'
+        '<span class="crumb-sep" aria-hidden="true">/</span>'
+        f'<span class="crumb-group">{html.escape(group)}</span>'
+        "</nav>"
+    )
     doc_body = (
         '<div class="wrap docs-shell">'
         '<details class="docs-nav" open>'
-        '<summary class="docs-nav-summary">Documentation menu</summary>'
-        f'<nav class="docs-nav-inner" aria-label="Documentation">{nav_links(page.output)}</nav>'
+        '<summary class="docs-nav-summary">'
+        '<span class="docs-nav-summary-text">'
+        f'<span class="docs-nav-group">{html.escape(group)}</span>'
+        f'<span class="docs-nav-page">{html.escape(title)}</span>'
+        "</span>"
+        '<svg class="docs-nav-chevron" viewBox="0 0 16 16" aria-hidden="true">'
+        '<path d="m4 6 4 4 4-4"/></svg>'
+        "</summary>"
+        '<button class="docs-nav-collapse" type="button" aria-expanded="true" '
+        'aria-controls="docs-nav-list">Collapse menu</button>'
+        f'<nav class="docs-nav-inner" id="docs-nav-list" aria-label="Documentation">'
+        f"{nav_links(page.output)}</nav>"
         "</details>"
+        '<details class="toc" open>'
+        '<summary class="toc-summary">On this page'
+        '<svg class="docs-nav-chevron" viewBox="0 0 16 16" aria-hidden="true">'
+        '<path d="m4 6 4 4 4-4"/></svg></summary>'
+        '<div class="toc-sticky"><p class="toc-title">On this page</p>'
+        + toc_html(tokens)
+        + "</div></details>"
         '<main id="main" class="doc-main">'
-        '<div class="doc-meta"><span class="mono-label">'
-        + ("project" if page.kind == "project" else "documentation")
-        + '</span><span class="doc-links"><a href="'
-        + attr_escape(source_url)
-        + '" target="_blank" rel="noopener noreferrer">view source</a><a href="'
-        + attr_escape(edit_url)
-        + '" target="_blank" rel="noopener noreferrer">edit this page</a></span></div>'
-        '<article class="doc-content">'
+        '<div class="read-progress" aria-hidden="true"></div>'
+        '<button class="docs-nav-reveal" type="button" aria-expanded="false" '
+        'aria-controls="docs-nav-list">Show menu</button>'
+        + crumbs
+        + '<article class="doc-content">'
         + content
         + "</article>"
+        '<footer class="doc-footer">'
+        '<div class="doc-links"><a href="'
+        + attr_escape(source_url)
+        + '" target="_blank" rel="noopener noreferrer">View source</a><a href="'
+        + attr_escape(edit_url)
+        + '" target="_blank" rel="noopener noreferrer">Edit this page</a></div>'
         '<nav class="page-nav" aria-label="Documentation pages">'
         + previous_html
         + following_html
-        + "</nav>"
+        + "</nav></footer>"
         "</main>"
-        "<aside class=\"toc\" aria-label=\"On this page\">"
-        '<div class="toc-sticky"><span class="mono-label">On this page</span>'
-        + toc_html(tokens)
-        + "</div></aside>"
         "</div>"
     )
     values = base_values(
@@ -807,7 +913,8 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
         body=doc_body,
         body_class="docs",
         theme_color=theme_color,
-        active="dashboard" if page.output == "docs/dashboard.html" else "docs",
+        active="docs",
+        assets=assets,
     )
     return render_base(values), {
         "title": title,
@@ -818,11 +925,15 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
             for node in tokens
             if int(node.get("level", 0)) in (2, 3)
         ],
-        "text": plain_text(content)[:5000],
+        # The lede is what the page says before its first section; the sections
+        # themselves carry the reference text, so a long page is indexed whole
+        # instead of being cut at one fixed character count.
+        "text": plain_text(SEARCH_SECTION.split(content)[0])[:SEARCH_TEXT_MAX],
+        "sections": search_sections(content),
     }
 
 
-def render_not_found(*, version: str, base_url: str, theme_color: str) -> str:
+def render_not_found(*, version: str, base_url: str, theme_color: str, assets: dict[str, str]) -> str:
     # A custom 404 served from a nested path must not resolve assets relative
     # to that path. Use the site's absolute base path and keep the page out of
     # search results with no canonical URL.
@@ -852,6 +963,7 @@ def render_not_found(*, version: str, base_url: str, theme_color: str) -> str:
         root_override=site_root,
         include_canonical=False,
         head_extra='<meta name="robots" content="noindex,follow">',
+        assets=assets,
     )
     return render_base(values)
 
@@ -885,7 +997,7 @@ def canonical_tokens() -> dict[str, str]:
     return root_custom_properties(DASHBOARD_CSS.read_text(encoding="utf-8"))
 
 
-def write_tokens_css(site_root: Path, tokens: dict[str, str]) -> None:
+def render_tokens_css(tokens: dict[str, str]) -> str:
     lines = [
         "/* Generated by scripts/build_site.py from the dashboard :root palette.",
         "   Do not edit: internal/web/static/css/dashboard.css is the owner. */",
@@ -893,10 +1005,81 @@ def write_tokens_css(site_root: Path, tokens: dict[str, str]) -> None:
     ]
     lines.extend(f"  {name}: {value};" for name, value in tokens.items())
     lines.append("}")
-    (site_root / "assets" / "tokens.css").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n"
 
 
-def copy_assets(site_root: Path, tokens: dict[str, str]) -> None:
+# The three files every page loads before any content renders. They are served
+# at content-hashed URLs so a cached page and a new deployment can never pair a
+# document with an incompatible stylesheet or script; GitHub Pages sets its own
+# Cache-Control, and a unique URL is the part this repository controls.
+SHELL_ASSETS = {
+    "asset_tokens": ("tokens", "css", "tokens.css"),
+    "asset_site_css": ("site", "css", "site.css"),
+    "asset_site_js": ("site", "js", "site.js"),
+}
+# How many earlier source revisions to republish per asset. GitHub Pages caches
+# HTML for ten minutes, so the immediately previous generation is what a cached
+# document can still ask for; keeping a few more covers rapid redeploys.
+SHELL_RETENTION = 6
+
+
+def asset_filename(stem: str, extension: str, content: bytes) -> str:
+    """A stable name for these exact bytes: the document cache key is the URL."""
+    return f"{stem}.{hashlib.sha256(content).hexdigest()[:10]}.{extension}"
+
+
+def shell_sources(tokens: dict[str, str]) -> dict[str, bytes]:
+    return {
+        "asset_tokens": render_tokens_css(tokens).encode(),
+        "asset_site_css": (SITE_SRC / "assets" / "site.css").read_bytes(),
+        "asset_site_js": (SITE_SRC / "assets" / "site.js").read_bytes(),
+    }
+
+
+def git_show(revision: str, path: str) -> bytes | None:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"{revision}:{path}"],
+        capture_output=True, check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def git_history(path: str) -> list[str]:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "log", f"-n{SHELL_RETENTION}", "--format=%H", "--", path],
+        capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return []
+    return result.stdout.split()
+
+
+def retained_shell_assets() -> dict[str, list[bytes]]:
+    """Earlier published bytes, regenerated from the revisions that produced them.
+
+    A document cached before a deploy still references the previous hash. If
+    that file is absent the page loads with no styles or script, so the last few
+    generations stay in the published output. A checkout without history (a
+    source archive) simply has nothing to retain.
+    """
+    retained: dict[str, list[bytes]] = {
+        "asset_tokens": [], "asset_site_css": [], "asset_site_js": []}
+    tokens_path = "internal/web/static/css/dashboard.css"
+    for revision in git_history(tokens_path):
+        source = git_show(revision, tokens_path)
+        if source is not None:
+            retained["asset_tokens"].append(
+                render_tokens_css(root_custom_properties(source.decode())).encode())
+    for key, path in (("asset_site_css", "site-src/assets/site.css"),
+                      ("asset_site_js", "site-src/assets/site.js")):
+        for revision in git_history(path):
+            source = git_show(revision, path)
+            if source is not None:
+                retained[key].append(source)
+    return retained
+
+
+def copy_assets(site_root: Path, tokens: dict[str, str]) -> dict[str, str]:
     assets = site_root / "assets"
     assets.mkdir(parents=True, exist_ok=True)
     if (SITE_SRC / "assets").is_dir():
@@ -915,8 +1098,24 @@ def copy_assets(site_root: Path, tokens: dict[str, str]) -> None:
             target = assets / "images" / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
-    write_tokens_css(site_root, tokens)
+    names: dict[str, str] = {}
+    sources = shell_sources(tokens)
+    for key, (stem, extension, stable) in SHELL_ASSETS.items():
+        content = sources[key]
+        names[key] = asset_filename(stem, extension, content)
+        (assets / names[key]).write_bytes(content)
+        # The pre-hash spelling stays published so a document cached before
+        # this scheme still finds a stylesheet. No page links it.
+        if not (assets / stable).exists() or key == "asset_tokens":
+            (assets / stable).write_bytes(content)
+    for key, generations in retained_shell_assets().items():
+        stem, extension, _stable = SHELL_ASSETS[key]
+        for content in generations:
+            name = asset_filename(stem, extension, content)
+            if name != names[key] and not (assets / name).exists():
+                (assets / name).write_bytes(content)
     (site_root / ".nojekyll").write_text("", encoding="utf-8")
+    return names
 
 
 def readme_image_errors() -> list[str]:
@@ -951,7 +1150,7 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
     if output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True)
-    copy_assets(output, tokens)
+    assets = copy_assets(output, tokens)
 
     pages: list[Page] = []
     # Docs pages, in nav order, plus any unlisted docs file.
@@ -968,6 +1167,7 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
                 "CONTRIBUTING.md",
                 "SECURITY.md",
                 "LICENSE",
+                "SUPPORT.md",
                 "THIRD_PARTY_NOTICES.md",
             } else "doc"
             pages.append(page_for_source(source, kind=kind))
@@ -980,7 +1180,7 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
             pages.append(page_for_source(source, kind="doc"))
 
     (output / "index.html").write_text(
-        render_landing(version=version, base_url=base_url, theme_color=theme_color),
+        render_landing(version=version, base_url=base_url, theme_color=theme_color, assets=assets),
         encoding="utf-8",
     )
     search_index: list[dict] = []
@@ -991,13 +1191,14 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
             base_url=base_url,
             theme_color=theme_color,
             site_root=output,
+            assets=assets,
         )
         target = output / page.output
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
         search_index.append(search)
     (output / "404.html").write_text(
-        render_not_found(version=version, base_url=base_url, theme_color=theme_color),
+        render_not_found(version=version, base_url=base_url, theme_color=theme_color, assets=assets),
         encoding="utf-8",
     )
 
@@ -1026,6 +1227,17 @@ def main(argv: list[str] | None = None) -> int:
         help="public site URL used for canonical and social metadata",
     )
     args = parser.parse_args(argv)
+    # The domain has one owner outside this repository: the Pages setting. Warn
+    # when a build for the live site disagrees with the committed default, which
+    # is what a half-finished domain migration looks like from here.
+    live = os.environ.get("SITE_URL")
+    if live and urlsplit(live).hostname != urlsplit(DEFAULT_BASE_URL).hostname:
+        print(
+            f"build_site: building for {urlsplit(live).hostname}, but the repository "
+            f"default is {urlsplit(DEFAULT_BASE_URL).hostname}; set the Pages custom "
+            "domain to match, or the published metadata will name the wrong origin",
+            file=sys.stderr,
+        )
     try:
         outputs = build_site(Path(args.output), base_url=args.base_url)
     except BuildError as exc:

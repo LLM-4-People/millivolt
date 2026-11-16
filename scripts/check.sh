@@ -12,6 +12,10 @@ case "$mode" in
   core)
     (( $# <= 1 )) || die "$usage"
     for tool in go gofmt node npm python3 git jq; do need "$tool"; done
+    # A promotion PR is rejected when origin/main is not an ancestor of the
+    # testing tip. Fail the local push gate with the remedy instead of losing
+    # the whole gate to a workflow rule minutes later.
+    scripts/promote.sh check
     go version
     node --version
     npm --version
@@ -36,6 +40,9 @@ case "$mode" in
       python3 -B -O -m tests.python.release
       python3 -B -O -m tests.python.backup_db
       python3 -B -O -m tests.python.dev_scripts
+      python3 -B -O -m tests.python.performance
+      python3 -B -O -m tests.python.promotion
+      python3 -B -O -m tests.python.security
       python3 -B -O -m tests.python.go
       python3 -B -O -m tests.python.shard
     }

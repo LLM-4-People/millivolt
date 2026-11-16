@@ -150,6 +150,10 @@ type target struct {
 	// stream_options.include_usage. The Chat encoder emits its extra usage
 	// chunk only when requested and the source reported usage.
 	streamIncludeUsage bool
+	// toolNames maps a flat wire tool name back to the tool the translated
+	// request declared, so a Responses client sees its namespace groups again
+	// on the response. Nil when no translated request declared a namespace.
+	toolNames map[string]ir.Tool
 }
 
 // tlsPossible reports whether an upstream send to this target can ever run a
@@ -804,6 +808,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		body = translated
 		t.streamIncludeUsage = req.StreamIncludeUsage
+		t.toolNames = ir.ToolNamesByWireName(req.Tools)
 		setWarningsHeader(w.Header(), warnings)
 		// Parameter/composition metrics describe the translated upstream body
 		// for the two wire shapes the metadata decoder understands. A

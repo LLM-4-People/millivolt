@@ -5,7 +5,7 @@
 // record entry points. It runs early, so it leaves every operator surface on
 // the empty baseline the later sections expect.
 module.exports = async function operatorMenus(H) {
-  const {check, d, mkRec, modelFixture, observerFixture, settleUntil, w} = H;
+  const {check, d, mkRec, modelFixture, observerFixture, settleUntil, sleep, w} = H;
   const state = H.state;
   const STATIC = H.STATIC;
   const fs = require('fs');
@@ -19,6 +19,13 @@ module.exports = async function operatorMenus(H) {
     if (!el) throw new Error('missing ' + sel);
     el.click();
     return el;
+  };
+  // A row control is painted by a repaint the previous step scheduled, so on a
+  // loaded runner it can be absent when the press is issued. Wait for the node
+  // before pressing it.
+  const clickWait = async sel => {
+    await settleUntil(() => !!q(sel));
+    return click(sel);
   };
   const text = sel => {
     const el = typeof sel === 'string' ? q(sel) : sel;
@@ -59,10 +66,12 @@ module.exports = async function operatorMenus(H) {
   // startNew is the composer-entry path the UI actually offers: the head
   // action only appears when no draft is open (or when editing a stored rule),
   // because the composer footer's cancel is the one way to abandon a draft.
-  const startNew = kind => {
+  // Cancelling repaints the head, so the entry action has to be waited for like
+  // any other pane-painted control before it is pressed.
+  const startNew = async kind => {
     const cancel = q('#oc-pane [data-oc-cancel]');
     if (cancel) cancel.click();
-    click(`#oc-pane [data-oc-new="${kind}"]`);
+    await clickWait(`#oc-pane [data-oc-new="${kind}"]`);
   };
   const openCond = dim => {
     const btn = q(`#oc-pane [data-oc-pick="${dim}"]`);
@@ -91,6 +100,17 @@ module.exports = async function operatorMenus(H) {
   const EMPTY_PAUSE = {ok: true, paused: false, holds: [], queued: 0,
     known_clients: [], known_providers: [], until: null, default_max_queued: 0};
   const EMPTY_THROTTLE = {ok: true, active: false, throttles: [], known_providers: []};
+
+  // A block can end while its own write is still in flight: the confirmation,
+  // and the document it applies, land after the block's last await and would
+  // overwrite the next block's seed under its picks. Settle every operator gate
+  // before a block seeds a fixture, and give an answer that is already queued a
+  // turn to land - a block that clears `busy` by hand still has its POST open.
+  const idle = async () => {
+    await settleUntil(() => ['pause', 'throttle', 'debug']
+      .every(kind => w.eval('operatorState[' + JSON.stringify(kind) + '].busy') === false));
+    await sleep(10);
+  };
 
   // The throttle document carries the client and model vocabularies too, so a
   // limit selector reads the same names the pause and capture surfaces offer.
@@ -125,6 +145,7 @@ module.exports = async function operatorMenus(H) {
   try {
     // ---- 1. the header readout is the one always-visible state line ----
     {
+      await idle();
       const out = () => d.getElementById('op-readout-state').textContent;
       const trigger = d.getElementById('btn-controls');
       const dot = d.getElementById('op-readout-dot');
@@ -305,6 +326,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- a failed poll must not present stale policy as current ----
     {
+      await idle();
       // The bootstrap poll is the only source for operator policy state, and
       // its failure branch used to swallow everything. Holds, limits and
       // captures kept their last values with no marker, so the always-visible
@@ -350,6 +372,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- empty states state only what the server can prove ----
     {
+      await idle();
       // Each empty state used to promise admission - "every request is
       // admitted", "requests flow unrestricted", "as fast as it allows" -
       // while the group queue (ErrQueueFull) and the error-storm gate
@@ -379,32 +402,23 @@ module.exports = async function operatorMenus(H) {
       check('the overview empty state does not promise unrestricted flow',
         emptySays('overview').includes('still apply') &&
         !emptySays('overview').includes('flow unrestricted'));
-      // The overview opens with the same four facts the page band carries, in
-      // the same readout recipe, so an operator reading the policy register
-      // first sees the traffic it acts on. Only a real failure flags the tick.
-      w.eval('kpiAgg = { requests: 2000, errors: 0, in_flight: 0, cost: 1.25, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null }');
-      w.openOperatorConsole('overview');
-      const heads = qa('#oc-pane .oc-kpis .kpi h2').map(h => h.textContent);
-      check('the overview opens with the four traffic facts in the band recipe (' + heads.join('/') + ' ' + (d.querySelector('#oc-pane .oc-kpis .kpi .val')||{textContent:''}).textContent + ')',
-        JSON.stringify(heads) === JSON.stringify(['Requests', 'In-flight', 'Error rate', 'Total cost']) &&
-        qa('#oc-pane .oc-kpis .kpi .val')[0].textContent === '2K' &&
-        !d.querySelector('#oc-pane .oc-kpis .kpi.k-err'));
-      // The console is narrower than the page band, so each fact's sub line
-      // must stay short enough for the narrowest cell: the scope lives in the
-      // section line, and a full sentence stays in the tooltip.
-      check('the overview sub facts stay inside one narrow cell',
-        qa('#oc-pane .oc-kpis .kpi .sub2').every(el => el.textContent.length <= 12));
+      // The page band already opens with requests, in-flight, error rate and
+      // cost; repeating them inside the console made the same four numbers
+      // appear twice on one screen. The overview opens with the policy
+      // register and the queue instead.
       w.eval('kpiAgg = { requests: 2000, errors: 4, in_flight: 0, cost: 1.25, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null }');
       w.openOperatorConsole('overview');
-      check('the overview error tile flags only a real failure (' + (qa('#oc-pane .oc-kpis .kpi.k-err .val')[0]||{textContent:'none'}).textContent + ')',
-        !!d.querySelector('#oc-pane .oc-kpis .kpi.k-err') &&
-        qa('#oc-pane .oc-kpis .kpi.k-err .val')[0].textContent === '0.2%');
+      check('the overview does not repeat the page traffic band',
+        !q('#oc-pane .oc-kpis') &&
+        !qa('#oc-pane .kpi').length &&
+        !!text('#oc-pane .oc-ov-list'));
       w.eval('kpiAgg = null');
       w.closeOperatorConsole();
     }
 
     // ---- 2. one panel lifecycle, one focus owner ----
     {
+      await idle();
       w.openOperatorConsole('overview');
       check('opening the console shows the shared menu panel and its trigger state',
         !shell.hidden && shell.classList.contains('mn') && shell.classList.contains('mn-on') &&
@@ -520,6 +534,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 3. the rail is a real tablist ----
     {
+      await idle();
       w.openOperatorConsole('overview');
       const press = key => {
         const tab = q('.oc-rail-item[aria-selected="true"]');
@@ -689,6 +704,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 4. a full limits selector compiles to the server document ----
     {
+      await idle();
       // A menu needs more than one row to show a cursor moving, so the
       // vocabulary carries neighbours the block never picks.
       throttleDoc({ok: true, active: false, throttles: [],
@@ -701,7 +717,7 @@ module.exports = async function operatorMenus(H) {
       }];
       w.eval('lastData.records = window.__ocRecordFixture');
       w.openOperatorConsole('limits');
-      startNew('limit');
+      await startNew('limit');
       pickKnown('providers', 'prov-a');
       pickKnown('models', 'model-a');
       pickKnown('clients', 'client-a');
@@ -789,27 +805,46 @@ module.exports = async function operatorMenus(H) {
           await settleUntil(() => captured !== null) && captured.url === '/admin/throttle');
         check('a full limit selector posts the exact server document',
           captured && stable(captured.body) === stable(expected) && !('id' in captured.body));
-        await settleUntil(() => text('#oc-change').startsWith('added limit for '));
         const scopePhrase = w.ocScopePhrase({
           providers: ['prov-a'], models: ['model-a'], clients: ['client-a'],
           keyHashes: ['abcdef123456'], conversations: ['conv-1'],
         });
+        // The ledger line and the row come from the same repaint, and a later
+        // poll repaint can replace either between two reads. Settle on the whole
+        // painted state and capture the strings in the tick the predicate
+        // holds, so a check never reads a node that has just been swapped out
+        // (or a null it dereferences).
+        let painted = null;
+        await settleUntil(() => {
+          const row = '#oc-pane .oc-rule[data-kind="limit"] ';
+          const scope = text(row + '.oc-rule-scope');
+          const budget = text(row + '.oc-rule-budget');
+          const ledger = text('#oc-change');
+          if (scope !== scopePhrase || budget === null || ledger === null) return false;
+          if (!ledger.startsWith('added limit for ')) return false;
+          painted = {scope, budget, ledger};
+          return true;
+        });
+        // Stand in for the loaded-runner timing: the poll repaint can swap the
+        // row out between the settle and the reads, which is what made CI read a
+        // null node. Dropping it here makes that window deterministic, and the
+        // captured strings must survive it.
+        w.eval("document.querySelector('#oc-pane .oc-rule[data-kind=\"limit\"]')?.remove()");
         // The row and the ledger must render the SAME shared phrase, and a key
         // is named once: ocScopePhrase prefixes the dimension, so the value
         // label must not prefix it again.
         check('the applied limit row reads the shared scope phrase',
-          text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-scope') === scopePhrase &&
+          painted && painted.scope === scopePhrase &&
           ['provider prov-a', 'model model-a', 'client client-a', 'conversation conv-1']
             .every(part => scopePhrase.includes(part)));
         check('a key is named once, by its hash prefix',
           scopePhrase.includes('key abcdef12…') && !scopePhrase.includes('key key') &&
-          text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-scope').includes('key abcdef12…'));
+          painted.scope.includes('key abcdef12…'));
         check('the applied limit row names its budgets and schedule',
-          text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-budget') ===
-            '3 in flight · 10 requests / 1m · 1K tokens / 1m · SM · 22:00–06:00');
+          painted.budget === '3 in flight · 10 requests / 1m · 1K tokens / 1m · SM · 22:00–06:00');
         check('the change ledger records the add with the same scope wording',
-          text('#oc-change').startsWith('added limit for ' + scopePhrase) &&
-          text('#oc-change').includes('3 in flight') && text('#oc-change').includes('1K tokens / 1m'));
+          painted.ledger.startsWith('added limit for ' + scopePhrase) &&
+          painted.ledger.includes('3 in flight') && painted.ledger.includes('1K tokens / 1m'));
       } finally {
         w.fetch = savedFetch;
       }
@@ -818,9 +853,10 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 5. limits validation and edit mode ----
     {
+      await idle();
       throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a']});
       w.openOperatorConsole('limits');
-      startNew('limit');
+      await startNew('limit');
       check('a limit with no budget cannot be applied and says so',
         d.getElementById('oc-lim-apply').disabled &&
         text('#oc-lim-preview') === 'set at least one budget');
@@ -851,7 +887,7 @@ module.exports = async function operatorMenus(H) {
         anti_burst: false, ramp_duration: '', source: 'ui', in_flight: 0, queued: 0,
       };
       w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'], throttles: [policy]});
-      click('#oc-pane [data-oc-edit="limit"][data-oc-id="pol-edit"]');
+      await clickWait('#oc-pane [data-oc-edit="limit"][data-oc-id="pol-edit"]');
       const draft = evalJSON('({id: ocDrafts.limit.id, scope: ocDrafts.limit.scope, ' +
         'concurrency: ocDrafts.limit.concurrency, requests: ocDrafts.limit.requests, ' +
         'tokens: ocDrafts.limit.tokens, tokenWindow: ocDrafts.limit.tokenWindow, ' +
@@ -901,7 +937,7 @@ module.exports = async function operatorMenus(H) {
       // A rule removed under the edit answers 404; that is the same fact and
       // takes the same way out, not a repeated failure line.
       w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'], throttles: [policy]});
-      click('#oc-pane [data-oc-edit="limit"][data-oc-id="pol-edit"]');
+      await clickWait('#oc-pane [data-oc-edit="limit"][data-oc-id="pol-edit"]');
       const savedLimitFetch = w.fetch;
       w.fetch = async (url, options) => String(url).includes('/admin/throttle')
         ? {ok: false, status: 404, json: async () => ({error: 'that limit is no longer in force'})}
@@ -919,7 +955,7 @@ module.exports = async function operatorMenus(H) {
       // Copy is the follow-up path: the same scope and schedule, no budgets,
       // and no id, so the write creates a second rule instead of editing the
       // first. Retyping four dimensions was the most expensive task here.
-      click('#oc-pane [data-oc-copy="limit"][data-oc-id="pol-edit"]');
+      await clickWait('#oc-pane [data-oc-copy="limit"][data-oc-id="pol-edit"]');
       const copied = evalJSON('({id: ocDrafts.limit.id, scope: ocDrafts.limit.scope,'
         + 'schedule: ocDrafts.limit.schedule, concurrency: ocDrafts.limit.concurrency,'
         + 'requests: ocDrafts.limit.requests, tokens: ocDrafts.limit.tokens,'
@@ -1015,6 +1051,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 5b. a stored duration outside the preset list still shows itself ----
     {
+      await idle();
       // The server accepts any window from 1s to 24h, so a policy created
       // through the API, MCP or a header can carry 90s while the presets only
       // offer 1s..24h. An exact-match-only select marked no option current and
@@ -1055,10 +1092,11 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 6. anti-burst is gated to one provider without a schedule ----
     {
+      await idle();
       throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a', 'prov-b']},
         {clients: ['client-a']});
       w.openOperatorConsole('limits');
-      startNew('limit');
+      await startNew('limit');
       pickKnown('providers', 'prov-a');
       click('#oc-pane [data-oc-toggle="advanced"]');
       const burstBox = () => q('#oc-pane [data-oc-field="antiBurst"]');
@@ -1112,7 +1150,7 @@ module.exports = async function operatorMenus(H) {
       }
       // One fresh draft per disqualifier: the control is offered only for a
       // single-provider rule without a schedule.
-      startNew('limit');
+      await startNew('limit');
       pickKnown('providers', 'prov-a');
       pickKnown('providers', 'prov-b');
       click('#oc-pane [data-oc-budget="concurrency"]');
@@ -1123,7 +1161,7 @@ module.exports = async function operatorMenus(H) {
         text(burstNote()) === 'Burst control needs a single-provider limit without a schedule.' &&
         evalJSON('ocLimitBody(ocDrafts.limit)').anti_burst === false);
 
-      startNew('limit');
+      await startNew('limit');
       pickKnown('providers', 'prov-a');
       pickKnown('clients', 'client-a');
       click('#oc-pane [data-oc-budget="concurrency"]');
@@ -1133,7 +1171,7 @@ module.exports = async function operatorMenus(H) {
         burstBox().disabled && !!burstNote() &&
         evalJSON('ocLimitBody(ocDrafts.limit)').anti_burst === false);
 
-      startNew('limit');
+      await startNew('limit');
       pickKnown('providers', 'prov-a');
       click('#oc-pane [data-oc-budget="concurrency"]');
       input('#oc-pane [data-oc-field="concurrency"]', '2');
@@ -1150,6 +1188,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 7. remove, confirmation, undo, single flight ----
     {
+      await idle();
       const policy = {
         id: 'pol-rm', scope: {providers: ['prov-a'], models: ['model-a']},
         schedule: null, concurrency: 4, requests: 10, request_window: '1m',
@@ -1196,9 +1235,13 @@ module.exports = async function operatorMenus(H) {
         check('confirming the removal posts the clear document',
           await settleUntil(() => posts.length === 1) &&
           stable(posts[0]) === stable({id: 'pol-rm', clear: true}));
-        await settleUntil(() => text('#oc-change').startsWith('removed limit for '));
+        // The ledger is repainted by the poll, so capture its line in the tick
+        // that proves it and assert the snapshot.
+        let removedLine = '';
+        await settleUntil(() => (removedLine = text('#oc-change') || '')
+          .startsWith('removed limit for '));
         check('the removal is recorded and offers undo',
-          text('#oc-change') === 'removed limit for provider prov-a · model model-a' &&
+          removedLine === 'removed limit for provider prov-a · model model-a' &&
           !d.getElementById('oc-undo').hidden);
 
         click('#oc-undo');
@@ -1210,7 +1253,7 @@ module.exports = async function operatorMenus(H) {
           posts[1].concurrency === 4 && posts[1].requests === 10 &&
           posts[1].request_window === '1m');
         check('the undo receipt names what it reversed',
-          await settleUntil(() => text('#oc-change').startsWith('undid: removed limit for ')) &&
+          await settleUntil(() => text('#oc-change')?.startsWith('undid: removed limit for ')) &&
           text('#oc-change') === 'undid: removed limit for provider prov-a · model model-a' &&
           d.getElementById('oc-undo').hidden);
       } finally {
@@ -1280,13 +1323,14 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 8. pause holds: modes, bodies, queue cap, resume ----
     {
+      await idle();
       throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a']},
         {clients: ['client-a']});
       w.applyPauseState({ok: true, paused: false, holds: [], queued: 0,
         known_clients: ['client-a'], known_providers: ['prov-a'],
         until: null, default_max_queued: 16});
       w.openOperatorConsole('pause');
-      startNew('pause');
+      await startNew('pause');
       // A quick hold is the incident shortcut, but a hold's blast radius makes
       // an unbounded one-click action the worst control this console could
       // offer. It is time-bounded by construction and writes the same document
@@ -1332,7 +1376,7 @@ module.exports = async function operatorMenus(H) {
             stable(posts[0]) === stable({paused: true, all: true, duration: '15m'}) &&
             !posts[0].max_queued);
           check('the quick hold is recorded so it can be undone',
-            await settleUntil(() => text('#oc-change').startsWith('held ')) &&
+            await settleUntil(() => text('#oc-change')?.startsWith('held ')) &&
             text('#oc-change').includes('all traffic'));
         } finally {
           w.fetch = savedFetch;
@@ -1343,7 +1387,7 @@ module.exports = async function operatorMenus(H) {
         w.eval("ocDrafts.pause = null; ocView = {kind: '', id: ''};"
           + "ocChanges.length = 0; ocRenderFoot();");
         w.openOperatorConsole('pause');
-        startNew('pause');
+        await startNew('pause');
       }
 
       // The scope vocabulary for clients lives on the throttle document, so
@@ -1354,7 +1398,7 @@ module.exports = async function operatorMenus(H) {
         known_clients: ['client-a'], known_providers: ['prov-a'], until: null,
         queued: 0, default_max_queued: 0});
       w.openOperatorConsole('pause');
-      startNew('pause');
+      await startNew('pause');
       check('the pause composer offers named, new and all modes',
         JSON.stringify(qa('#oc-pane [data-oc-choice="pause-mode"]')
           .map(chip => [chip.dataset.ocValue, chip.getAttribute('aria-pressed')])) ===
@@ -1396,11 +1440,11 @@ module.exports = async function operatorMenus(H) {
             clients: ['client-a'], providers: ['prov-a'], duration: '',
             models: [], key_hashes: [], conversations: []}));
         check('the named hold is recorded as held',
-          await settleUntil(() => text('#oc-change').startsWith('held ')) &&
+          await settleUntil(() => text('#oc-change')?.startsWith('held ')) &&
           text('#oc-change') === 'held provider prov-a · client client-a');
 
         await settleUntil(() => w.eval('operatorState.pause.busy') === false);
-        startNew('pause');
+        await startNew('pause');
         choose('pause-mode', 'all');
         check('all traffic previews the global hold',
           text('#oc-pause-preview') === 'Hold all traffic until resumed.');
@@ -1415,7 +1459,7 @@ module.exports = async function operatorMenus(H) {
           known_clients: ['client-a'], known_providers: ['prov-a'],
           until: null, default_max_queued: 16});
         w.eval("ocDrafts.pause = null; ocView = {kind: '', id: ''}; ocRender()");
-        startNew('pause');
+        await startNew('pause');
         choose('pause-mode', 'all');
         const capToggle = q('#oc-pane [data-oc-field="pauseCapOn"]');
         capToggle.checked = true;
@@ -1441,9 +1485,13 @@ module.exports = async function operatorMenus(H) {
         }
         input('#oc-pane [data-oc-field="pauseCap"]', '-1');
         click('#oc-pause-apply');
+        let capError = '';
+        await settleUntil(() => (capError = text('#oc-pane .oc-error') || '') !== '');
+        // Stand in for a repaint landing after the settle: the string was taken
+        // in the predicate's tick, so dropping the node must not matter.
+        q('#oc-pane .oc-error')?.remove();
         check('a negative queue cap is refused with no POST',
-          await settleUntil(() => !!q('#oc-pane .oc-error')) &&
-          text('#oc-pane .oc-error').includes('queue cap') && posts.length === 2);
+          capError.includes('queue cap') && posts.length === 2);
         input('#oc-pane [data-oc-field="pauseCap"]', '8');
         click('#oc-pause-apply');
         check('a valid queue cap travels as max_queued',
@@ -1457,7 +1505,7 @@ module.exports = async function operatorMenus(H) {
         w.applyPauseState({ok: true, paused: true,
           holds: [{id: 'hold-cap', all: true, max_queued: 8}], queued: 0,
           known_clients: [], known_providers: [], until: null, default_max_queued: 16});
-        click('#oc-pane [data-oc-edit="pause"][data-oc-id="hold-cap"]');
+        await clickWait('#oc-pane [data-oc-edit="pause"][data-oc-id="hold-cap"]');
         check('editing a capped hold prefills its queue cap',
           q('#oc-pane [data-oc-field="pauseCap"]')?.value === '8');
         const capOff = q('#oc-pane [data-oc-field="pauseCapOn"]');
@@ -1475,12 +1523,12 @@ module.exports = async function operatorMenus(H) {
           holds: [{id: 'hold-r1', all: true}], queued: 0,
           known_clients: [], known_providers: [], until: null, default_max_queued: 0});
         const beforeResume = posts.length;
-        click('#oc-pane [data-oc-resume="hold-r1"]');
+        await clickWait('#oc-pane [data-oc-resume="hold-r1"]');
         check('resuming one hold posts only its id',
           await settleUntil(() => posts.length === beforeResume + 1) &&
           stable(posts[beforeResume]) === stable({paused: false, id: 'hold-r1'}));
         check('the resume is recorded as resumed',
-          await settleUntil(() => text('#oc-change').startsWith('resumed ')) &&
+          await settleUntil(() => text('#oc-change')?.startsWith('resumed ')) &&
           text('#oc-change') === 'resumed all traffic');
 
         // A hold with parked work releases that backlog on resume, which is
@@ -1490,7 +1538,7 @@ module.exports = async function operatorMenus(H) {
         w.applyPauseState({ok: true, paused: true,
           holds: [{id: 'hold-q', all: true, queued: 5}], queued: 5,
           known_clients: [], known_providers: [], until: null, default_max_queued: 0});
-        click('#oc-pane [data-oc-resume="hold-q"]');
+        await clickWait('#oc-pane [data-oc-resume="hold-q"]');
         await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
         check('resuming a hold that has parked work asks first',
           text('#oc-confirm-title') === 'Resume this hold?' &&
@@ -1500,7 +1548,7 @@ module.exports = async function operatorMenus(H) {
         click('#oc-confirm-dialog [data-oc-confirm="cancel"]');
         check('cancelling a queued resume leaves the hold in force',
           posts.length === beforeQueued && w.eval('pauseState.holds.length') === 1);
-        click('#oc-pane [data-oc-resume="hold-q"]');
+        await clickWait('#oc-pane [data-oc-resume="hold-q"]');
         await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
         click('#oc-confirm-dialog [data-oc-confirm="ok"]');
         check('confirming a queued resume posts the single id',
@@ -1513,7 +1561,7 @@ module.exports = async function operatorMenus(H) {
           queued: 2, known_clients: ['client-a'], known_providers: [],
           until: null, default_max_queued: 0});
         const beforeAll = posts.length;
-        click('#oc-pane [data-oc-resume-all]');
+        await clickWait('#oc-pane [data-oc-resume-all]');
         await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
         check('resuming every hold asks for confirmation first',
           text('#oc-confirm-title') === 'Resume every hold?' &&
@@ -1521,7 +1569,7 @@ module.exports = async function operatorMenus(H) {
           posts.length === beforeAll);
         click('#oc-confirm-dialog [data-oc-confirm="cancel"]');
         check('cancelling resume-all keeps every hold', w.eval('pauseState.holds.length') === 2);
-        click('#oc-pane [data-oc-resume-all]');
+        await clickWait('#oc-pane [data-oc-resume-all]');
         await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
         click('#oc-confirm-dialog [data-oc-confirm="ok"]');
         check('confirming resume-all posts the global resume',
@@ -1536,13 +1584,14 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 9. capture sessions ----
     {
+      await idle();
       throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a']},
         {clients: ['client-a'], models: ['model-a']});
       w.applyDebugState(debugDoc({ok: true, enabled: false, sessions: [],
         known_clients: ['client-a'], known_providers: ['prov-a'], known_models: ['model-a'],
         ttl: '24h', max_bytes: '1MiB'}));
       w.openOperatorConsole('capture');
-      startNew('capture');
+      await startNew('capture');
       check('a capture with no scope cannot start',
         d.getElementById('oc-capture-apply').disabled &&
         text('#oc-capture-preview') === 'Pick at least one condition.');
@@ -1597,7 +1646,7 @@ module.exports = async function operatorMenus(H) {
           stable(posts[0]) === stable({enabled: true, clients: ['client-a'],
             providers: [], models: ['model-a'], duration: ''}));
         check('the capture start is recorded',
-          await settleUntil(() => text('#oc-change').startsWith('capturing ')) &&
+          await settleUntil(() => text('#oc-change')?.startsWith('capturing ')) &&
           text('#oc-change') === 'capturing model model-a · client client-a');
         // The undo closes the session this write installed. It used to infer
         // that session from a before/after set difference, which picks the
@@ -1629,7 +1678,7 @@ module.exports = async function operatorMenus(H) {
           await settleUntil(() => posts.length === beforeStop + 1) &&
           stable(posts[beforeStop]) === stable({enabled: false, id: 'sess-created'}));
         check('the capture stop is recorded',
-          await settleUntil(() => text('#oc-change').startsWith('stopped capture on ')) &&
+          await settleUntil(() => text('#oc-change')?.startsWith('stopped capture on ')) &&
           text('#oc-change') === 'stopped capture on model model-a · client client-a');
 
         await settleUntil(() => w.eval('operatorState.debug.busy') === false);
@@ -1656,6 +1705,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- long rule lists stay navigable ----
     {
+      await idle();
       // A console with two rules has no use for a search box, and one with
       // fourteen cannot be used without it: the pane overflows and finding a
       // rule became a scroll. The filter appears at the threshold, narrows on
@@ -1726,6 +1776,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- the phone sheet keeps enough pane to work in ----
     {
+      await idle();
       // jsdom does not apply media queries, so this is a source contract. At
       // 70dvh a 320x568 phone put the pane at 253px against a 771px composer:
       // opening one left zero rule rows visible and the list three pane
@@ -1747,6 +1798,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- the phone row keeps the fact the row exists to carry ----
     {
+      await idle();
       // jsdom does not apply media queries, so this is a source contract: the
       // phone block used to set .oc-rule-budget to display:none, which left a
       // 390px row reading "model glm-5.3 · idle" with no statement of what the
@@ -1762,6 +1814,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- the rule row keeps its scope and budget when the live figure grows ----
     {
+      await idle();
       // jsdom computes no grid tracks, so this is a source contract. The live
       // column was an `auto` track, which is sized to its max-content: measured
       // in Chrome at 1280, a busy policy (11 in flight, 27 queued, both request
@@ -1782,6 +1835,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 10. export builder ----
     {
+      await idle();
       w.__ocExportRecords = [{
         ...mkRec('oc-export'),
         provider: 'prov-a', model: 'model-a', client: 'client-a', conversation_id: 'conv-1',
@@ -1806,10 +1860,10 @@ module.exports = async function operatorMenus(H) {
       w.openOperatorConsole('export');
       try {
         check('all history previews the same record count as a filter (' + text('#oc-export-receipt') + '|' + countCalls + ')',
-          await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&
-          countBody === null && !d.getElementById('oc-export-download').disabled &&
-          countCalls >= 1);
-        click('#oc-pane [data-oc-download]');
+          await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip' &&
+            q('#oc-export-download')?.disabled === false, 3000) &&
+          countBody === null && countCalls >= 1);
+        await clickWait('#oc-pane [data-oc-download]');
         // The artifact streams, so the client cannot observe the transfer's
         // outcome. The ledger and toast report the request it made.
         check('all history downloads the bare export URL and names the count',
@@ -1821,17 +1875,17 @@ module.exports = async function operatorMenus(H) {
           text('#oc-export-receipt') === 'choose a filter to preview the export' &&
           d.getElementById('oc-export-download').disabled);
         {
-          click('#oc-pane [data-oc-filter-pick="provider"]');
-          click('#oc-pane [data-oc-filter-value="provider"][data-oc-value="prov-a"]');
+          await clickWait('#oc-pane [data-oc-filter-pick="provider"]');
+          await clickWait('#oc-pane [data-oc-filter-value="provider"][data-oc-value="prov-a"]');
           check('a chosen filter previews its record count',
-            await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&
-            !d.getElementById('oc-export-download').disabled);
+            await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip' &&
+              q('#oc-export-download')?.disabled === false, 3000));
           check('the count preview uses the same provider predicate as the download',
             countBody && countBody.filter.provider === 'prov-a' && countBody.filter.model === '' &&
             countBody.filter.client === '' && countBody.filter.conversation_id === '' &&
             countBody.filter.status_code === 0 && countBody.filter.has_error === false &&
             countBody.filter.debug === false);
-          click('#oc-pane [data-oc-download]');
+          await clickWait('#oc-pane [data-oc-download]');
           check('the filtered download uses the exact previewed URL',
             JSON.stringify(downloads[1]) ===
               JSON.stringify(['/metrics/export?provider=prov-a', '']) &&
@@ -1845,23 +1899,23 @@ module.exports = async function operatorMenus(H) {
           choose('export-mode', 'all');
           check('all history downloads the whole history even after a filter',
             await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000));
-          click('#oc-pane [data-oc-download]');
+          await clickWait('#oc-pane [data-oc-download]');
           check('the mode, the receipt and the URL agree after a mode switch',
             JSON.stringify(downloads[downloads.length - 1]) ===
               JSON.stringify(['/metrics/export', '']) &&
             countBody === null);
           choose('export-mode', 'filter');
           check('returning to filter mode restores the filter work',
-            await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&
-            q('#oc-pane [data-oc-filter-pick="provider"]').closest('.oc-cond')
-              .getAttribute('data-set') === '1');
+            await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip' &&
+              q('#oc-pane [data-oc-filter-pick="provider"]')?.closest('.oc-cond')
+                ?.getAttribute('data-set') === '1', 3000));
         }
-        click('#oc-pane [data-oc-reset-export]');
+        await clickWait('#oc-pane [data-oc-reset-export]');
         check('reset restores the blank all-history draft and recounts it',
-          await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&
-          q('#oc-pane [data-oc-choice="export-mode"][data-oc-value="all"]')
-            .getAttribute('aria-pressed') === 'true' &&
-          !d.getElementById('oc-export-download').disabled);
+          await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip' &&
+            q('#oc-pane [data-oc-choice="export-mode"][data-oc-value="all"]')
+              ?.getAttribute('aria-pressed') === 'true' &&
+            q('#oc-export-download')?.disabled === false, 3000));
       } finally {
         w.triggerDownload = savedDownload;
         w.fetch = savedFetch;
@@ -1871,6 +1925,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- a numeric filter dimension must narrow, not throw ----
     {
+      await idle();
       // Seeded exactly the way the export block above seeds the ring, so the
       // status vocabulary is the real numeric one from records.
       w.__ocStatusRecords = [
@@ -1908,8 +1963,8 @@ module.exports = async function operatorMenus(H) {
             + " ocDrafts.export.age = '1h'; ocDrafts.export.provider = 'prov-a';"
             + " ocScheduleExportCount();");
           check('an age filter still lands its count after a round trip',
-            await settleUntil(() => text('#oc-export-receipt') === '12 records · JSON, gzip', 3000) &&
-            !d.getElementById('oc-export-download').disabled &&
+            await settleUntil(() => text('#oc-export-receipt') === '12 records · JSON, gzip' &&
+              q('#oc-export-download')?.disabled === false, 3000) &&
             !!seen && seen.filter.before_ms > 0 && seen.filter.after_ms === 0);
           // The download must reuse the epoch the count measured, not the
           // current clock: otherwise the file describes a slightly later
@@ -1951,6 +2006,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 11. overview KPIs, in-force rows, drain and history ----
     {
+      await idle();
       w.applyPauseState({ok: true, paused: true,
         holds: [{id: 'ov-hold', all: true}], queued: 3,
         known_clients: [], known_providers: [], until: null, default_max_queued: 0});
@@ -2107,6 +2163,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 12. system: restart wording, eligibility and confirmation ----
     {
+      await idle();
       // The system section queues a status poll on every render; pin the
       // ineligible document so the queued poll cannot re-enable the action.
       const savedFetch = w.fetch;
@@ -2193,6 +2250,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 13. one error surface for rejected writes ----
     {
+      await idle();
       const policy = {
         id: 'pol-err', scope: {providers: ['prov-a']}, schedule: null,
         concurrency: 4, requests: 0, request_window: '', tokens: 0, token_window: '',
@@ -2232,9 +2290,14 @@ module.exports = async function operatorMenus(H) {
             !!after && after === before &&
             text('#oc-pane .oc-banner[role="alert"] span') === 'rule rejected');
         }
+        // A scheduled repaint can replace the pane between the query and the
+        // press, which detaches the node and swallows the delegated click on a
+        // loaded runner. Settle on the painted banner first, then press, then
+        // settle on the outcome the product owns.
+        await settleUntil(() => !!q('#oc-pane .oc-banner[role="alert"]'));
         click('#oc-pane [data-oc-error-dismiss]');
         check('dismissing the banner clears the stored error',
-          !q('#oc-pane .oc-banner') && w.eval('ocError') === '');
+          await settleUntil(() => !q('#oc-pane .oc-banner') && w.eval('ocError') === ''));
       } finally {
         w.fetch = savedFetch;
       }
@@ -2259,9 +2322,9 @@ module.exports = async function operatorMenus(H) {
           await settleUntil(() => !d.getElementById('oc-undo').hidden);
           click('#oc-undo');
           check('a refused undo keeps the entry and says it could not undo',
-            await settleUntil(() => text('#oc-change').startsWith('could not undo: ')) &&
+            await settleUntil(() => text('#oc-change')?.startsWith('could not undo: ')) &&
             text('#oc-change').includes('could not undo: ') &&
-            !text('#oc-change').startsWith('undid: ') &&
+            !text('#oc-change')?.startsWith('undid: ') &&
             !d.getElementById('oc-undo').hidden);
           // The entry stays retryable: a second attempt still runs the closure
           // instead of finding an empty ledger.
@@ -2278,6 +2341,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- a control whose rule vanished must answer the click ----
     {
+      await idle();
       // A poll can drop a rule while its row is still painted. The lookup then
       // returned early, so the click gave no banner, no toast and no repaint:
       // it read as a control that does not work.
@@ -2294,15 +2358,22 @@ module.exports = async function operatorMenus(H) {
       // paint and the click would.
       w.eval('throttleState.throttles = [];');
       stale.click();
+      // The banner's own words are read from the same tick that proves it, so a
+      // repaint between the settle and the assertion cannot hand back a null.
+      let goneText = '';
+      await settleUntil(() => (goneText = text('#oc-pane .oc-banner[role="alert"] span') || '') !== '');
+      // The same window the settle has to survive: the node is gone before the
+      // assertion reads the captured words.
+      q('#oc-pane .oc-banner[role="alert"] span')?.remove();
       check('a click on a rule that is gone says so instead of doing nothing',
-        await settleUntil(() => !!q('#oc-pane .oc-banner[role="alert"]')) &&
-        text('#oc-pane .oc-banner[role="alert"] span') === 'that limit is no longer in force');
+        goneText === 'that limit is no longer in force');
       w.eval('ocOperatorErrorClear()');
       w.closeOperatorConsole();
     }
 
     // ---- 14. live repaints keep the operator's place ----
     {
+      await idle();
       const policy = {
         id: 'pol-focus', scope: {providers: ['prov-a']}, schedule: null,
         concurrency: 2, requests: 10, request_window: '1m', tokens: 0, token_window: '',
@@ -2332,8 +2403,8 @@ module.exports = async function operatorMenus(H) {
         w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'],
           throttles: [{...policy, in_flight: 5, queued: 0}]});
         check('a live sync returns focus to the rebuilt budget field',
-          await settleUntil(() => d.activeElement === q('#oc-pane [data-oc-field="requests"]')) &&
-          q('#oc-pane [data-oc-field="requests"]').value === '41');
+          await settleUntil(() => d.activeElement === q('#oc-pane [data-oc-field="requests"]') &&
+            q('#oc-pane [data-oc-field="requests"]')?.value === '41'));
       }
 
       // The picker declares role="menu" with checkbox rows, so it must honour
@@ -2435,6 +2506,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 15. record pills open the owning rule or a matching draft ----
     {
+      await idle();
       const record = {id: 'rec-1', provider: 'prov-a', model: 'model-a',
         client: 'client-a', key_hash: 'abcdef123456', conversation_id: 'conv-1'};
       w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a', 'prov-b'],
@@ -2500,10 +2572,11 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 16. the one empty-vocabulary sentence ----
     {
+      await idle();
       const note = w.eval('NONE_YET_NOTE');
       throttleDoc({ok: true, active: false, throttles: [], known_providers: []});
       w.openOperatorConsole('limits');
-      startNew('limit');
+      await startNew('limit');
       openCond('providers');
       check('an empty provider vocabulary renders the none-yet sentence',
         text('#oc-pane .oc-pick-empty') === note &&
@@ -2516,8 +2589,9 @@ module.exports = async function operatorMenus(H) {
         q('#oc-pane .oc-pick-note')?.textContent.includes('does not narrow this rule'));
       throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a']});
       w.operatorConsoleSync('throttle');
-      if (q('#oc-pane [data-oc-pick="providers"]').getAttribute('aria-expanded') !== 'true') {
-        click('#oc-pane [data-oc-pick="providers"]');
+      await settleUntil(() => !!q('#oc-pane [data-oc-pick="providers"]'));
+      if (q('#oc-pane [data-oc-pick="providers"]')?.getAttribute('aria-expanded') !== 'true') {
+        await clickWait('#oc-pane [data-oc-pick="providers"]');
       }
       check('a populated provider vocabulary renders rows instead of the note',
         !q('#oc-pane .oc-pick-empty') &&
@@ -2528,6 +2602,7 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 17. the shared console owners are one owner each ----
     {
+      await idle();
       // ocControlSignature names an unkeyed control by what it is, not where
       // it sits. If two distinct controls could share a signature, focus
       // restoration would land on the wrong one; the index disambiguates only
@@ -2538,7 +2613,7 @@ module.exports = async function operatorMenus(H) {
         'ocControlSignature(document.querySelectorAll(' + JSON.stringify(selector) + ')[' + index + '])');
       throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a']});
       w.openOperatorConsole('limits');
-      startNew('limit');
+      await startNew('limit');
       check('two budget checkboxes of one composer do not share a signature',
         qa('#oc-pane [data-oc-budget]').length >= 2 &&
         sigAt('#oc-pane [data-oc-budget]', 0) !== sigAt('#oc-pane [data-oc-budget]', 1));
@@ -2598,16 +2673,16 @@ module.exports = async function operatorMenus(H) {
           for (const el of d.querySelectorAll('#oc-pane [data-oc-choice]')) rendered.add(el.dataset.ocChoice);
         };
         w.openOperatorConsole('limits');
-        startNew('limit');
+        await startNew('limit');
         // The ramp window lives inside the burst-control disclosure, so the
         // draft alone does not reveal it.
         w.eval("ocDrafts.limit.advanced = true; ocRender()");
         collect();
         w.openOperatorConsole('pause');
-        startNew('pause');
+        await startNew('pause');
         collect();
         w.openOperatorConsole('capture');
-        startNew('capture');
+        await startNew('capture');
         collect();
         w.openOperatorConsole('export');
         w.eval("ocDrafts.export.mode = 'filter'; ocDrafts.export.provider = 'p'; ocRender()");
@@ -2640,7 +2715,7 @@ module.exports = async function operatorMenus(H) {
       // what lets the dispatcher take the first match instead of improvising
       // precedence between two actions on one element.
       w.openOperatorConsole('limits');
-      startNew('limit');
+      await startNew('limit');
       {
         const actionAttrs = w.eval('OC_ACTION_HANDLERS.map(([a]) => a)');
         const offenders = [];

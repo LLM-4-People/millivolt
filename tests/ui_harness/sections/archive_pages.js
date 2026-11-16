@@ -216,6 +216,7 @@ module.exports = async function archivePages(H) {
     /No request matches the active filter/.test(d.getElementById('tbl-requests').textContent) &&
     /provider ghost-provider/.test(d.getElementById('tbl-requests').textContent) &&
     !!d.querySelector('#tbl-requests [data-log-clear]'));
+  await settleUntil(() => !!d.querySelector('#tbl-requests [data-log-clear]'));
   d.querySelector('#tbl-requests [data-log-clear]').click();
   await settleUntil(() => rows().length === 60);
   check('the empty-window clear restores the full list', rows().length === 60 &&

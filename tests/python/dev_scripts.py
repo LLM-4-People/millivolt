@@ -24,6 +24,8 @@ from ..support import ROOT
 from .workflows_support import shell_declaration
 
 DEV_SH = ROOT / "scripts" / "dev.sh"
+PROMOTE_SH = ROOT / "scripts" / "promote.sh"
+CHECK_SH = ROOT / "scripts" / "check.sh"
 PORTCLAIM = ROOT / "cmd" / "proxy" / "portclaim.go"
 OWNERS = ("go_duration_tenths", "shutdown_timeout_value", "stop_grace_tenths", "dev_db_path",
           "pid_carries_pid_file", "pid_file_pid", "port_owner_pid", "running_pid", "is_running")
@@ -57,6 +59,19 @@ def run_bash(script, *args):
 
 
 @unittest.skipUnless(shutil.which("bash"), "bash is required to drive the dev lifecycle owners")
+class PromotionGuardTests(unittest.TestCase):
+    """The promotion rule is enforced before the push gate, not after a PR opens."""
+
+    def test_push_gate_checks_main_ancestry(self):
+        check = CHECK_SH.read_text(encoding="utf-8")
+        self.assertIn("scripts/promote.sh check", check)
+        promote = PROMOTE_SH.read_text(encoding="utf-8")
+        self.assertIn("git merge-base --is-ancestor origin/main HEAD", promote)
+        self.assertIn("scripts/promote.sh sync", promote)
+        self.assertIn('git push origin HEAD:testing', promote)
+        self.assertNotIn("HEAD:main", promote)
+
+
 class InstanceIdentityTests(unittest.TestCase):
     """The pid file alone is a claim; the socket owner and its own -pid-file
     argument are the proof. running_pid must print the proven pid, because stop

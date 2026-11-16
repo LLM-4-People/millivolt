@@ -5,7 +5,7 @@ The client-facing OpenAI-compatible interface and upstream relay/translation
 are separate boundaries; the [compatibility matrix](adapters.md#client-and-upstream-compatibility)
 defines their supported combinations.
 [Contributing](../CONTRIBUTING.md) covers change and verification rules;
-[protocol](protocol.md) and [operations](operations.md) describe public behavior.
+[protocol](protocol.md) and the [operations overview](operations.md) describe public behavior.
 
 ## Source map
 
@@ -13,6 +13,7 @@ defines their supported combinations.
 | --- | --- |
 | [cmd/proxy](../cmd/proxy/main.go) | Config/CLI, dependency wiring, routes, process lifecycle. Restart, log, backup and operator-gate handlers have separate existing files. |
 | [internal/config](../internal/config/config.go) | Config/defaults/validation, split by subject into `config_types.go`, `config_defaults.go`, `config_clone.go`, `config_load.go`, `config_validate.go` and `config_validate_overrides.go`; schema, YAML generation, revision-checked Settings, model-rule execution, and the credential-class header vocabulary and redactor in `credentials.go`. |
+| [internal/settingsdoc](../internal/settingsdoc/settingsdoc.go) | Renders the generated [settings reference](settings.md) from `Schema()`, the defaults passed through the YAML writer and the proxy flag registration; [cmd/docgen](../cmd/docgen/main.go) exposes it as `-write` and `-check`, and the config suite fails when the page drifts. |
 | [internal/backup](../internal/backup/archive.go) | Streamed self-checked operator archive format (VACUUM INTO snapshot + zstd + SHA-256), with byte- and file-backed database members. One decoder core serves byte and file callers; restore stages its upload and decoded database as private files instead of heap copies. `params/params.go` owns the backup/restore query keys, boolean spelling, restore modes and archive magic shared by the HTTP handlers and `mvctl`; the leaf imports no encoder, SQLite or zstd. |
 | [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, scoped request overrides, native-run ownership, operator state/capture; inbound/outbound protocol selection and canonical paths in [protocol.go](../internal/proxy/protocol.go); the quota-pause reaction owner [quotapause.go](../internal/proxy/quotapause.go) (settleQuotaFailure/addQuotaHold) and GET/POST /admin/quota. |
 | [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds, and limit policies selected by provider, model, client, key hash and conversation with optional recurring schedules; the provider-wide durable quota/billing recovery gate (quota facet, probe-paced recovery). |
@@ -61,7 +62,7 @@ directly, because a testing push has no promotion proof to wait for. The
 `main-testing-first` ruleset adds the pull-request and merge-commit requirements
 with no bypass actors.
 [Contributing](../CONTRIBUTING.md#branch-workflow) owns the maintainer
-checklist; [operations](operations.md#versions-and-images) owns the published
+checklist; [operations](containers.md#versions-and-images) owns the published
 tag contract.
 
 ## Request and scheduling path
@@ -84,19 +85,17 @@ capture, to the existing decoder and its bounds. Differential tests pin
 byte-for-byte record and rejection equivalence. `SkipJSONString` finds each
 candidate quote with one `IndexByte` and reads its escape parity from the
 backslash run before it, so escaped content is one forward pass instead of a
-restart per escape: an escaped 1 MiB string went from 293-333 us to 12-13 us, a
-single escape before a 1 MiB run from 420-462 us to 12-14 us, and a 100 KiB
-escaped request body from 322-331 us to 219-235 us. The metadata preflight
-counts message elements, content parts and tool calls in one walk instead of
-three, and a 100 KiB body of 200 messages with tool calls went from 266-273 us
-to 187-205 us (`BenchmarkSkipJSONString`, `BenchmarkRequestMetadataShapes`).
+restart per escape. The metadata preflight counts message elements, content
+parts and tool calls in one walk instead of three. Current scanner and
+metadata-shape costs are published under
+[implementation benchmarks](performance.md#implementation-benchmarks)
+(`BenchmarkSkipJSONString`, `BenchmarkRequestMetadataShapes`).
 The streaming analyzer scans each frame once for its classifier keys and
 classifies lexically wherever it can. Chat tool-call frames are scanned once
 for the element index, id and `function.name`, with the typed decode kept only
-as the fallback for a shape the lexical grammar rejects: 1,728-1,850 ns and 6
-allocs per frame became 945-991 ns and 1 alloc, and the 1,000-frame dedupe
-benchmark at 10,000 retained names went from 11.05-11.40 ms, 2.89 MB and 60,158
-allocs to 6.2-6.7 ms, 190 KB and 10,112 allocs
+as the fallback for a shape the lexical grammar rejects. Current frame and
+dedupe costs are published under
+[implementation benchmarks](performance.md#implementation-benchmarks)
 (`BenchmarkAnalyzerFeed/tool_call`, `BenchmarkAnalyzerToolNameDedupe`). A
 differential corpus and a fuzz target compare both paths over every analyzer
 field they touch. The Anthropic translator
@@ -329,9 +328,9 @@ Go-only predicates grow geometrically from the page size to the 512-row batch
 cap within the 4,096-row scan budget. Both preserve the exclusive
 `(started_at, id)` cursor and `more`. The candidate statement selects only the
 columns the residual groups read, and the derived error signature and tool
-labels are filled only when the plan declares them; a limit-60 5xx miss over
-200,000 rows costs 21,106 allocs and 3.4-4.2 ms instead of 66,278 allocs and
-8.5-10 ms, and the unfiltered page 2,642 allocs instead of 3,432
+labels are filled only when the plan declares them. Current filtered and
+unfiltered page costs are published under
+[implementation benchmarks](performance.md#implementation-benchmarks)
 (`BenchmarkHandleLogPage`).
 
 `Store.Clear` serializes administrative purges, captures an accepted-record
@@ -439,8 +438,8 @@ One in-flight fold per memo is shared by concurrent same-key callers: a
 different key never waits, and a waiter that finds no published entry after the
 leader ends recomputes as the next leader instead of inheriting its error. The
 stability recheck hands over the fold's compiled rules identity instead of
-re-reading the config and re-marshalling up to 64 rules, so at the 64-rule
-maximum it costs 34-48 ns and 0 B/op instead of 7.7-8.0 us and 4,660 B/op
+re-reading the config and re-marshalling up to 64 rules. The current 64-rule recheck cost is
+published under [implementation benchmarks](performance.md#implementation-benchmarks)
 (`BenchmarkAggregateUnchanged`).
 The bootstrap KPI fold retains one exact totals slot keyed by the ring's
 finalized revision and the store's durable accounting revision; live counters
@@ -452,8 +451,9 @@ by cause in the storage health owner; `Dropped()` sums the causes for the
 dashboard counter. The writer queue is therefore not a superset of "possibly
 not yet durable", and only the written-id set can say which ring rows are
 already durable, so the O(ring) probe under `aggMu` is the exact dedupe
-boundary. One cold fold measures 0.23-0.37 ms at the default 10,000-record ring
-and 96-107 ms at the one-million-record ceiling
+boundary. Current cold-fold costs at the default ring and the one-million-record
+ceiling are published under
+[implementation benchmarks](performance.md#implementation-benchmarks)
 (`BenchmarkKPI/records_1000000/miss`); the ceiling is a non-default
 `history_size`, and a correct-but-slow cold fold is the accepted cost of
 never double counting.
@@ -494,8 +494,10 @@ selectable card. The card ranking remains exact among tracked values, with
 reserved other slot so their percentile samples still select correctly. Rows
 store the group's 16-bit membership slot, not its dimension-wide dictionary id,
 so the per-row table is two bytes and the selected-card lookup is a bounded
-probe instead of a max-id-sized array; a 100,000-row provider fold drops from
-406,296 B/op to 209,688 B/op (`BenchmarkAggregateFold/explorer`). Rail
+probe instead of a max-id-sized array; the current 100,000-row provider fold
+cost is published under
+[implementation benchmarks](performance.md#implementation-benchmarks)
+(`BenchmarkAggregateFold/explorer`). Rail
 distinct-value counts, scope totals and conversation summaries remain
 whole-history values and are not derived from the truncated group set.
 Selected groups use the same exact rank reader as chart buckets,
@@ -513,8 +515,8 @@ armed flag behind a deferred release: an unwind there (recovered and logged)
 clears the arm with the pending delta intact, so the next append folds again
 instead of the flag staying set and pending keeping the whole delta for the
 process lifetime. An append that
-crosses the bound at one million rows costs 0.47-1.54 ms and 3.96 MB instead of
-12.0-15.7 ms and 52.2 MB; the fold itself still costs 12.9 ms and 48 MB, now off
+crosses the bound at one million rows is published under
+[implementation benchmarks](performance.md#implementation-benchmarks), now off
 the request (`BenchmarkProjectionMetricAppend`). Chart and explorer
 walk the two runs through one merge iterator, so a fresh view allocates no
 history-sized copy; a materialized merge stays cached per published snapshot
@@ -528,9 +530,10 @@ the newest 65,536 rows replaces its base, clears the pending delta and releases
 samples that fell out of the tail. Older or unscoped windows fall back to the
 all-history order, so the fast path never changes rank or stat results. Chart
 membership is indexed from the first row a bounded window accepts and sized
-only to that window's remaining span, so a 15-minute view over 100,000 rows
-costs 335-347 us and 17,616 B/op instead of 560-588 us and 123,088 B/op; the
-All path keeps its historical allocation (`BenchmarkAggregateFold/chart_window`).
+only to that window's remaining span. The current 15-minute view over 100,000
+rows is published under
+[implementation benchmarks](performance.md#implementation-benchmarks); the All
+path keeps its historical allocation (`BenchmarkAggregateFold/chart_window`).
 
 Both consumers share R7 rank/interpolation and the minimum-sample gate. Period
 speed/TTFT percentiles use period samples, never means of bucket percentiles.
@@ -604,14 +607,14 @@ known-name vocabulary caches its sorted view under a set revision. Both caches
 are bounded and invalidate on content change, so bootstrap polls do not re-run
 the rules or re-sort thousands of names. The single-name memo owns the whole
 payload under one mutex keyed by the rules revision, so a repeat at event rate
-costs one lock and one lookup: 121-264 ns, 392 B/op and 4 allocs became 44-88
-ns, 24 B/op and 1 alloc, and 323-366 ns became 54-86 ns at the 64-rule maximum
+costs one lock and one lookup. Current event and vocabulary memo costs at the
+64-rule maximum are published under
+[implementation benchmarks](performance.md#implementation-benchmarks)
 (`BenchmarkObserveModelNameEvent`, `BenchmarkObserveModelNames4096`). The canon
 the observer reads is memoized per live config pointer, so consecutive events
 hand the compiled-rule cache the same backing array and it skips the whole-set
-compare; the wired shape holds 53 ns, 24 B/op and 1 alloc at the 64-rule maximum
-against 1062 ns, 4120 B/op and 2 allocs when the provider copied the rules per
-event (`BenchmarkObserveModelNameEventWired`).
+compare; the wired shape's current cost is published there too
+(`BenchmarkObserveModelNameEventWired`).
 
 Pinned names are derived from the live holds, debug sessions and limit policies,
 never accumulated, so a removed document releases its scope. The derivation

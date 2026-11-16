@@ -265,6 +265,27 @@ documentation changes, and `pages.yml` deploys from `main` through the official
 GitHub Pages Actions flow. Repository-level Pages enablement and the
 `github-pages` environment are one-time administrator settings.
 
+The three files every page loads before content renders (`tokens.css`,
+`site.css`, `site.js`) are published at content-hashed names such as
+`site.11c6502e41.css`. GitHub Pages sets its own `Cache-Control`, so the URL is
+the only cache key this repository controls: a page cached from the previous
+deployment names the previous hash, and it must find those bytes. The build
+therefore republishes the last `SHELL_RETENTION` generations of each file,
+regenerated from the revisions that produced them, which is why the Pages
+workflow checks out full history. A checkout without history still builds the
+current page correctly but cannot retain earlier generations. Do not add a
+hand-written reference to the unhashed names; `tests/python/site.py` rejects
+one.
+
+The site is published at `https://millivolt.llm4people.dev/`. That origin has two
+owners, and neither is a file in this repository: the Pages custom domain in the
+repository settings, which is what GitHub serves and certifies, and the DNS
+record, which is a `CNAME` from `millivolt` to `llm-4-people.github.io` with the
+proxy disabled. `scripts/build_site.py` warns when a build for `SITE_URL` names
+a different host than `DEFAULT_BASE_URL`, because that is what a half-finished
+migration looks like. GitHub ignores a `CNAME` file in an Actions deployment, so
+this repository does not ship one.
+
 ### Push gate
 
 Never push `main` directly: open a promotion pull request and merge it with a
@@ -276,6 +297,14 @@ CI's source-and-unit step is the default core suite:
 ```sh
 scripts/check.sh
 ```
+
+A run may not start while a code-scanning finding is unresolved.
+`scripts/security_gate.py` reads `code-scanning/alerts?state=open` from the
+repository API in the `unit` job and again in `publish` before the version tag
+is created. Fix the finding, or record a dismissal with a reason that explains
+why the code is correct; a dismissed alert is not open, and the security page
+keeps that reason beside the location. An API the gate cannot read fails
+closed rather than passing.
 
 CI sets `GOTOOLCHAIN=local`, so the host Go must match the `go` version in
 `go.mod`. On a host with an older base Go, install Go 1.27.2 or select the
@@ -318,7 +347,7 @@ gate, and push the fix. Do not leave `testing` or `main` red or start unrelated
 work on top of a failing run.
 
 For changes to configuration, update the Config/default/validation/schema owners
-and regenerate the example as described in [operations](docs/operations.md).
+and regenerate the example as described in [configuration](docs/configuration.md).
 Do not edit `proxy.yaml`: it may be a running operator's configuration.
 
 ## Isolated development
@@ -476,20 +505,38 @@ benchmark; do not weaken one mode's admission checks to accommodate the other.
 
 The published tables, method and limitations live in
 [performance and resource usage](docs/performance.md). That page is the single
-source for measured numbers; do not copy them into other documentation.
+source for measured numbers; do not copy them into other documentation and do
+not edit the page by hand. It is rendered from `perf/results.json`, and
+`tests/python/site.py` fails when the two disagree.
 
 `scripts/perf.sh` owns a repeatable local measurement run without touching the
 main instance. It starts fresh private instances on a disposable port and stops
 them through `scripts/dev.sh`:
 
 ```sh
+scripts/perf.sh docs      # every published measurement, bundle and page
 scripts/perf.sh bench     # isolated Go benchmarks
 scripts/perf.sh stress    # private fast and streaming ramps
 scripts/perf.sh streaming # sustained end-to-end SSE throughput ramp
-scripts/perf.sh sustained # five-minute fast-response capacity levels
+scripts/perf.sh sustained # fixed-duration fast-response capacity levels
 scripts/perf.sh image     # disposable image content and compressed size
 scripts/perf.sh all       # image, bench, then stress
 ```
+
+`docs` refuses a dirty tree, runs the complete documented set, writes
+`perf/results.json`, and regenerates `docs/performance.md`. Commit the bundle
+and the page together. Never hand-edit either one; a missing stage, failed
+response or unbalanced durable result aborts the run instead of publishing a
+partial page.
+
+The bundle is also the source of the facts the page describes: the commit, date
+and platform, each stage's response shape (frame count, usage and unit cost),
+the configured durations, and the harness declarations for captures, previews
+and the observer. `cmd/stress` records the fixture shape in its workload line
+and the collector validates it per stage, so a table and the sentence beside it
+cannot describe different runs. The landing headline reads the same bundle;
+`tests/python/performance.py` renders two bundles that differ only in those
+fields and fails if any published sentence keeps its old text.
 
 For request, SSE-event, response-byte and output-token rates, use the
 `streaming` mode. It derives those rates from responses the client accepted
@@ -504,8 +551,11 @@ go run ./cmd/stress -target http://127.0.0.1:8081 -concurrency 1,8,32,128 -durat
 
 The harness does not manage or reconfigure the proxy. It uses a local synthetic
 upstream and checks exact bytes, durable rows/tokens/cost and the same-process
-storage-drop delta. A drop is a failed stage even if every HTTP request succeeded.
-Read `go run ./cmd/stress -h` for workload/safety controls.
+storage-drop delta. A drop is a failed stage even if every HTTP request
+succeeded, unless the run asks for an overload observation with
+`-allow-drops`; that mode still requires `durable + dropped = successful
+requests` and still aborts on a response failure. Read
+`go run ./cmd/stress -h` for workload/safety controls.
 The ramp retains its cumulative fixture history across measured stages, then
 removes only its unique client records after measurements finish. Cleanup has
 its own bounded wait even after cancellation and revalidates private process,
@@ -597,7 +647,7 @@ Run the shared checks before relying on a release. Confirm the hosted container
 build and smoke tests succeed, then check the package visibility and anonymous
 pull. Do not report a release/image as available merely because validation or a
 local build passed. Image usage and persistence limits live in
-[operations](docs/operations.md#versions-and-images). The gate clears inherited
+[operations](docs/containers.md#versions-and-images). The gate clears inherited
 Git routing/configuration variables before checking
 source identity, so another worktree or external ignore policy cannot satisfy
 the release checks accidentally.

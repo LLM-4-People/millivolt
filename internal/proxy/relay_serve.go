@@ -261,7 +261,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			if usageErr == nil && sourceHasUsage {
 				usageOverride = &sourceUsage
 			}
-			out, respIR, warnings, terr := providerformat.TranslateResponseBetweenIR(t.inbound, t.outbound, full, usageOverride)
+			out, respIR, warnings, terr := providerformat.TranslateResponseBetweenIR(t.inbound, t.outbound, full, usageOverride, providerformat.ResponseOptions{ToolNames: t.toolNames})
 			if terr != nil {
 				rec.StatusCode = http.StatusBadGateway
 				// Keep a provider error already parsed from the upstream document;

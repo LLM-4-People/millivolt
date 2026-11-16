@@ -378,6 +378,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			switch item.Type {
 			case "function_call":
+				// An upstream that itself groups tools names them by namespace,
+				// and a Chat or Anthropic client has only the flat spelling. The
+				// buffered decoder flattens the same way, so both paths agree.
+				if item.Namespace != "" {
+					item.Name = flatToolName(item.Namespace, item.Name)
+				}
 				toolID := responsesFunctionCallID(item.CallID, item.ID, outputIndex)
 				if err := checkNativeIdentity("tool id", toolID); err != nil {
 					return nil, err

@@ -232,7 +232,7 @@ func queryEngineLimit(err error) bool {
 // (pragma_database_list returns the absolute live database path). Those are
 // denied by name below. That authorizer would eventually let the engine answer
 // the same question; until it is installed, the names are the boundary and
-// docs/operations.md states the accepted surface.
+// docs/routes.md states the accepted surface.
 func validateQuery(q string) error {
 	t := strings.TrimSpace(q)
 	if t == "" {

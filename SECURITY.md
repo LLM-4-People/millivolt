@@ -5,12 +5,12 @@
 millivolt is a trusted-operator tool, not a multi-user security boundary. It
 has no authorization roles or tenant isolation. The whole dashboard is gated
 by the shared `MILLIVOLT_OPERATOR_TOKEN` environment credential and denied
-while it is unset (see [operator access](docs/operations.md#operator-access)):
+while it is unset (see [operator access](docs/routes.md#operator-access)):
 there is one operator identity, no per-user accounts and no audit trail of
 who acted. Only the `GET /healthz` liveness and `GET /readyz` readiness probes,
 the `POST /session` login handshake, origin-root brand/PWA assets and transparent
 inference stay open at the application gate; the canonical open-path list is
-[operator access](docs/operations.md#operator-access). The upstream API key is
+[operator access](docs/routes.md#operator-access). The upstream API key is
 forwarded for inference; it does not secure the dashboard or administration.
 
 The supplied listen address binds all interfaces. Prefer an explicit loopback
@@ -67,14 +67,15 @@ including the "new clients" comparison, and the Cursor parked-run scope. The
 recorded client, and therefore dashboard grouping and the `client` filter, also
 follow the claim.
 
-The recorded client address (`client_ip`) is likewise a hint. It is the socket
-peer, so behind an ingress it is the ingress address; `X-Forwarded-For` is
-never read for the record. Do not treat `client_ip` as a verified source for
+The recorded client address is likewise a hint. `client_ip` records the first
+`X-Forwarded-For` element when that header is present and the socket peer
+otherwise; the value is diagnostic, never verified, and a directly reachable
+caller can set it. Do not treat `client_ip` as a verified source for
 rate limiting, allowlisting or attribution outside the proxy. The operator
-gate's brute-force limiter is the one exception: it keys on the rightmost
-`X-Forwarded-For` element (the address the immediate hop appended) and falls
-back to the socket address, so it distinguishes clients behind a correct
-ingress but a directly reachable caller can still pick its own bundle.
+gate's brute-force limiter is a separate key: it reads the address the
+immediate hop appended (the last `X-Forwarded-For` element) and falls back to
+the socket address, so it distinguishes clients behind a correct ingress but a
+directly reachable caller can still pick its own bundle.
 
 The example ingress trusts exactly one loopback hop (`set_real_ip_from
 127.0.0.1`, [deploy/nginx.conf](deploy/nginx.conf)) and its `allow` lists

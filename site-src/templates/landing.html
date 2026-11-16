@@ -71,7 +71,7 @@
         <span class="feature-kicker">03 / control</span>
         <h3>Act before the retry storm.</h3>
         <p>Pause new work by scope, cap traffic by provider, model, client, key or conversation on a recurring schedule, capture bounded debug bodies, export exactly the records you filtered, and protect against error storms.</p>
-        <a href="docs/operations.html#operator-and-data-routes">Operator workflows</a>
+        <a href="docs/routes.html#operator-and-data-routes">Operator workflows</a>
       </article>
     </div>
   </section>
@@ -133,7 +133,7 @@
         <h2>Control from one console.</h2>
         <p>One readout says whether anything is in force. One console holds every policy, the export and the restart, and each write leaves a sentence you can undo.</p>
         <p class="control-fine">Operator actions, not per-user permissions. Inference stays transparent.</p>
-        <a class="text-link" href="docs/operations.html#operator-and-data-routes">Read operator workflows</a>
+        <a class="text-link" href="docs/routes.html#operator-and-data-routes">Read operator workflows</a>
       </div>
       <figure class="console-plate">
         <div class="cp-frame">
@@ -321,9 +321,9 @@ docker compose up -d</code></pre>
         <div class="stat"><strong>{{perf_image}}</strong><span>amd64 image</span></div>
         <div class="stat"><strong>{{perf_idle}}</strong><span>idle RAM, empty history</span></div>
         <div class="stat"><strong>{{perf_loaded}}</strong><span>peak RSS at 128 workers</span></div>
-        <div class="stat"><strong>{{perf_rps}}</strong><span>requests/s sustained for five minutes at 48 workers</span></div>
+        <div class="stat"><strong>{{perf_rps}}</strong><span>requests/s sustained for {{perf_sustained}}</span></div>
       </div>
-      <p class="measurement-note">Measured 2026-10-20; sustained capacity at <a href="https://github.com/LLM-4-People/millivolt/commit/54d1276" target="_blank" rel="noopener noreferrer">54d1276</a>, artifact and five-second tables at <a href="https://github.com/LLM-4-People/millivolt/commit/facb69900ac64c19ec3262fcb88b6428d33a68d2" target="_blank" rel="noopener noreferrer">facb699</a>, on a shared WSL2 workstation. A separate overload fixture records the drop case. See <a href="docs/performance.html">method, tables and scope</a>.</p>
+      <p class="measurement-note">Measured {{perf_date}} at <a href="https://github.com/LLM-4-People/millivolt/commit/{{perf_revision_full}}" target="_blank" rel="noopener noreferrer">{{perf_revision}}</a> on {{perf_platform}}. A separate overload fixture records the drop case. See <a href="docs/performance.html">method, tables and scope</a>.</p>
     </div>
   </section>
 

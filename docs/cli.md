@@ -121,9 +121,9 @@ fold runs through the client's query path with `--query-timeout` as the one
 bound, so `--timeout` (the generic per-request deadline) never cuts it short.
 `--window` takes `all` or a whole number of minutes; `--filter` takes
 comma-separated `dim:id` pairs using the same dimensions as the log scope
-(`provider`, `model`, `client`, `conversation`, `status`, `key_hash`). A chart
-fold covers finalized requests only, so a live in-flight status class is
-refused.
+(`client`, `provider`, `model`, `conversation`, `key`, `status`, `time`, `tool`,
+`error`). `key` is the SHA-256 hash of the client key. A chart fold covers
+finalized requests only, so a live in-flight status class is refused.
 
 `watch` accepts `--samples N`, bounded by the command's settings surface, and
 `--interval DURATION` (default the shipped `dash_poll_interval`). Interrupting

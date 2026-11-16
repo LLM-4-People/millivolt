@@ -18,7 +18,7 @@ from ..support import ROOT
 
 SERVER = ROOT / "internal/mcp/server.go"
 CLIENT = ROOT / "internal/mcp/client.go"
-OPERATIONS = ROOT / "docs/operations.md"
+ROUTES = ROOT / "docs/routes.md"
 MCP_DOC = ROOT / "docs/mcp.md"
 SKIP_PARTS = frozenset({"agents", "node_modules", ".venv", ".git", "site"})
 TOOL = re.compile(r'addTool\(server, &sdk\.Tool\{\s*\n\s*Name:\s+"([a-z_]+)"')
@@ -38,7 +38,7 @@ def owned_routes() -> dict[str, str]:
 
 
 def documented_route_lines() -> list[str]:
-    return [line for line in OPERATIONS.read_text(encoding="utf-8").splitlines()
+    return [line for line in ROUTES.read_text(encoding="utf-8").splitlines()
             if ROUTE_ROW.match(line)]
 
 
