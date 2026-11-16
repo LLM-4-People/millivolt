@@ -46,7 +46,9 @@ reported with the operator gate's own status. A non-loopback origin should use
 
 Human output is the default. `--json` (or `-j`) prints one JSON document, and
 command output is stable enough for a pipeline. Diagnostics go to stderr as
-`mvctl: ...`. After argument parsing, `--json` turns a command failure into
+`mvctl: ...`.
+
+After argument parsing, `--json` turns a command failure into
 `{"error": "..."}` on stdout so a caller can parse one stream. A usage error
 detected while parsing the arguments still goes to stderr and exits 2, because
 JSON mode is not established yet; a usage error a command reports after a
@@ -119,6 +121,7 @@ parameter and is never logged.
 stat arrays, blended cost per million tokens and the buckets themselves. Its
 fold runs through the client's query path with `--query-timeout` as the one
 bound, so `--timeout` (the generic per-request deadline) never cuts it short.
+
 `--window` takes `all` or a whole number of minutes; `--filter` takes
 comma-separated `dim:id` pairs using the same dimensions as the log scope
 (`client`, `provider`, `model`, `conversation`, `key`, `status`, `time`, `tool`,
@@ -140,9 +143,11 @@ any request or stream exits 130.
 | `mvctl config reload [--yes]` | re-read the config file |
 
 `config set` reads `GET /admin/config` for the current revision and the schema.
+
 The schema's `kind` decides coercion: `bool`, `int`, `duration`, `bytes` and
 `string` take their natural text form; `strings`, `providers`, `aliases`,
 `model_rules`, `request_overrides` and `sub_conversations` take a JSON value.
+
 A numeric-looking string stays a string. An empty value is never a boolean. An
 unknown key, an empty boolean or an undecodable composite value is a usage
 error before any write.
@@ -176,9 +181,11 @@ measurements, not credentials, and are never redacted.
 `--key-hash`, `--conversation`, `--new` or `--all`, unless `--id` names an
 existing hold to edit. Set dimensions intersect and an unset dimension matches
 any value, exactly as they do for a limit. `--duration` and `--max-queued` are
-optional. `pause off` deliberately rejects scope flags: the
-proxy identifies a hold by `id`, and a scope-looking command that cleared every
-hold would be unsafe. Use exactly one of `--id` or `--all`. A resume carries
+optional.
+
+`pause off` deliberately rejects scope flags: the proxy identifies a hold by
+`id`, and a scope-looking command that cleared every hold would be unsafe. Use
+exactly one of `--id` or `--all`. A resume carries
 only the hold id because the proxy has no scope-selective resume.
 
 ### Throttle and quota
@@ -193,10 +200,14 @@ only the hold id because the proxy has no scope-selective resume.
 
 `throttle set` flags are `--concurrency`, `--requests`, `--request-window`,
 `--tokens`, `--token-window`, `--anti-burst` and `--ramp-duration`. Windows and
-ramps take a duration such as `1m`. A count needs its window unless the policy
-already stores one for that dimension, and a count of `0` clears the dimension
-with its window; a window without a count is refused unless a count is stored.
-At least one dimension is required. The set and clear commands are provider-only. Scoped selectors and recurring
+ramps take a duration such as `1m`.
+
+A count needs its window unless the policy already stores one for that
+dimension, and a count of `0` clears the dimension with its window; a window
+without a count is refused unless a count is stored. At least one dimension is
+required.
+
+The set and clear commands are provider-only. Scoped selectors and recurring
 schedules are available through the HTTP API (`/admin/throttle`) and the
 dashboard console, not through this CLI.
 
@@ -215,9 +226,11 @@ dashboard console, not through this CLI.
 
 Exactly one drain scope is required. `debug on` requires a scope unless `--id`
 names an existing session to edit, and it has no unrestricted all-traffic form,
-matching the MCP tool: a bare enable would capture every request body. Captures
-are sensitive even after header redaction, and a capture create needs durable
-storage; the proxy answers 503 without it.
+matching the MCP tool: a bare enable would capture every request body.
+
+Captures are sensitive even after header redaction, and a capture create needs
+durable storage; the proxy answers 503 without it.
+
 `debug off` identifies a session by `id` or `--all`, never by a scope flag,
 and the two are mutually exclusive. `debug on` refuses a scope name the proxy
 has not seen, because such a session reports enabled but captures nothing.
@@ -233,48 +246,62 @@ has not seen, because such a session reports enabled but captures nothing.
 
 `purge` filters are `--client`, `--provider`, `--model`, `--conversation-id`,
 `--error-type`, `--status`, `--before-ms`, `--after-ms`, `--has-error` and
-`--debug`. Every value must parse, and a zero or unparsable numeric filter is a
-usage error rather than an omitted constraint. `--all` cannot be combined with
-a filter. The command always calls `/admin/purge/count` first and prints the
-count; only `--yes` calls `/admin/purge`, and an unfiltered purge also needs
-`--all`. Before deleting, the command re-counts and refuses when the total
-changed since the preview, then sends that count with the delete so the proxy
-checks it once more inside the delete transaction. That compares counts, not
-row identities, so the guarantee is a refused moved population rather than a
-row-identity binding. A missing, fractional, negative or non-finite count is a
-failure, never zero. A genuinely bodyless purge is the proxy's
-delete-everything form.
+`--debug`.
+
+Every value must parse, and a zero or unparsable numeric filter is a usage
+error rather than an omitted constraint. `--all` cannot be combined with a
+filter.
+
+The command always calls `/admin/purge/count` first and prints the count; only
+`--yes` calls `/admin/purge`, and an unfiltered purge also needs `--all`.
+
+Before deleting, the command re-counts and refuses when the total changed since
+the preview, then sends that count with the delete so the proxy checks it once
+more inside the delete transaction. That compares counts, not row identities,
+so the guarantee is a refused moved population rather than a row-identity
+binding. A missing, fractional, negative or non-finite count is a failure,
+never zero. A genuinely bodyless purge is the proxy's delete-everything form.
 
 `backup --out FILE` is required; there is no default path. `--config` and
 `--database` default to true (the command's settings surface) and are always
 sent explicitly, so "both off" cannot silently become the server's both-on
-default. The download streams to a private temporary file, checks the `MVB1`
-magic, syncs the file, renames, and syncs the directory entry only on success.
+default.
+
+The download streams to a private temporary file, checks the `MVB1` magic,
+syncs the file, renames, and syncs the directory entry only on success.
 An existing file is refused unless `--overwrite` is passed. A short HTTP body
 is a failed transfer, not a published archive. Backup and restore are bounded
 by cancellation, not by `--timeout`.
 
 `restore` defaults to `inspect=1`, which validates the archive without applying
-it; `--inspect` forces that mode even with `--yes`. `--yes` applies it. The
-preview decodes and preflights the whole archived database member on the server,
-so it costs about as much as the apply's decode; `--yes` alone skips the
-preview and applies directly. The
-member selection (`--config`, `--database`) and the mode (`--config-mode`,
+it; `--inspect` forces that mode even with `--yes`. `--yes` applies it.
+
+The preview decodes and preflights the whole archived database member on the
+server, so it costs about as much as the apply's decode; `--yes` alone skips
+the preview and applies directly.
+
+The member selection (`--config`, `--database`) and the mode (`--config-mode`,
 `--database-mode`; `merge` or `replace`) are always sent explicitly, and both
-the inspect and apply output name the selected members and modes. The default mode is `replace`, the proxy's documented default, so the
-preview names the broader action instead of hiding it. An inspect document's
-archived provider headers are redacted; `--reveal` prints them. The apply
-response's `restart_required` keys are called out in the output.
+the inspect and apply output name the selected members and modes.
+The default mode is `replace`, the proxy's documented default, so the preview
+names the broader action instead of hiding it.
+
+An inspect document's archived provider headers are redacted; `--reveal`
+prints them. The apply response's `restart_required` keys are called out in the
+output.
 
 ## Scope and non-goals
 
 `mvctl` does not install, start, stop or update containers. It does not read or
 write `proxy.yaml` directly, does not add a listener, and does not keep a second
 copy of the proxy's routes, config schema, credential rules or backup grammar.
+
 Those facts stay with `internal/mcp`, `internal/config` and
 `internal/backup`. The command uses only the Go standard library and those
-repository packages. Because the shared operator client lives in
-`internal/mcp`, the resulting binary links the MCP Go SDK and its OAuth2 and
-jsonschema dependencies. The backup grammar and archive magic live in the
-dependency-free `internal/backup/params` leaf, so `mvctl` does not link SQLite
-or zstd and never opens a database.
+repository packages.
+
+Because the shared operator client lives in `internal/mcp`, the resulting
+binary links the MCP Go SDK and its OAuth2 and jsonschema dependencies. The
+backup grammar and archive magic live in the dependency-free
+`internal/backup/params` leaf, so `mvctl` does not link SQLite or zstd and never
+opens a database.

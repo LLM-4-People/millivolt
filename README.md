@@ -176,14 +176,16 @@ error, time, or key without losing the selected filter.
 
 ### <kbd>C</kbd> Intervene: before the retry storm
 
-Pause new sends and retries by client, provider, or all traffic; running sends
+Pause new sends and retries by client, provider, or all traffic. Running sends
 finish. Cap concurrency, request rate, or token rate for any combination of
-provider, model, client, key and conversation, or the whole proxy, with an
+provider, model, client, key and conversation, or the whole proxy. Add an
 optional recurring server-local schedule and an opt-in anti-burst ramp on a
-single-provider rule. A header readout stays `steady` or names every active
-hold, capture and enforcing limit, an `off schedule` policy that is stored but
-admitting everything, and any restart or gated backlog; one operator console
-opens the policies, export and restart controls. Capture scoped debug bodies, export exactly the records
+single-provider rule.
+
+A header readout stays `steady` or names every active hold, capture and
+enforcing limit, an `off schedule` policy that is stored but admitting
+everything, and any restart or gated backlog. One operator console opens the
+policies, export and restart controls. Capture scoped debug bodies, export exactly the records
 you filtered, and turn on error-storm protection with recovery probes. These are
 operator actions, not per-user permissions.
 
@@ -254,6 +256,12 @@ vulnerabilities.
 | `04` | [MCP server](docs/mcp.md) | The 25-tool operator API |
 | `05` | [Architecture](docs/architecture.md) | Ownership and invariants |
 | `06` | [Contributing](CONTRIBUTING.md) · [support](SUPPORT.md) · [security](SECURITY.md) | Development, help, reporting |
+
+Every published page has a Markdown twin. The [docs site](https://millivolt.llm4people.dev/)
+also serves [`llms.txt`](https://millivolt.llm4people.dev/llms.txt),
+[`llms-full.txt`](https://millivolt.llm4people.dev/llms-full.txt) and
+[`docs.json`](https://millivolt.llm4people.dev/docs.json) from the same sources,
+and the `docs_list`, `docs_search` and `docs_read` MCP tools read that index.
 
 The application is [MIT licensed](LICENSE). Dependency notices are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

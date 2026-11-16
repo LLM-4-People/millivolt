@@ -29,6 +29,7 @@ that matches what you need to do.
 | Upgrade or restart | [Versions and images](containers.md#versions-and-images), [reload, restart and shutdown](containers.md#reload-restart-and-shutdown) |
 | Integrate a client or translate between protocols | [Protocol](protocol.md), [adapters](adapters.md) |
 | Drive the operator plane from an LLM | [MCP server](mcp.md) |
+| Read or search the docs from an LLM | [llms.txt](https://millivolt.llm4people.dev/llms.txt), [docs.json](https://millivolt.llm4people.dev/docs.json), [MCP server](mcp.md#tools) |
 | Drive it from a terminal | [Operator CLI](cli.md) |
 | Contribute a change | [Contributing](../CONTRIBUTING.md), [architecture](architecture.md), [support](../SUPPORT.md) |
 
@@ -41,7 +42,10 @@ invariants live in [architecture](architecture.md). Project pages are
 ## Verification and limitations
 
 The generated [settings reference](settings.md) lists every setting and proxy
-flag with its type, default, accepted values and reload behavior.
+flag with its type, default, accepted values and reload behavior. Every page
+also has a Markdown twin, and `llms.txt`, `llms-full.txt` and `docs.json` index
+the same sources for an LLM or the `docs_list`, `docs_search` and `docs_read`
+MCP tools.
 [proxy.example.yaml](../proxy.example.yaml) is the commented deployment example.
 `internal/config` owns defaults, validation and Settings metadata; local
 `proxy.yaml` is not a public reference or a test fixture.

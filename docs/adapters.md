@@ -12,7 +12,9 @@ Messages) plus the Cursor Connect bridge, and translates between them and the
 supported upstream families. The client protocol is selected by
 the request path, or explicitly by `X-Proxy-In-Format`; the upstream protocol
 is selected by `X-Proxy-Format`. Translation runs only when both are known and
-differ. An absent `X-Proxy-Format` never enters the IR, and an explicit format
+differ.
+
+An absent `X-Proxy-Format` never enters the IR, and an explicit format
 equal to the client protocol also stays passthrough. Passthrough is not an
 unconditional byte-identity promise: configured `request_overrides`, a
 `sub_conversations` strip, or ensured tools can still rewrite the upstream
@@ -68,7 +70,9 @@ accounting.
 A malformed Chat `stop` value is rejected before the upstream send on a
 translated request. Absent, null, a string and an array of strings are the
 accepted shapes; any other type returns 400 instead of silently dropping the
-stop filter. An array element that is null or not a string is also rejected:
+stop filter.
+
+An array element that is null or not a string is also rejected:
 Go would otherwise decode it as an empty stop sequence. The same element rule
 applies to Anthropic `stop_sequences`. Native Chat passthrough is not decoded:
 the body is relayed unchanged, so `stop: 5` reaches the upstream and its
@@ -329,12 +333,16 @@ target cannot consume them:
 fields this proxy models but the target cannot represent, and reports each one
 in `X-Proxy-Warnings`. Provider-specific extension fields outside that modeled
 vocabulary are not inspected or reported; the passthrough path relays them
-unchanged. `reject` fails the request with 400 naming the fields before any
+unchanged.
+
+`reject` fails the request with 400 naming the fields before any
 upstream send,
 and it refuses every recorded loss, including a documented approximation such
 as a clamped temperature, a moved developer message, a generated tool-call id
 or a `json_object` response format, not only a field the target cannot
-represent at all. The header is proxy-owned: a provider response header of the same name
+represent at all.
+
+The header is proxy-owned: a provider response header of the same name
 is never forwarded. Its whole value is bounded at 1024 bytes; an over-cap list
 is cut at the byte budget, possibly inside the final field, and ends with
 `; truncated`. Response-side warnings
@@ -348,12 +356,16 @@ the client status becomes 502: a translated client would read 200 as a
 successful completion. A non-200 translated error body is buffered before the
 client sees it, at most 64 KiB, under `whole_document_read_timeout` (default 2
 minutes), so a provider that holds an error stream open can delay the client
-until that bound expires. A non-200 status that forbids a response body (1xx,
+until that bound expires.
+
+A non-200 status that forbids a response body (1xx,
 204 or 304) cannot carry the translated envelope, so it fails closed as 502
 `upstream_error` naming the upstream status instead of committing a status
 whose error body the client cannot receive. Pre-commit failures (routing,
 request validation, translation, or an oversized translated body) answer in the
-client protocol's own error envelope. Non-streaming translation reads the complete upstream 200
+client protocol's own error envelope.
+
+Non-streaming translation reads the complete upstream 200
 body and the translated document under `translated_response_max_bytes` each
 (default 32 MiB); exceeding either fails closed with 502 `response_too_large`
 before any client bytes. Translation buffers the whole document, so the
@@ -363,16 +375,22 @@ Streaming translation is event-driven and bounded. Each target encoder owns its
 protocol's ordering invariants: Anthropic opens a block before any delta and
 closes it before `message_delta`; Responses emits `response.created`, per-item
 lifecycle events and one terminal event; Chat emits the role chunk, deltas, one
-`finish_reason` chunk and one `[DONE]`. The official Anthropic event flow closes
+`finish_reason` chunk and one `[DONE]`.
+
+The official Anthropic event flow closes
 every content block before `message_delta`. A nonconforming source that sends a
 content delta after `message_delta` is not given a runtime special case, because
-the terminal contract and the target encoder ordering still own the turn. A truncated upstream is closed with the
-client protocol's own error event, never a fabricated clean finish. The
-Responses encoder can emit `response.cancelled` for a canonical cancelled
-finish. The current `ResponseStreamEvent` union lists completed, failed and
-incomplete terminals, while the `Response` status enum includes cancelled; the
-event is kept as a forward-compatible extension and a strict client may treat
-it as unknown. Synthetic Responses error and terminal frames emitted on a
+the terminal contract and the target encoder ordering still own the turn.
+
+A truncated upstream is closed with the
+client protocol's own error event, never a fabricated clean finish.
+
+The Responses encoder can emit `response.cancelled` for a canonical cancelled finish. The
+current `ResponseStreamEvent` union lists completed, failed and incomplete terminals, while
+the `Response` status enum includes cancelled; the event is kept as a
+forward-compatible extension and a strict client may treat it as unknown.
+
+Synthetic Responses error and terminal frames emitted on a
 committed socket after an accepted non-completion status restart
 `sequence_number` at 0 and 1; relayed events before that keep their original
 sequence. The degenerate terminal-region substitution emits the same error plus
@@ -415,7 +433,9 @@ A non-streaming translated Responses message item carries
 `status: "incomplete"` when the response-level status is not `completed`, and
 `status: "completed"` otherwise. Function-call items always carry
 `status: "completed"` because every emitted call has validated arguments. The
-response-level `status` still owns the turn lifecycle. In a translated stream,
+response-level `status` still owns the turn lifecycle.
+
+In a translated stream,
 `response.output_item.added` carries `status: "in_progress"` and each
 `response.output_item.done` carries the status at which that item closed:
 `"completed"` for a normal close and `"incomplete"` for an aborted item. The
@@ -427,22 +447,29 @@ Parallel tool calls translated to Anthropic open their indexed content blocks
 concurrently (for example start 0, start 1, delta 0, delta 1, stop 0, stop 1).
 The blocks carry the index the streaming contract requires, and SDKs accumulate
 by index; a strict assumption of sequential block lifecycles would need a
-separate encoder design, not a per-request special case. A streamed Responses
-tool call is validated by its terminal class. A completed terminal fails closed
-on a partial function-call value. Incomplete and cancelled terminals do the
-same, because both are normal turn boundaries and an executable empty object
-must never close a call the model did not finish. On those two terminals a call
-with missing, null or whitespace arguments is also rejected unless the source
-explicitly sent `{}`. When validation fails, the target abort closes non-tool blocks but
+separate encoder design, not a per-request special case.
+
+A streamed Responses tool call is validated by its terminal class. A
+completed terminal fails closed on a partial function-call value. Incomplete
+and cancelled terminals do the same, because both are normal turn boundaries
+and an executable empty object must never close a call the model did not
+finish. On those two terminals a call with missing, null or whitespace
+arguments is also rejected unless the source explicitly sent `{}`.
+
+When validation fails, the target abort closes non-tool blocks but
 leaves an open tool block unclosed: Anthropic emits no `content_block_stop` over
 empty input, and Responses emits no done function-call item with empty
 arguments. The proxy error frame terminates the stream, so a client that keeps
-reading cannot execute an empty call. A failed, errored or truncated terminal
+reading cannot execute an empty call.
+
+A failed, errored or truncated terminal
 instead drops only the unparseable call and keeps the provider error or
 truncation. On Anthropic and Responses, an already-announced open call is left
 unclosed on those three terminals: Anthropic emits no `content_block_stop`,
 Responses emits no done function-call item, and the proxy error frame ends the
-stream. The Chat target already streamed the announcement with empty arguments,
+stream.
+
+The Chat target already streamed the announcement with empty arguments,
 and Chat reports a cancelled finish as `stop`, so that accepted limit is not
 distinguishable there. A Chat `[DONE]`
 without a preceding non-null finish reason is a clean transport terminator but
@@ -489,22 +516,29 @@ ordinary OpenAI-compatible relay: the CLI's composite `User-Agent`,
 request in the CLI's 26-character identifier format (provider headers
 override client-forwarded values; the ids carry no session state, so
 replacing a genuine client's own ids is functionally neutral). The profile
-also sets `ensure_tools: [bash, read]`. A check on 2026-09-24 found zen's
+also sets `ensure_tools: [bash, read]`.
+
+A check on 2026-09-24 found zen's
 free tier gated on that wire signature rather than on TLS, header order or
 credentials: with the id headers in shape and a chat `tools` array containing
 the `bash` and `read` tool names, the gated free models served even under
-the anonymous `public` bearer. `ensure_tools` injects missing names as inert
+the anonymous `public` bearer.
+
+`ensure_tools` injects missing names as inert
 stubs. When the client sent no tools of its own, an absent, null, or `auto`
 `tool_choice` is forced to `none`, while an explicit `none` stays; a
 `required`, named, or malformed choice skips injection entirely, because
 forcing `none` would contradict the client and injecting would let the model
 call an undeclared stub. When the client already declares at least one tool,
 the configured names are added to that list and an explicit `required` or
-named `tool_choice` stays in force. A body that already satisfies the
+named `tool_choice` stays in force.
+
+A body that already satisfies the
 signature is relayed unchanged, apart from any configured request override or
 sub-conversation strip that runs before it. The stubs are Chat-shaped, so they
 are injected only into an OpenAI Chat client body on a Chat outbound wire; an
 Anthropic, Responses, Cursor, or arbitrary body is never rewritten.
+
 The same check found the signature also requires a streaming request
 (`"stream": true`): non-streaming requests to the gated free models get the
 provider's `FreeTierError` 403, so clients of those models must stream (the
@@ -516,15 +550,18 @@ helper. Zen's models are listed in
 Every profile is editable operator configuration, in the private config file
 or in Settings under Providers (each card edits the field maps, ensured tool
 names and upstream headers, with hot reload): changing a signature tool set
-or a header value is an edit, never a code change. To reproduce another
-first-party client's signature for a different provider, work from evidence
-top down: capture the client's own requests against a local logging upstream,
-strip one signal at a time against the real endpoint (TLS ClientHello, header
-order and values, body fields, credentials) until only the gate remains, then
-express the surviving identity as a provider profile - static headers
-directly, per-request dynamic values as `{{uuid4}}`, `{{platform}}` or a new
-mint placeholder in the single template expander, and required tool names as
-`ensure_tools`. The zen profile above is one worked example of that recipe,
+or a header value is an edit, never a code change.
+
+To reproduce another first-party client's signature for a different
+provider, work from evidence top down: capture the client's own requests
+against a local logging upstream, strip one signal at a time against the
+real endpoint (TLS ClientHello, header order and values, body fields,
+credentials) until only the gate remains, then express the surviving
+identity as a provider profile - static headers directly, per-request
+dynamic values as `{{uuid4}}`, `{{platform}}` or a new mint placeholder in the single template
+expander, and required tool names as `ensure_tools`.
+
+The zen profile above is one worked example of that recipe,
 not a hardcoded mechanism.
 
 ## Anthropic-compatible Messages
@@ -534,12 +571,15 @@ Responses or Anthropic client, and as the inbound protocol for
 `POST /v1/messages`. Translation covers message history, system text,
 images, tools and results, thinking blocks, cache control, selected parameters,
 usage and streaming events. Fields with no target representation follow the
-[translation loss policy](#cross-protocol-translation). A configured
-[sub-conversation tracking](configuration.md#sub-conversation-tracking) value is
-injected as a top-level `prompt_cache_key`. That field is a proxy tracking
-extension, not an Anthropic cache control: Anthropic caching uses
-`cache_control`, and the injection is only safe for upstreams that tolerate
-unknown top-level fields. The client's own spelling of the tracked field is
+[translation loss policy](#cross-protocol-translation).
+
+A configured [sub-conversation
+tracking](configuration.md#sub-conversation-tracking) value is injected as a
+top-level `prompt_cache_key`. That field is a proxy tracking extension, not an Anthropic
+cache control: Anthropic caching uses `cache_control`, and the injection is only safe
+for upstreams that tolerate unknown top-level fields.
+
+The client's own spelling of the tracked field is
 otherwise dropped by the allowlist. The caller
 must supply the native endpoint's correct auth/version/path headers; the
 [protocol example](protocol.md#url-and-auth-examples) demonstrates the mechanism.
@@ -550,16 +590,19 @@ translated Anthropic body, the recorded stop count, tool choice, parallel-tool
 flag, reasoning effort, response format and service tier come from the
 Anthropic spellings (`stop_sequences`, the `tool_choice` type/name and
 `disable_parallel_tool_use`, `output_config`, and `speed`) when the Chat
-spelling is absent. A body that combines the Responses `max_output_tokens` spelling with a Chat
+spelling is absent.
+
+A body that combines the Responses `max_output_tokens` spelling with a Chat
 `max_tokens` or `max_completion_tokens` spelling is rejected with HTTP 400
 before translation or any upstream send. If the caller omits
 all three output-limit spellings (`max_tokens`, `max_completion_tokens` and
 `max_output_tokens`), translation supplies `anthropic_default_max_tokens`,
-which can therefore appear in request details as a captured value. When a
-request supplies both Chat spellings, translation prefers
-`max_completion_tokens`; the proxy's request decode applies the same precedence
-when capturing the cap, so the captured value always agrees with the one the
-translated body carries upstream.
+which can therefore appear in request details as a captured value.
+
+When a request supplies both Chat spellings, translation prefers `max_completion_tokens`; the
+proxy's request decode applies the same precedence when capturing the cap,
+so the captured value always agrees with the one the translated body carries
+upstream.
 
 A translated Chat body always spells its output cap `max_tokens`: it has the
 widest OpenAI-compatible support. OpenAI documents `max_tokens` as deprecated
@@ -614,18 +657,23 @@ The run owns a bidirectional HTTP/2 transport, framed messages, heartbeat,
 context/KV replies and one ordered event queue. Malformed known nested messages,
 invalid usage or error terminal frames fail explicitly. A validated turn-ended
 marker plus EOF remains a supported completion convention; bare EOF without
-completion is not a clean success. The event queue carries an internal retained
+completion is not a clean success.
+
+The event queue carries an internal retained
 byte budget and the pending tool-call map internal count and payload byte caps;
-the KV blob store carries per-run byte and entry caps. The parked-run store
-enforces aggregate budgets across all parked runs: retained pending plus queued
-event bytes, retained blob bytes, and blob entries. It holds one per-run
-pending-plus-queued allowance free for the run being actively driven, and it
-rejects admission or growth that would cross an aggregate bound. The entry caps
-bound unique zero-length blobs that the byte cap cannot charge. Exceeding a run
-or aggregate parked bound fails closed with a stable descriptive error instead
-of retaining unbounded memory; an over-cap history fails the request and a
-refused park cold-starts the next turn. None of these bounds is
-operator-tunable.
+the KV blob store carries per-run byte and entry caps.
+
+The parked-run store enforces aggregate budgets across all parked runs:
+retained pending plus queued event bytes, retained blob bytes, and blob
+entries. It holds one per-run pending-plus-queued allowance free for the run
+being actively driven, and it rejects admission or growth that would cross
+an aggregate bound. The entry caps bound unique zero-length blobs that the
+byte cap cannot charge.
+
+Exceeding a run or aggregate parked bound fails closed with a stable
+descriptive error instead of retaining unbounded memory; an over-cap history
+fails the request and a refused park cold-starts the next turn. None of
+these bounds is operator-tunable.
 
 When the upstream requests a client tool, the proxy returns OpenAI tool calls
 and parks the native stream. A later matching tool-result tail can resume that
@@ -646,7 +694,9 @@ A lost park cold-starts from provided history. The quality-retry path may re-ask
 an empty continuation; a fresh Run is accepted only on HTTP 200, so any other
 response to the re-ask is a failed re-ask and the void surfaces instead of an
 acknowledgement being driven as a stream. Exhausted/invalid continuations
-surface errors rather than silently completing. Cursor's wire reports one
+surface errors rather than silently completing.
+
+Cursor's wire reports one
 combined output total with no answer/reasoning split, so the generic
 mid-thinking rescue
 (`thinking_retries`) does not apply here: a Cursor turn that produced nothing

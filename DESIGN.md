@@ -204,6 +204,8 @@ The palette is a warm instrument case, deliberately the inverse of the default b
 ### Palette variants
 The shipped shell carries eight palettes (Instrument, Slate, Midnight, Nord, Forest, Rose, Ember, Contrast), each in Black and Clear. Every palette block owns six surface roles, four accent roles and two material roles (shadow and veil hue) for both modes; the mode block owns text, status, scrim alpha and brand neutrals. Instrument Black is the canonical family, mirrored between the `:root` block and `themes.css`. Contrast is the maximum-separation pair.
 
+The public documentation site publishes the same `themes.css` bytes and renders its theme menu from the same `theme_boot.js` registry, so both surfaces offer the same eight palettes and two modes. The site derives its extra contrast rungs (`--border-control`, `--muted-strong`, `--shadow`) from the active mode tokens with `color-mix` instead of keeping a second dark-only hex table. The site tray reuses the dashboard's swatch, preview and keyboard model; its rules live in `site-src/assets/site.css` and its DOM binding in `site-src/assets/site_theme.js`.
+
 ### Alpha ladder
 Shared strengths keep tints from drifting surface by surface: status pills rest at 13% tint and 16% once they flag an operator-visible state; hover halos sit at 14%; a selected palette row tints at 6%; the tick strip washes at 7% and its major tick at 11%; scrims sit at 35% for menu sheets and 72/60/55% for dialogs, storms and the drawer.
 

@@ -36,6 +36,7 @@ case "$mode" in
       python3 -B -m tests.repository_check
       python3 -B -O -m tests.python.site
       python3 -B -O -m tests.python.mcp_docs
+      python3 -B -O -m tests.python.docs_readability
       python3 -B -O -m tests.python.workflows
       python3 -B -O -m tests.python.release
       python3 -B -O -m tests.python.backup_db

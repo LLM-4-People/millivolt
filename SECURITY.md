@@ -148,9 +148,10 @@ trust-boundary evidence:
   attacker-controlled unbounded size.
 
 The operator-cookie and integer-conversion findings were true positives and are
-fixed: the operator session cookie now sets `Secure` when the request arrived
-over TLS or through an https-forwarding ingress; the jsonnum, config, and
+fixed. The operator session cookie now sets `Secure` when the request arrived
+over TLS or through an https-forwarding ingress. The jsonnum, config and
 throttle paths now parse or bound at the target width, with regression tests.
+
 The allocation findings are closed by construction, using overflow-safe capacity
 owners. The operator SQL console is an accepted boundary, and the transparent
 response-writer wrappers are false positives from interface fan-out; their

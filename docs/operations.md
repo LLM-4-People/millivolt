@@ -29,17 +29,22 @@ task-shaped page carries the detail.
 
 Liveness (`/healthz`) answers "the process is up and serving HTTP". Readiness
 (`/readyz`) additionally answers "this instance can persist": it fails with
-`503` and a reason when the durable writer is wedged. Two arms answer that: the
+`503` and a reason when the durable writer is wedged.
+
+Two arms answer that: the
 oldest record on the queue has waited, or no flush has succeeded, for longer
 than one flush interval plus a progress window. The window is four flush
 intervals clamped to at least 30 seconds and at most two minutes; the record's
 own interval is allowed on top, so a record inside its own cadence never
 convicts and a long configured interval cannot postpone the verdict by more
-than that one cadence. Every clock starts on arrival: the oldest record on the
+than that one cadence.
+
+Every clock starts on arrival: the oldest record on the
 queue ages the first arm, and while no flush has succeeded since boot the first
 accepted record ages the second one, so a writer that never picks records up is
 convicted all the same. Readiness also fails when
 any durable flush has failed since boot.
+
 Readiness stays red after the first failed flush even once writes recover,
 because a lost batch is worth an operator's attention; restart or investigate.
 With durable storage disabled both routes answer `200`, since there is no
@@ -72,11 +77,14 @@ The durable log order owns one secondary index, `idx_requests_log(started_at,
 id)`. The log page pushes exact provider, client, key-hash, conversation and
 canonical numeric status predicates into SQL and rechecks them on that scan;
 model, status-class, tool, error and time-bucket filters stay Go-owned because
-they match canonical/derived values, not raw stored text. The export and purge
+they match canonical/derived values, not raw stored text.
+
+The export and purge
 filter surface is different: it accepts exact provider, model, client,
 conversation, error type, status code, `has_error`, `debug`, and time bounds,
 with no key-hash selector, and its equality-only preview count or purge scans
 the table instead of maintaining per-dimension composite indexes.
+
 `BenchmarkStoreDiskBytes` measures
 this on its deterministic synthetic fixture (10,000 and 100,000 seeded
 records). The current per-record and total bytes are published in
@@ -86,10 +94,13 @@ use or a capacity ceiling.
 
 Dropping a superseded request-log index only moves its pages to SQLite's
 freelist, so the first startup that finds and removes one also runs a one-time
-`VACUUM` after the migration. Fresh and already-migrated databases skip it. A
+`VACUUM` after the migration. Fresh and already-migrated databases skip it.
+
+A
 `VACUUM` needs free temporary space up to roughly twice the database size; if
 it fails for space, locking or interruption, startup logs a warning and
 continues with every row intact, but the freed pages stay on the freelist.
+
 Reclaim them manually during a maintenance window: stop the proxy, run
 `sqlite3 /data/proxy.db 'VACUUM;'` (or any SQLite client) against `db_path`,
 and confirm `PRAGMA freelist_count` returns 0. The automatic pass is never
@@ -101,12 +112,18 @@ document in `attempts` or `tool_names` is rewritten to the canonical `null`,
 and a positive `ttft_ms` with `final_attempt_at = 0` (the pre-0.3.34
 start-anchored TTFT, recorded with upload, queueing and retry backoff
 included) is reset to 0 because the original per-attempt anchor was never
-stored and cannot be recovered. Each repair has its own `meta` marker
+stored and cannot be recovered.
+
+Each repair has its own `meta` marker
 (`attempts_repaired`, `tool_names_repaired`, `ttft_anchor_repaired`): the
 marker is written after a clean probe or after the rewrite, later boots read
 one row instead of rescanning the table, and deleting the marker (or restoring
-a database that predates it) re-arms the probe. A repair that cannot run fails
-boot closed instead of serving history its own consumers would reject. The
+a database that predates it) re-arms the probe.
+
+A repair that cannot run fails
+boot closed instead of serving history its own consumers would reject.
+
+The
 first boot after an upgrade that finds rows to rewrite may pause while it
 scans and rewrites them, and the totals rebuild follows: the rewrite advances
 the projection epoch, which invalidates the persisted totals document. The
@@ -118,6 +135,7 @@ records even when HTTP succeeds. Bootstrap's
 `storage:{enabled,dropped,totals_degraded}` reports cumulative process-local
 loss and a failed startup history scan. Either appears in the status footer;
 degraded since-inception totals count only rows committed since process start.
+
 Increasing queue size absorbs bursts, not arbitrary sustained overload.
 Storage overload remains an unresolved capacity boundary, not a lossless mode.
 Measure it with the [isolated stress workflow](../CONTRIBUTING.md#performance-evidence):
@@ -129,13 +147,16 @@ sustainable writer throughput or an absolute request-capacity ceiling.
 log/bootstrap, capture reads) and the ad-hoc query route. A capture read waits
 first for the in-flight sidecar save of the same request, bounded by the
 drawer client's own request context, and only then starts the read budget, so a
-slow save cannot spend the budget the read needs. Startup projection
+slow save cannot spend the budget the read needs.
+
+Startup projection
 preload, the boot totals rebuild, an administrative purge, and a backup merge's
 totals scan run under a separate internal ten-minute maintenance budget: they
 legitimately read or rewrite full history and must not inherit the interactive
-bound. The
-maintenance budget still honors an earlier caller cancellation or deadline, and
-its expiry fails the operation closed (a purge transaction rolls back). It is a
+bound.
+
+The maintenance budget still honors an earlier caller cancellation or deadline,
+and its expiry fails the operation closed (a purge transaction rolls back). It is a
 fixed implementation guardrail, not a configuration field.
 
 One shared analytical projection retains compact data and sorted metric orders
@@ -199,7 +220,9 @@ The startup preload decodes every stored row once, so its transient allocations
 (SQL strings, attempts and tool-name JSON) exceed the retained projection several
 times over. The process returns those burst pages to the OS immediately after the
 preload completes; idle RSS after readiness reflects retained state, not the
-startup burst. The projection's per-record retained footprint is measured
+startup burst.
+
+The projection's per-record retained footprint is measured
 reproducibly by `BenchmarkProjectionFootprint` (retained and transient bytes per
 record over a seeded scratch database) and `BenchmarkProjectionProcessRSS`
 (process RSS after readiness), without a live instance; the
@@ -207,13 +230,19 @@ record over a seeded scratch database) and `BenchmarkProjectionProcessRSS`
 
 `go_memory_limit` is the operator's steady-state RSS lever: a soft cap on Go
 runtime managed memory (heap, stacks, runtime structures) applied once at
-startup. With the setting at 0, an operator `GOMEMLIMIT` wins and otherwise a
+startup.
+
+With the setting at 0, an operator `GOMEMLIMIT` wins and otherwise a
 detected finite cgroup memory ceiling of at least 80MiB (v2 `memory.max` or v1
 `memory.limit_in_bytes`) becomes a soft limit at 80% of that ceiling so a
 container's own bound actually reaches the Go runtime; smaller ceilings are
-ignored and, with no `GOMEMLIMIT`, the runtime stays unbounded. A set value
+ignored and, with no `GOMEMLIMIT`, the runtime stays unbounded.
+
+A set value
 overrides `GOMEMLIMIT`, not `GOGC`, for the process lifetime. `GOGC` remains
-independent. The limit is soft - exceeding it makes the collector
+independent.
+
+The limit is soft - exceeding it makes the collector
 more aggressive (capped near 50% of CPU time) instead of failing requests - and
 bounds Go-managed memory only, never SQLite's page cache or OS overhead.
 

@@ -2,13 +2,15 @@
 
 Use a protected ingress when accessing millivolt beyond a trusted local machine.
 The whole dashboard is gated by the shared `MILLIVOLT_OPERATOR_TOKEN`
-credential; there is no tenant isolation and no per-user identity. At the
-application gate, only the unauthenticated `/healthz` and `/readyz` probes, the
-`POST /session` login handshake, origin-root brand/PWA files and transparent
-inference stay open, so a load balancer can health-check the service without
-holding the credential and a browser can reach the login handshake. The canonical
-open-path list is in [operator access](routes.md#operator-access); this
-guide only adds the ingress boundary. Read [Security](../SECURITY.md) first.
+credential; there is no tenant isolation and no per-user identity.
+
+At the application gate, only the unauthenticated `/healthz` and `/readyz`
+probes, the `POST /session` login handshake, origin-root brand/PWA files and
+transparent inference stay open, so a load balancer can health-check the
+service without holding the credential and a browser can reach the login
+handshake. The canonical open-path list is in
+[operator access](routes.md#operator-access); this guide only adds the ingress
+boundary. Read [Security](../SECURITY.md) first.
 
 ![Reverse proxy topology: the API client and dashboard browser reach NGINX over TLS, NGINX forwards over loopback to millivolt, and millivolt sends requests to the selected upstream](images/diagrams/reverse-proxy.svg)
 
@@ -24,21 +26,26 @@ Compose service. Use a maintained NGINX release with the `http2 on` directive
 (introduced in 1.25.1), not the deprecated `listen ... http2` syntax.
 
 The sample splits two prefix locations because they do not share an access
-model. `location /v1` is the OpenAI-compatible inference base: preserve provider
-`Authorization` and routing headers, and allowlist API clients. `location /`
-covers everything else, including the dashboard and operator plane (`/dash/`,
-`/metrics/`, `/admin/`) plus the application-open `POST /session`, `/healthz`,
-`/readyz` and brand/PWA paths: allowlist operators, and keep `Host` plus the session
-cookie so Settings origin checks and the live feed work; the comparison is
-case-insensitive, so a case-preserving ingress is fine. The `/session`
-handshake is open at millivolt so login works, but this location still
-allowlists it at the edge. A URL-capable MCP client uses this location with
-`/mcp` appended and the operator Bearer header: the application's MCP endpoint
-is Bearer-only and refuses the session cookie. Shared streaming proxy settings
-live on the `server` so both SSE paths stay unbuffered. Prefix `/v1` wins over
-`/` for `/v1/chat/completions` and `/v1/models`; `GET /models` without that
-prefix follows `location /` unless you add an exact `/models` block with the
-inference rules.
+model:
+
+- `location /v1` is the OpenAI-compatible inference base: preserve provider
+  `Authorization` and routing headers, and allowlist API clients.
+- `location /` covers everything else, including the dashboard and operator
+  plane (`/dash/`, `/metrics/`, `/admin/`) plus the application-open
+  `POST /session`, `/healthz`, `/readyz` and brand/PWA paths: allowlist
+  operators, and keep `Host` plus the session cookie so Settings origin checks
+  and the live feed work; the comparison is case-insensitive, so a
+  case-preserving ingress is fine.
+
+The `/session` handshake is open at millivolt so login works, but this location
+still allowlists it at the edge. A URL-capable MCP client uses this location
+with `/mcp` appended and the operator Bearer header: the application's MCP
+endpoint is Bearer-only and refuses the session cookie.
+
+Shared streaming proxy settings live on the `server` so both SSE paths stay
+unbuffered. Prefix `/v1` wins over `/` for `/v1/chat/completions` and
+`/v1/models`; `GET /models` without that prefix follows `location /` unless you
+add an exact `/models` block with the inference rules.
 
 1. Start the normal [Compose deployment](../README.md#docker-compose), retaining
    its loopback-only host port.
@@ -67,13 +74,15 @@ statuses intact, disables edge compression/caching, and ignores special upstream
 Millivolt uses SSE, not a WebSocket endpoint; no `Upgrade` block is needed.
 
 It preserves the external `Host`, including a nondefault port, so browser-origin
-checks on Settings and other mutations keep working. It also overwrites
-`X-Forwarded-Proto` with this server's `$scheme`, so a TLS presentation reaches
-millivolt as `https` and the session cookie carries `Secure`; a client-supplied
-value cannot spoof it. Overwriting is the recommended form. If your ingress
-appends its scheme instead (`$http_x_forwarded_proto,$scheme`), the application
-still marks the request secure when any token does, so a client-supplied `http`
-in first position cannot downgrade the cookie.
+checks on Settings and other mutations keep working.
+
+It also overwrites `X-Forwarded-Proto` with this server's `$scheme`, so a TLS
+presentation reaches millivolt as `https` and the session cookie carries
+`Secure`; a client-supplied value cannot spoof it. Overwriting is the
+recommended form. If your ingress appends its scheme instead
+(`$http_x_forwarded_proto,$scheme`), the application still marks the request
+secure when any token does, so a client-supplied `http` in first position
+cannot downgrade the cookie.
 
 The sample also resolves the client address with `real_ip`:
 
@@ -85,21 +94,26 @@ real_ip_header X-Forwarded-For;
 Without it, millivolt sees this hop's address as `RemoteAddr` for every request
 and the per-source authentication throttle gets one bucket, so a single wrong
 guess locks out every operator. `set_real_ip_from` lists the addresses allowed
-to send a replacement address: this host's own loopback. If another load
-balancer, tunnel or proxy fronts NGINX, add its address range there and set
-`real_ip_recursive on` once every hop in the chain is listed. `real_ip` walks
-`X-Forwarded-For` from the right and keeps the last untrusted address, so a
-client that prepends a forged entry cannot displace the real one; NGINX's
-default `$proxy_add_x_forwarded_for` then appends the resolved address on the
-way inbound, and the per-source authentication throttle reads that last
-element. The record field is separate: `client_ip` records the first
-`X-Forwarded-For` element when that header is present and the socket peer
-otherwise; the value is diagnostic, never verified, and a directly reachable
-caller can set it. The resolved address is a throttle key, not an identity:
-keep the location allowlists in force. Those lists evaluate the resolved
-address, so a caller that already reaches this host's loopback chooses what
-they see: they separate remote networks from each other and from loopback
-callers, not loopback callers from each other.
+to send a replacement address: this host's own loopback.
+
+If another load balancer, tunnel or proxy fronts NGINX, add its address range
+there and set `real_ip_recursive on` once every hop in the chain is listed.
+
+`real_ip` walks `X-Forwarded-For` from the right and keeps the last untrusted
+address, so a client that prepends a forged entry cannot displace the real one;
+NGINX's default `$proxy_add_x_forwarded_for` then appends the resolved address
+on the way inbound, and the per-source authentication throttle reads that last
+element.
+
+The record field is separate: `client_ip` records the first `X-Forwarded-For`
+element when that header is present and the socket peer otherwise; the value is
+diagnostic, never verified, and a directly reachable caller can set it.
+
+The resolved address is a throttle key, not an identity: keep the location
+allowlists in force. Those lists evaluate the resolved address, so a caller
+that already reaches this host's loopback chooses what they see: they separate
+remote networks from each other and from loopback callers, not loopback callers
+from each other.
 
 NGINX's body-size gate is
 disabled in the sample: millivolt's existing `max_request_bytes` remains the
@@ -117,39 +131,47 @@ These behaviors follow the official [proxy module](https://nginx.org/en/docs/htt
 The sample uses a trusted IP/VPN allowlist on each location, preserving
 provider `Authorization` on `/v1` and the operator Bearer or session cookie on
 `/`. Replace each placeholder with the addresses you intend to trust for that
-plane. If another load balancer is in front of NGINX, list its addresses in
+plane.
+
+If another load balancer is in front of NGINX, list its addresses in
 `set_real_ip_from` and switch `real_ip_recursive` on, so the trusted chain
 matches reality; a hop that appends to `X-Forwarded-For` without being listed
-is ignored on the left of the real client. TLS encrypts traffic but does not
-authorize callers. A secure presentation also makes millivolt answer
-`Strict-Transport-Security: max-age=15552000` (180 days, no
-`includeSubDomains`) so a browser pins the scheme; NGINX's own `add_header`
+is ignored on the left of the real client.
+
+TLS encrypts traffic but does not authorize callers. A secure presentation also
+makes millivolt answer `Strict-Transport-Security: max-age=15552000` (180 days,
+no `includeSubDomains`) so a browser pins the scheme; NGINX's own `add_header`
 is not needed for it, and adding a second HSTS header at the edge would send
-two values.
-See NGINX's [access module](https://nginx.org/en/docs/http/ngx_http_access_module.html)
+two values. See NGINX's
+[access module](https://nginx.org/en/docs/http/ngx_http_access_module.html)
 and [TLS configuration](https://nginx.org/en/docs/http/ngx_http_ssl_module.html).
 
 If you instead add HTTP Basic authentication on `/v1`, `Authorization` contains
 the ingress credential and cannot simultaneously contain the provider bearer
 key. Supply the provider key through `X-Proxy-Key`, and clear the consumed
 ingress header before forwarding with `proxy_set_header Authorization "";`.
+
 The same conflict applies on `/`: a browser behind Basic auth cannot also
 present the dashboard's Bearer credential in the same header, so gated actions
 fail. Prefer an address/VPN allowlist as in the sample, or an ingress that
 adds its own credential through a different mechanism and forwards
-`Authorization` untouched. Do not put Basic auth on `/v1` to "protect
-inference" while leaving `/` on Bearer: that still overwrites the provider key.
-The same separation applies to other ingress-only credentials: do not forward
-them to an LLM provider. Clients must support your ingress authentication and
-the proxy's custom routing headers.
+`Authorization` untouched.
+
+Do not put Basic auth on `/v1` to "protect inference" while leaving `/` on
+Bearer: that still overwrites the provider key. The same separation applies to
+other ingress-only credentials: do not forward them to an LLM provider. Clients
+must support your ingress authentication and the proxy's custom routing
+headers.
 
 The session handshake lives at `/session`, outside the admin plane, which
 supports one specific pattern: an external authentication layer may front
 `/admin/*` alone, because millivolt's own login stays reachable and the
 mutation and settings routes become double-gated, the external layer plus
-millivolt's credential. Operators fronting `/admin` this way must still pass
-the session cookie and `Host` through to the proxy, since the dashboard's
-fetch-based mutations rely on both.
+millivolt's credential.
+
+Operators fronting `/admin` this way must still pass the session cookie and
+`Host` through to the proxy, since the dashboard's fetch-based mutations rely
+on both.
 
 ## Container networking and other ingress servers
 

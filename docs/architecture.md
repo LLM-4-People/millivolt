@@ -1,11 +1,11 @@
 # Architecture and ownership
 
-millivolt is one Go HTTP service with an embedded, no-build dashboard.
-The client-facing protocol and upstream relay/translation are separate
-boundaries; the [compatibility matrix](adapters.md#client-and-upstream-compatibility)
-defines their supported combinations.
-[Contributing](../CONTRIBUTING.md) covers change and verification rules;
-[protocol](protocol.md) and the [operations overview](operations.md) describe public behavior.
+millivolt is one Go HTTP service with an embedded, no-build dashboard. The
+client-facing protocol and upstream relay/translation are separate boundaries;
+the [compatibility matrix](adapters.md#client-and-upstream-compatibility)
+defines their supported combinations. [Contributing](../CONTRIBUTING.md)
+covers change and verification rules; [protocol](protocol.md) and the
+[operations overview](operations.md) describe public behavior.
 
 ## Source map
 
@@ -21,9 +21,10 @@ defines their supported combinations.
 | [internal/sse](../internal/sse/analyzer.go) | Streaming content/usage/TTFT inspection for Chat, Responses and Anthropic SSE ([analyzer_anthropic.go](../internal/sse/analyzer_anthropic.go)), split into decode, feed, usage, terminal, error, fill and report modules; client-facing OpenAI SSE frames and completion envelopes. |
 | [internal/format](../internal/format) | Explicit wire codecs (Chat, Responses, Anthropic) over the canonical [IR](../internal/format/ir/ir.go), Connect/protobuf framing, and the same-protocol translation facade. |
 | [internal/storage](../internal/storage/store_open.go) | Asynchronous SQLite writing, schema/read fidelity, totals, purge fence, packed snapshots and bounded queries. |
-| [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates; `aggregate.go` owns the core row model and each surface has its own `aggregate_*.go` module. |
+| [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates; `aggregate.go` owns the core row model and each surface has its own `aggregate_*.go` module. The site build republishes `css/themes.css`, `js/theme_boot.js` and `js/theme_state.js` byte-for-byte, so both surfaces share one palette registry and one apply path. |
 | [cmd/mvctl](../cmd/mvctl/main.go) | the human operator client: command dispatch, per-command flags, human and JSON rendering, and destructive-action guards. It reuses `internal/mcp` for the operator HTTP client, `internal/config` for setting kinds and bands, and `internal/backup` for archive and query grammar. |
-| [internal/mcp](../internal/mcp) | The MCP tool server for the operator plane: one HTTP client owner (credential, request building, error extraction), one scope-filter owner, one tool registry served by the proxy's streamable HTTP `/mcp` endpoint, the destructive-call guards, and the streamable HTTP handler the proxy mounts at `/mcp`. It owns no analytical projection of its own. |
+| [internal/mcp](../internal/mcp) | The MCP tool server for the operator plane: one HTTP client owner (credential, request building, error extraction), one scope-filter owner, one tool registry served by the proxy's streamable HTTP `/mcp` endpoint, the destructive-call guards, and the streamable HTTP handler the proxy mounts at `/mcp`. It owns no analytical projection of its own; the three docs tools read `internal/docs` locally. |
+| [internal/docs](../internal/docs/docs.go) | Embedded generated documentation index: strict decode of `docs.json`, ordered list, section read and ranked search for `docs_list`, `docs_search` and `docs_read`. The checked-in file is produced by `scripts/build_site.py --write-manifest`, and a source-hash test rejects a stale copy. |
 
 ## Logging
 
@@ -39,28 +40,36 @@ stay direct.
 [version.go](../version.go) owns VERSION validation and SemVer precedence. The
 [workflow](../.github/workflows/check.yml) owns the promotion gate and release
 publication: `unit`, `browser` and `container` run the full gate on all
-`testing` pull requests, code-bearing `testing` pushes, and manually pushed `v*`
-tags, plus Dependabot's `main` PRs; docs and site-only pushes use `docs.yml`.
-The three gate jobs start independently and `required` aggregates them. `required`
-reuses that gate for ordinary promotions by requiring the head to be the current
-`testing` tip, `main` to be already merged back into it, a successful full-gate
-record for that exact commit or for the closest gated `testing` commit when
-every path since it is docs/site-only, and a VERSION newer than every tag for
-non-Dependabot code-bearing promotions. A non-Dependabot promotion also requires
-a successful [escalation](../.github/workflows/escalation.yml) run (forced
-full-race sweep plus the repeated clock-sensitive flake sweep) for the reviewed
-head; the proof fails closed while that run is missing, pending, failed, from
-another workflow, branch or commit. Pending exact check runs get a short bounded wait and
-the proof fails closed if they are still pending; let the `testing` push gate
-finish before opening or re-running a promotion PR. Docs/site-only promotions
-skip the VERSION and full-gate proofs and validate docs, workflow policy and the
-site in `required`. The `required` job has a ten-minute budget for that path.
-`publish` tags the reviewed promotion merge, publishes the image and creates the
-release without pushing `main`; a manually pushed `v*` tag ships exactly as
-tagged. `publish-testing` instead waits for `unit`, `browser` and `container`
-directly, because a testing push has no promotion proof to wait for. The
-`main-testing-first` ruleset adds the pull-request and merge-commit requirements
-with no bypass actors.
+`testing` pull requests, code-bearing `testing` pushes, and manually pushed
+`v*` tags, plus Dependabot's `main` PRs; docs and site-only pushes use
+`docs.yml`.
+
+The three gate jobs start independently and `required` aggregates them.
+`required` reuses that gate for ordinary promotions by requiring the head to
+be the current `testing` tip, `main` to be already merged back into it, a
+successful full-gate record for that exact commit or for the closest gated
+`testing` commit when every path since it is docs/site-only, and a VERSION
+newer than every tag for non-Dependabot code-bearing promotions.
+
+A non-Dependabot promotion also requires a successful
+[escalation](../.github/workflows/escalation.yml) run (forced full-race sweep
+plus the repeated clock-sensitive flake sweep) for the reviewed head; the
+proof fails closed while that run is missing, pending, failed, from another
+workflow, branch or commit. Pending exact check runs get a short bounded wait
+and the proof fails closed if they are still pending; let the `testing` push
+gate finish before opening or re-running a promotion PR.
+
+Docs/site-only promotions skip the VERSION and full-gate proofs and validate
+docs, workflow policy and the site in `required`. The `required` job has a
+ten-minute budget for that path.
+
+`publish` tags the reviewed promotion merge, publishes the image and creates
+the release without pushing `main`; a manually pushed `v*` tag ships exactly
+as tagged. `publish-testing` instead waits for `unit`, `browser` and
+`container` directly, because a testing push has no promotion proof to wait
+for. The `main-testing-first` ruleset adds the pull-request and merge-commit
+requirements with no bypass actors.
+
 [Contributing](../CONTRIBUTING.md#branch-workflow) owns the maintainer
 checklist; [operations](containers.md#versions-and-images) owns the published
 tag contract.
@@ -70,146 +79,170 @@ tag contract.
 `readRequest` retains bounded original bytes and calls the single metadata
 decoder. Ordinary content is measured without retaining decoded prompt/schema
 trees; opt-in previews stay bounded. Exceptional decoder compatibility belongs
-at that owner, not a second routing parser. Before the typed decode,
-`parseLLMRequest` bounds decoded JSON-string expansion: valid UTF-8 and JSON
-escapes decode to no more bytes than their spelling, so only raw invalid UTF-8
-can consume the small allowance (the standard decoder writes a three-byte
-U+FFFD per invalid byte). A larger expansion is rejected before materializing;
-malformed JSON keeps its passthrough contract, and small invalid sequences still
-pass through. `parseLLMRequestFast` is a narrow lexical pre-pass for a minimal
-top-level object: `model`, `stream`, `messages` with printable-ASCII role and
-content strings, and `system`. It extracts the same routing and composition
-fields without the typed decode and delegates every other shape, including all
+at that owner, not a second routing parser.
+
+Before the typed decode, `parseLLMRequest` bounds decoded JSON-string
+expansion: valid UTF-8 and JSON escapes decode to no more bytes than their
+spelling, so only raw invalid UTF-8 can consume the small allowance (the
+standard decoder writes a three-byte U+FFFD per invalid byte). A larger
+expansion is rejected before materializing; malformed JSON keeps its
+passthrough contract, and small invalid sequences still pass through.
+
+`parseLLMRequestFast` is a narrow lexical pre-pass for a minimal top-level
+object: `model`, `stream`, `messages` with printable-ASCII role and content
+strings, and `system`. It extracts the same routing and composition fields
+without the typed decode and delegates every other shape, including all
 parameter collections, escapes, duplicates, content part arrays, and preview
-capture, to the existing decoder and its bounds. Differential tests pin
-byte-for-byte record and rejection equivalence. `SkipJSONString` finds each
-candidate quote with one `IndexByte` and reads its escape parity from the
-backslash run before it, so escaped content is one forward pass instead of a
-restart per escape. The metadata preflight counts message elements, content
-parts and tool calls in one walk instead of three. Current scanner and
-metadata-shape costs are published under
-[implementation benchmarks](performance.md#implementation-benchmarks)
+capture, to the existing decoder and its bounds.
+
+Differential tests pin byte-for-byte record and rejection equivalence.
+`SkipJSONString` finds each candidate quote with one `IndexByte` and reads its
+escape parity from the backslash run before it, so escaped content is one
+forward pass instead of a restart per escape. The metadata preflight counts
+message elements, content parts and tool calls in one walk instead of three.
+Current scanner and metadata-shape costs are published under [implementation
+benchmarks](performance.md#implementation-benchmarks)
 (`BenchmarkSkipJSONString`, `BenchmarkRequestMetadataShapes`).
+
 The streaming analyzer scans each frame once for its classifier keys and
 classifies lexically wherever it can. Chat tool-call frames are scanned once
 for the element index, id and `function.name`, with the typed decode kept only
 as the fallback for a shape the lexical grammar rejects. Current frame and
-dedupe costs are published under
-[implementation benchmarks](performance.md#implementation-benchmarks)
+dedupe costs are published under [implementation
+benchmarks](performance.md#implementation-benchmarks)
 (`BenchmarkAnalyzerFeed/tool_call`, `BenchmarkAnalyzerToolNameDedupe`). A
 differential corpus and a fuzz target compare both paths over every analyzer
-field they touch. The Anthropic translator
-independently requires valid UTF-8 input,
-so it cannot materialize the replacement expansion either. The Start stamp
-follows body upload and precedes metadata/translation CPU. Upstream
-whole-document buffers share
-one process-wide `max_inflight_response_bytes` reservation: translated
-non-streaming responses, the non-streaming 200 quality spool, and
+field they touch.
+
+The Anthropic translator independently requires valid UTF-8 input, so it
+cannot materialize the replacement expansion either. The Start stamp follows
+body upload and precedes metadata/translation CPU. Upstream whole-document
+buffers share one process-wide `max_inflight_response_bytes` reservation:
+translated non-streaming responses, the non-streaming 200 quality spool, and
 model-discovery pages. Admission reserves the declared Content-Length when it
 fits the bounded read cap, otherwise that cap, and refuses with a retryable
 `503` and `Retry-After` before reading the upstream body.
 
 `resolveRequestOverrides` in
-[request_overrides.go](../internal/proxy/request_overrides.go) merges the matching
-`request_overrides` rules once per request, after routing metadata is known,
-and its merge has exactly two application stages: the final header stage of
-`buildUpstreamRequest`, and the cursor identity headers at the native send. Its
-body stamp is fail closed (an undecodable or oversize result relays the
-original bytes with one log line, prefixed by the request id minted at the read
-boundary so the line joins the stored row), and a nil resolution - the feature
-off or nothing matched - leaves the request path byte-identical. The sub-conversation
-strip is the single body-rewrite engine's second consumer: it fires
-independently of override resolution, after the tracked value is extracted
-from the buffered body and before translation, with
+[request_overrides.go](../internal/proxy/request_overrides.go) merges the
+matching `request_overrides` rules once per request, after routing metadata is
+known, and its merge has exactly two application stages: the final header
+stage of `buildUpstreamRequest`, and the cursor identity headers at the native
+send.
+
+Its body stamp is fail closed (an undecodable or oversize result relays the
+original bytes with one log line, prefixed by the request id minted at the
+read boundary so the line joins the stored row), and a nil resolution - the
+feature off or nothing matched - leaves the request path byte-identical.
+
+The sub-conversation strip is the single body-rewrite engine's second
+consumer: it fires independently of override resolution, after the tracked
+value is extracted from the buffered body and before translation, with
 [conversation.go](../internal/proxy/conversation.go) owning the extraction and
-the `k:` identity. A provider's ensured tool names are the same engine's
-third consumer: they are restricted to the OpenAI wire, because the injected
-stub tools are chat/completions-shaped and must never reach a
-translated-anthropic or cursor body, and they fire with any override and
-strip actions through one document decode.
+the `k:` identity.
+
+A provider's ensured tool names are the same engine's third consumer: they are
+restricted to the OpenAI wire, because the injected stub tools are
+chat/completions-shaped and must never reach a translated-anthropic or cursor
+body, and they fire with any override and strip actions through one document
+decode.
 
 Immutable config/client snapshots hot-swap for new work; old transports finish
 active requests. Admission is provider+key scoped, with persistent limit
 policies layered at the same grant owner. A policy intersects its non-empty
-selector dimensions and an empty dimension matches any value, so a provider-only
-rule is the provider-wide cap while a narrower rule reuses the same machinery.
-Every matching policy charges its own lease, and a scheduled policy outside its
-window neither charges nor queues. Acquisition
-release settles exactly once. The provider gate and token-bucket epoch captured
-at admission keep clearing/replacing a cap from charging another generation's
-reservation. A provider-to-groups index in `Scheduler` keeps each group's slot
-in a fair-waiting set: a group joins when its queued head was refused by the
-shared provider gate (concurrency or the request/token bucket), not when it is
-parked on its own pacing window, hold, anti-burst ramp or per-key cap. A release
-settles the gate, then drains that set once in rotating one-grant-per-group
-passes, starting after the last group served, so one key cannot take the whole
-provider allowance while peers wait; the drain stops as soon as a grant refills
-a saturated provider concurrency cap. The lock-free fair count is the fast path's precise
-witness: an unrelated key admits immediately while peers wait on their own
-predicates, and a group that stops on one of those predicates leaves the set. An
-anti-burst epoch starts a group at allowance 1 and raises it by
+selector dimensions and an empty dimension matches any value, so a
+provider-only rule is the provider-wide cap while a narrower rule reuses the
+same machinery.
+
+Every matching policy charges its own lease, and a scheduled policy outside
+its window neither charges nor queues. Acquisition release settles exactly
+once. The provider gate and token-bucket epoch captured at admission keep
+clearing/replacing a cap from charging another generation's reservation.
+
+A provider-to-groups index in `Scheduler` keeps each group's slot in a
+fair-waiting set: a group joins when its queued head was refused by the shared
+provider gate (concurrency or the request/token bucket), not when it is parked
+on its own pacing window, hold, anti-burst ramp or per-key cap.
+
+A release settles the gate, then drains that set once in rotating
+one-grant-per-group passes, starting after the last group served, so one key
+cannot take the whole provider allowance while peers wait; the drain stops as
+soon as a grant refills a saturated provider concurrency cap.
+
+The lock-free fair count is the fast path's precise witness: an unrelated key
+admits immediately while peers wait on their own predicates, and a group that
+stops on one of those predicates leaves the set.
+
+An anti-burst epoch starts a group at allowance 1 and raises it by
 `floor((concurrency-1) * elapsed / ramp_duration)`, clamped to the target; a
 fully idle period of at least the ramp duration resets the epoch on the next
 grant, a shorter gap continues it, and changing the flag, duration or target
 resets every epoch.
 
-[tokenrefresh.go](../internal/proxy/tokenrefresh.go) separates provider exchanges
-from response policy. Exchange adapters return credential data only; the shared
-`resolveKey` ends successful inference refreshes with handback before admission,
-live publication or recording. `resolveKeyTransparent` owns the model-discovery
-exception. The token-refresh tests cover both mechanisms, adoption/retry, absent
-replacement tokens, applicability/failure gates and bounded exchange responses.
+[tokenrefresh.go](../internal/proxy/tokenrefresh.go) separates provider
+exchanges from response policy. Exchange adapters return credential data only;
+the shared `resolveKey` ends successful inference refreshes with handback
+before admission, live publication or recording. `resolveKeyTransparent` owns
+the model-discovery exception. The token-refresh tests cover both mechanisms,
+adoption/retry, absent replacement tokens, applicability/failure gates and
+bounded exchange responses.
 
-Retries, provider hints, hold waits and per-send deadlines have distinct owners.
-Capture context error before canceling it for cleanup. Never retry a canceled
-caller or replay meaningful emitted stream content. Quality failure handling is
-explicitly exceptional; see [adapters](adapters.md) and the relay tests.
+Retries, provider hints, hold waits and per-send deadlines have distinct
+owners. Capture context error before canceling it for cleanup. Never retry a
+canceled caller or replay meaningful emitted stream content. Quality failure
+handling is explicitly exceptional; see [adapters](adapters.md) and the relay
+tests.
 
 Queue visibility has one owner across both park points: the bounded admission
-FIFO and `WaitSend`'s send gate. Every parked request publishes the live queued
-edge (`Throttled`) for the whole wait and clears it on the grant. `Stats`
-reports send-gate waiters separately (`SendWaiters`) and the operator snapshots
-add them to the global and per-provider queue totals, so a 429 pacing window
-reads as queued work rather than idle streams; a retrying owner waiting out its
-own Retry-After hint is queued for the same reason. Send-gate waits stay
-separate from the admission queue bound so `max_queue_size` keeps its own
-meaning.
+FIFO and `WaitSend`'s send gate. Every parked request publishes the live
+queued edge (`Throttled`) for the whole wait and clears it on the grant.
+
+`Stats` reports send-gate waiters separately (`SendWaiters`) and the operator
+snapshots add them to the global and per-provider queue totals, so a 429
+pacing window reads as queued work rather than idle streams; a retrying owner
+waiting out its own Retry-After hint is queued for the same reason. Send-gate
+waits stay separate from the admission queue bound so `max_queue_size` keeps
+its own meaning.
 
 [scheduler/storm.go](../internal/scheduler/storm.go) owns bounded rolling
 attempt counters, active-model evidence, cross-key provider/model gates and
 exclusive recovery permits. Provider activation requires all models with
 activity inside the same window to independently qualify. Old permits cannot
-recover newer incidents. Initial admission waits for readiness without reserving
-a probe; only the actual send boundary claims a probe after key admission.
+recover newer incidents. Initial admission waits for readiness without
+reserving a probe; only the actual send boundary claims a probe after key
+admission.
+
 Storm policy changes reset observations and wake waiters without mutating
-retained history. Each
-request carries an observation for its provider and model, moving distinct
-failed-request membership between fixed buckets across retries without retaining
-a request-ID map. No storm observation scans metrics history or waits for SQLite.
+retained history. Each request carries an observation for its provider and
+model, moving distinct failed-request membership between fixed buckets across
+retries without retaining a request-ID map. No storm observation scans metrics
+history or waits for SQLite.
 
 [proxy/storm.go](../internal/proxy/storm.go) maps config once into scheduler
 options and bridges existing relay/native send outcomes. A 2xx permit settles
 after relay or before an existing quality re-ask or thinking rescue re-send,
 preventing double samples and stream replay. Safe protocol-level reason labels
-carry no provider error bodies.
-The banner uses the canonical bootstrap builder and browser apply/render gates,
-with no client-side event arithmetic. Storm scheduler/proxy/config regressions
-and the shared UI/browser suite cover these boundaries.
+carry no provider error bodies. The banner uses the canonical bootstrap
+builder and browser apply/render gates, with no client-side event arithmetic.
+Storm scheduler/proxy/config regressions and the shared UI/browser suite cover
+these boundaries.
 
 Important coverage includes request metadata/parser fuzz tests,
 `BenchmarkRequestMetadata`, `BenchmarkProxyRequest`,
 `TestConcurrentStreamingAccounting`, transport lifecycle tests and scheduler
-efficiency/race tests. Proxy requests must not perform history scans or wait for
-SQLite accounting.
+efficiency/race tests. Proxy requests must not perform history scans or wait
+for SQLite accounting.
 
 ## Finalized records, pending lifecycle and replay
 
-`PublishLive(begin/update)` snapshots pending state without adding durable rows.
-The proxy registers its deferred `Record` before publishing `begin`, so a
-subscriber that fails while handling the begin event cannot leave a permanent
-in-flight row. `Buffer.Record` atomically finalizes the row, retires pending
-state, updates its gauge/revision and emits end. Exactly one finalized record per request is the
-accounting unit; proxy-owned IDs cannot collide with reused client request IDs.
+`PublishLive(begin/update)` snapshots pending state without adding durable
+rows. The proxy registers its deferred `Record` before publishing `begin`, so
+a subscriber that fails while handling the begin event cannot leave a
+permanent in-flight row. `Buffer.Record` atomically finalizes the row, retires
+pending state, updates its gauge/revision and emits end. Exactly one finalized
+record per request is the accounting unit; proxy-owned IDs cannot collide with
+reused client request IDs.
+
 A debug capture registers its pending sidecar marker in `debugRuntime` before
 that publish and encodes/saves after it, so the sidecar write delays neither
 the live end nor durable accounting. A drawer fetch for the id waits on the
@@ -219,22 +252,24 @@ keeps the normal 404.
 `Buffer.Record`, `PublishLive` and `Backfill` share the one record-retention
 pass ([internal/metrics/retain.go](../internal/metrics/retain.go)) at that
 boundary. It bounds client-controlled paths/methods and provider-controlled
-model/request/finish/error text, tool names and attempt metadata; normal values
-stay byte-identical. The bounds and the UTF-8 cut marker are documented in the
-[protocol](protocol.md).
+model/request/finish/error text, tool names and attempt metadata; normal
+values stay byte-identical. The bounds and the UTF-8 cut marker are documented
+in the [protocol](protocol.md).
 
-Existing lock order keeps sequence assignment and finalized publication ordered.
-A feed epoch changes on restart/deletion; queued fanout retains its mutation
-epoch. Subscribers attach before snapshot capture and overflow retires that
-subscriber so reconnect can replay, rather than silently dropping permanent rows.
-When more than one dashboard subscriber is attached, `Record` and `PublishLive`
-attach one lazy observed-JSON cache to that published event
+Existing lock order keeps sequence assignment and finalized publication
+ordered. A feed epoch changes on restart/deletion; queued fanout retains its
+mutation epoch. Subscribers attach before snapshot capture and overflow
+retires that subscriber so reconnect can replay, rather than silently dropping
+permanent rows.
+
+When more than one dashboard subscriber is attached, `Record` and
+`PublishLive` attach one lazy observed-JSON cache to that published event
 ([internal/metrics/event_cache.go](../internal/metrics/event_cache.go)). The
-first consuming stream encodes the observer result and every subscriber of that
-same event reuses the retained bytes; an encode error is retained too, so all of
-them close and resync. Zero or one subscriber keeps the direct `json.Marshal`
-path with no cache allocation, and no cache outlives its event or crosses a
-feed epoch.
+first consuming stream encodes the observer result and every subscriber of
+that same event reuses the retained bytes; an encode error is retained too, so
+all of them close and resync. Zero or one subscriber keeps the direct
+`json.Marshal` path with no cache allocation, and no cache outlives its event
+or crosses a feed epoch.
 
 `SnapshotRequest` is the shared atomic cursor/feed gate for bootstrap and SSE.
 A foreign/stale cursor requires a full snapshot; deltas are never truncated.
@@ -245,114 +280,137 @@ The browser's one upsert owner deduplicates finalized replays. Pending upserts
 cannot overwrite finalized rows or a newer pending revision of the same ID.
 The authoritative gauge revision is independent: an older event may still add
 a missing different row without rolling back the gauge. Full bootstrap closes
-the stream before capture; only the winning refresh reopens it. Stale same-feed
-full SSE snapshots recapture through that barrier by sequence/pending revision.
+the stream before capture; only the winning refresh reopens it. Stale
+same-feed full SSE snapshots recapture through that barrier by
+sequence/pending revision.
 
 Tests live under [tests/](../tests/README.md), with Go package mirrors in
 `tests/_go/`. Use the overlay-aware `scripts/check.sh go test` entry point.
 See buffer snapshot/stream tests and the harness sections under
-`tests/ui_harness/sections/` for the lifecycle and bootstrap races.
-Do not collapse these row, gauge, epoch and request-ownership gates into a
+`tests/ui_harness/sections/` for the lifecycle and bootstrap races. Do not
+collapse these row, gauge, epoch and request-ownership gates into a
 whole-event drop rule.
 
 ## Durable writes and deletion
 
-`Store.Recorder(buffer)` publishes the live final record and nonblocking enqueue
-under one short producer fence. SQLite is the durable authority; enqueue overflow
-and failed batches remain visible best-effort losses.
+`Store.Recorder(buffer)` publishes the live final record and nonblocking
+enqueue under one short producer fence. SQLite is the durable authority;
+enqueue overflow and failed batches remain visible best-effort losses.
 
-`internal/storage/health.go` is the one owner of that loss accounting and of the
-pipeline's liveness. Every discard is counted under exactly one cause
-(`overflow`, `after_close`, `panic`, `flush_failed`); `Dropped()` sums them for
-the dashboard counter, and the exposition renders each cause so alerting can
-separate overload from shutdown, a panic and a failing database. The same owner
-publishes the oldest queued record's arrival and stamps every flush attempt, so
-`/readyz` can tell a stalled writer from a merely idle one: a non-empty queue
-whose oldest record, or last successful flush, has passed one flush interval
-plus the wedge window (four intervals clamped to 30 seconds and 2 minutes)
-reads wedged. The interval on top is the record's own cadence, so a record
-inside it never convicts and a long cadence cannot hide a stuck writer for
-longer than that. The arrival stamp comes from the producer when the queue was
-empty as well as from the writer, so a writer that dies before its first pickup
-still ages the record, and with no flush since boot the first accepted record
-ages the last-success arm too, so a zero flush stamp is not a blind spot. A
-failed flush stays sticky. `/healthz` stays the
-liveness contract; readiness is the stronger answer a scheduler needs.
+`internal/storage/health.go` is the one owner of that loss accounting and of
+the pipeline's liveness. Every discard is counted under exactly one cause
+(`overflow`, `after_close`, `panic`, `flush_failed`); `Dropped()` sums them
+for the dashboard counter, and the exposition renders each cause so alerting
+can separate overload from shutdown, a panic and a failing database.
+
+The same owner publishes the oldest queued record's arrival and stamps every
+flush attempt, so `/readyz` can tell a stalled writer from a merely idle one:
+a non-empty queue whose oldest record, or last successful flush, has passed
+one flush interval plus the wedge window (four intervals clamped to 30 seconds
+and 2 minutes) reads wedged. The interval on top is the record's own cadence,
+so a record inside it never convicts and a long cadence cannot hide a stuck
+writer for longer than that.
+
+The arrival stamp comes from the producer when the queue was empty as well as
+from the writer, so a writer that dies before its first pickup still ages the
+record, and with no flush since boot the first accepted record ages the
+last-success arm too, so a zero flush stamp is not a blind spot. A failed
+flush stays sticky. `/healthz` stays the liveness contract; readiness is the
+stronger answer a scheduler needs.
+
 `tests/_go/internal/storage/health.go` pins the cause split, the wedge/ready
 transition and the disabled-store answer, and
-`tests/_go/internal/metrics/prometheus_extra.go` pins that the storage block is
-rendered per scrape rather than from the ring-revision memo.
+`tests/_go/internal/metrics/prometheus_extra.go` pins that the storage block
+is rendered per scrape rather than from the ring-revision memo.
 
 The one writer owns transactions and incremental totals. Its insertion plan
 binds arbitrary values, using exact zero/empty literals only for absent scalar
 work, and preserves existing conflict/rollback semantics. Record columns,
 migration, scanner and request-parameter presence bits must evolve together;
-explicit zero/false is not absence. Boot migrations also own one-shot data
-repairs for shapes current writers cannot produce: the empty-string
-`attempts`/`tool_names` document becomes the canonical `null`, and the pre-0.3.34
-start-anchored `ttft_ms` (`ttft_ms > 0` with `final_attempt_at = 0`) is zeroed
-because its request-start anchor was never stored and cannot be re-derived; a
-snapshot merge applies the same TTFT canonicalization so a pre-repair backup
-cannot reintroduce the shape. Each repair is guarded by a `meta` marker and
-re-armed when that marker is absent (a restored backup predating it). A repair
-that rewrites rows fires the projection update trigger, advancing the epoch and
-invalidating the persisted totals document so boot rebuilds it. Provider-alias
-repair applies every pair in one transaction, in source-key order, so a later
-trigger or constraint failure rolls earlier label rewrites back instead of
-leaving history half-merged.
+explicit zero/false is not absence.
+
+Boot migrations also own one-shot data repairs for shapes current writers
+cannot produce.
+
+The empty-string `attempts`/`tool_names` document becomes the canonical
+`null`. The pre-0.3.34 start-anchored `ttft_ms` (`ttft_ms > 0` with
+`final_attempt_at = 0`) is zeroed because its request-start anchor was never
+stored and cannot be re-derived; a snapshot merge applies the same TTFT
+canonicalization so a pre-repair backup cannot reintroduce the shape.
+
+Each repair is guarded by a `meta` marker and re-armed when that marker is
+absent (a restored backup predating it). A repair that rewrites rows fires the
+projection update trigger, advancing the epoch and invalidating the persisted
+totals document so boot rebuilds it. Provider-alias repair applies every pair
+in one transaction, in source-key order, so a later trigger or constraint
+failure rolls earlier label rewrites back instead of leaving history
+half-merged.
 
 The durable log order is `(started_at, id)`, owned by the sole request-log
 index `idx_requests_log`. The web log page pushes exact provider, client, key
 hash, conversation id and canonical numeric status predicates into SQL; a
-filtered page rechecks them while scanning the ordered index. Model filters
-remain wholly Go-owned: canonical matching trims every stored spelling and
-applies the configured rules, so raw SQL equality would silently drop a padded
-or rewritten stored model that still matches. Status classes, tools, errors
-and time buckets also stay in Go. Within one dimension, repeated filters are
-OR alternatives and are pushed as one SQL `OR` group when that dimension is
-exact; a group that cannot be pushed stays Go-owned so the SQL candidate set
-never narrows below the group's union. The ordered export and purge use the
-separate `PurgeFilter` surface (provider, model, client, conversation, error
-type, status code, `has_error`, `debug`, and time bounds; no key hash), whose
-equality-only preview count or purge scans the table. Results, order and
-pagination stay exact without six per-dimension composite indexes; a time
-bound becomes an index range. An upgrade that actually finds and drops one of
-those superseded indexes repacks the database once with `VACUUM`, because
-SQLite otherwise only moves the freed index pages to its freelist. Fresh and
-already-migrated databases skip it, and a failed reclaim logs a warning
-without failing startup: every row stays intact and manual reclamation remains
-possible. A successful reclaim resets the projection witness, because `VACUUM`
-may renumber implicit rowids. The page handler classifies active filters:
-when every predicate is SQL-exact it requests exactly the remaining rows, and
-Go-only predicates grow geometrically from the page size to the 512-row batch
-cap within the 4,096-row scan budget. Both preserve the exclusive
-`(started_at, id)` cursor and `more`. The candidate statement selects only the
-columns the residual groups read, and the derived error signature and tool
-labels are filled only when the plan declares them. Current filtered and
-unfiltered page costs are published under
+filtered page rechecks them while scanning the ordered index.
+
+Model filters remain wholly Go-owned: canonical matching trims every stored
+spelling and applies the configured rules, so raw SQL equality would silently
+drop a padded or rewritten stored model that still matches. Status classes,
+tools, errors and time buckets also stay in Go.
+
+Within one dimension, repeated filters are OR alternatives and are pushed as
+one SQL `OR` group when that dimension is exact; a group that cannot be pushed
+stays Go-owned so the SQL candidate set never narrows below the group's union.
+
+The ordered export and purge use the separate `PurgeFilter` surface (provider,
+model, client, conversation, error type, status code, `has_error`, `debug`,
+and time bounds; no key hash), whose equality-only preview count or purge
+scans the table. Results, order and pagination stay exact without six
+per-dimension composite indexes; a time bound becomes an index range.
+
+An upgrade that actually finds and drops one of those superseded indexes
+repacks the database once with `VACUUM`, because SQLite otherwise only moves
+the freed index pages to its freelist. Fresh and already-migrated databases
+skip it, and a failed reclaim logs a warning without failing startup: every
+row stays intact and manual reclamation remains possible. A successful reclaim
+resets the projection witness, because `VACUUM` may renumber implicit rowids.
+
+The page handler classifies active filters: when every predicate is SQL-exact
+it requests exactly the remaining rows, and Go-only predicates grow
+geometrically from the page size to the 512-row batch cap within the 4,096-row
+scan budget. Both preserve the exclusive `(started_at, id)` cursor and `more`.
+The candidate statement selects only the columns the residual groups read, and
+the derived error signature and tool labels are filled only when the plan
+declares them. Current filtered and unfiltered page costs are published under
 [implementation benchmarks](performance.md#implementation-benchmarks)
 (`BenchmarkHandleLogPage`).
 
 `Store.Clear` serializes administrative purges, captures an accepted-record
-boundary and publishes one command. The writer flushes earlier records, deletes
-matching records/sidecars and rebuilds totals transactionally, then removes only
-matching ring rows through that boundary. New completions survive. Failed SQL
-does not mutate the ring; postcommit memory effects finish even after caller
-cancellation. The atomic command check must not acquire the producer lock for
-every ordinary consumed record. A non-empty purge, and a drained expired-capture
-sweep, checkpoint-truncates the WAL after the commit: `secure_delete` cleans the
-pages SQLite writes, and truncation removes the pre-delete frames that would
-otherwise keep the old page images in the `-wal` sidecar. The checkpoint is
-bounded and best effort; a busy reader raises a pending flag that the writer's
-near-term tick retries, and `Store.Close` makes the final attempt after the read
-pool is closed, without failing the committed deletion.
+boundary and publishes one command. The writer flushes earlier records,
+deletes matching records/sidecars and rebuilds totals transactionally, then
+removes only matching ring rows through that boundary. New completions
+survive.
+
+Failed SQL does not mutate the ring; postcommit memory effects finish even
+after caller cancellation. The atomic command check must not acquire the
+producer lock for every ordinary consumed record.
+
+A non-empty purge, and a drained expired-capture sweep, checkpoint-truncates
+the WAL after the commit: `secure_delete` cleans the pages SQLite writes, and
+truncation removes the pre-delete frames that would otherwise keep the old
+page images in the `-wal` sidecar.
+
+The checkpoint is bounded and best effort; a busy reader raises a pending flag
+that the writer's near-term tick retries, and `Store.Close` makes the final
+attempt after the read pool is closed, without failing the committed deletion.
 
 The restricted SQL console (`GET /metrics/query` and the MCP `query` tool) is
 gated in `validateQuery`: one `SELECT`, no `;`, no
 `ATTACH`/`DETACH`/`PRAGMA`/`LOAD_EXTENSION` word, and no
-`sqlite_dbpage`/`dbstat`/`pragma_*`/`readfile`/`writefile`. The scan is lexical
-over the raw text, string literals included, and the read pool's `mode=ro` pins
-only the main database; SQLite still opens an `ATTACH`ed file writable.
+`sqlite_dbpage`/`dbstat`/`pragma_*`/`readfile`/`writefile`.
+
+The scan is lexical over the raw text, string literals included, and the read
+pool's `mode=ro` pins only the main database; SQLite still opens an `ATTACH`ed
+file writable.
+
 Follow-up gap: the pinned modernc.org/sqlite v1.61.0 exposes an authorizer per
 physical connection (`AuthorizerRegisterer`, installed through
 `RegisterConnectionHook`) and a `_defensive=1` DSN mode, and this build wires
@@ -360,31 +418,36 @@ in neither. An authorizer policy at read-pool open plus defensive mode would
 turn the keyword list into defense in depth instead of the only owner.
 
 Operator backup and restore stage database-sized work as private files.
-`backup.EncodeFile` streams the packed snapshot, encoded archive and self-check
-in bounded chunks. On restore, the handler streams the capped upload into one
-private file, and `backup.DecodeFile` shares the byte decoder's header, zstd,
-SHA-256 and member-framing owner while writing the database member into a
-unique staging directory on the live database's volume. Config bytes remain
-buffered; the database member does not. Inspect and overlap integrity-check or
-attach that file in place, replace streams it into the pending snapshot and
-atomically renames it, and merge attaches it to the held writer transaction.
-Decode and validation finish before an apply path takes the writer connection.
+`backup.EncodeFile` streams the packed snapshot, encoded archive and
+self-check in bounded chunks. On restore, the handler streams the capped
+upload into one private file, and `backup.DecodeFile` shares the byte
+decoder's header, zstd, SHA-256 and member-framing owner while writing the
+database member into a unique staging directory on the live database's volume.
+Config bytes remain buffered; the database member does not.
+
+Inspect and overlap integrity-check or attach that file in place, replace
+streams it into the pending snapshot and atomically renames it, and merge
+attaches it to the held writer transaction. Decode and validation finish
+before an apply path takes the writer connection.
+
 The upload and decoded database files are removed on every handler path,
-including over-cap, invalid archive, apply failure and client disconnect. A
-boot-time sweep reclaims only known staging names older than a safety age,
+including over-cap, invalid archive, apply failure and client disconnect.
+
+A boot-time sweep reclaims only known staging names older than a safety age,
 examining the directory in bounded batches up to a per-boot entry budget; the
 live database, pending snapshot, rollback set, state marker and quarantined
-admission evidence are outside that registry. A rejected or interrupted pending
-file is preserved under a unique `.incoming.invalid-<token>` or
+admission evidence are outside that registry. A rejected or interrupted
+pending file is preserved under a unique `.incoming.invalid-<token>` or
 `.incoming.invalid-interrupted-<token>` name with its sidecars, so a later
-rejection cannot overwrite earlier evidence. A pre-existing pending snapshot is
-hard-linked aside before the successor replaces the slot: the restore drops that
-link again on its own rollback, and a boot that rejects the successor renames
-the link back onto the slot and admits it once, so the queue entry is never
-orphaned into the sweep. The attached inspect/merge and
-decoded source use the shared `SQLiteURI` with `mode=ro`, so a snapshot path
-with URI metacharacters stays literal and writes through the attached schema
-fail.
+rejection cannot overwrite earlier evidence.
+
+A pre-existing pending snapshot is hard-linked aside before the successor
+replaces the slot: the restore drops that link again on its own rollback, and
+a boot that rejects the successor renames the link back onto the slot and
+admits it once, so the queue entry is never orphaned into the sweep. The
+attached inspect/merge and decoded source use the shared `SQLiteURI` with
+`mode=ro`, so a snapshot path with URI metacharacters stays literal and writes
+through the attached schema fail.
 
 Relevant coverage: storage writer/purge/request-parameter tests,
 `BenchmarkStorageWriter` and `BenchmarkProxyDurableContention`. The latter
@@ -402,69 +465,82 @@ One durable analytical projection retains compact contributions, request IDs,
 interned dimensions and immutable sorted metric row orders. It is not a second
 database or a per-view history cache. Startup preload and incremental catch-up
 share its builder. SQLite transactions capture rowid high-water/destructive
-epoch/schema authority; destructive changes rebuild. Failed or canceled reads
-never publish stale rows or advance authority. Folds check the caller's context
-once per 4,096-row block, and the ring visitors use the same cadence, so an
-abandoned request stops without publishing a partial result. The `has429`
-flag (and any future vocabulary-derived classification) comes from the
-installed vocabulary, not from a stored column, so the projection stamps the
-metrics classifier revision and forces a full reclassification rebuild when a
-reload changes it. The chart and explorer memos include the same revision in
-their key, so neither a stale projection nor a pre-reload memo can answer a
-post-reload request.
+epoch/schema authority; destructive changes rebuild.
+
+Failed or canceled reads never publish stale rows or advance authority. Folds
+check the caller's context once per 4,096-row block, and the ring visitors use
+the same cadence, so an abandoned request stops without publishing a partial
+result.
+
+The `has429` flag (and any future vocabulary-derived classification) comes
+from the installed vocabulary, not from a stored column, so the projection
+stamps the metrics classifier revision and forces a full reclassification
+rebuild when a reload changes it. The chart and explorer memos include the
+same revision in their key, so neither a stale projection nor a pre-reload
+memo can answer a post-reload request.
 
 Materialization runs off the projection lock with one single-flight builder;
 concurrent readers keep serving the previous complete snapshot and wait for
 that builder instead of repeating its scan. The builder's token is released by
 a defer, so a panic in the scan, decode or interning step frees the waiters
-instead of wedging them until restart. A destructive change builds a
-complete replacement off-lock and swaps it under a short write lock. The
-durable since-inception totals are one meta row written in the same
+instead of wedging them until restart. A destructive change builds a complete
+replacement off-lock and swaps it under a short write lock.
+
+The durable since-inception totals are one meta row written in the same
 transaction as every insert, purge and merge on the held writer connection;
 its recorded projection epoch is the mutation witness. A merge writes its
 request rows, debug sidecars and totals document in one transaction, so a
 failed totals write rolls the whole merge back instead of advancing the epoch
 over partial rows. An unsupported external writer that advances the epoch
 leaves the pair mismatched, so the next boot rebuilds rather than trusting it.
-A boot with a changed epoch rebuilds once from the rows
-instead of trusting a stale cache, and a full purge has no surviving rows to
-scan. Restart readiness therefore no longer scales with the sum of a totals
-scan plus a separate preload scan.
+
+A boot with a changed epoch rebuilds once from the rows instead of trusting a
+stale cache, and a full purge has no surviving rows to scan. Restart readiness
+therefore no longer scales with the sum of a totals scan plus a separate
+preload scan.
 
 Chart and explorer each retain one immutable last-result slot. Keys include
 validated view/scope, canonical model rules, finalized/database revisions and,
-for explorer, pending revisions. Clock-aligned geometry also gates chart reuse.
+for explorer, pending revisions. Clock-aligned geometry also gates chart
+reuse.
+
 One in-flight fold per memo is shared by concurrent same-key callers: a
-different key never waits, and a waiter that finds no published entry after the
-leader ends recomputes as the next leader instead of inheriting its error. The
-stability recheck hands over the fold's compiled rules identity instead of
-re-reading the config and re-marshalling up to 64 rules. The current 64-rule recheck cost is
-published under [implementation benchmarks](performance.md#implementation-benchmarks)
+different key never waits, and a waiter that finds no published entry after
+the leader ends recomputes as the next leader instead of inheriting its error.
+The stability recheck hands over the fold's compiled rules identity instead of
+re-reading the config and re-marshalling up to 64 rules. The current 64-rule
+recheck cost is published under [implementation
+benchmarks](performance.md#implementation-benchmarks)
 (`BenchmarkAggregateUnchanged`).
+
 The bootstrap KPI fold retains one exact totals slot keyed by the ring's
 finalized revision and the store's durable accounting revision; live counters
-are filled at serve time and the ring snapshot itself is never retained.
-The unwritten set stays ring-derived. A record can be missing from the durable
+are filled at serve time and the ring snapshot itself is never retained. The
+unwritten set stays ring-derived. A record can be missing from the durable
 store while never having been queued: an enqueue that overflowed the writer
 channel and a batch whose insert failed are both dropped by design and counted
 by cause in the storage health owner; `Dropped()` sums the causes for the
-dashboard counter. The writer queue is therefore not a superset of "possibly
-not yet durable", and only the written-id set can say which ring rows are
-already durable, so the O(ring) probe under `aggMu` is the exact dedupe
-boundary. Current cold-fold costs at the default ring and the one-million-record
-ceiling are published under
-[implementation benchmarks](performance.md#implementation-benchmarks)
+dashboard counter.
+
+The writer queue is therefore not a superset of "possibly not yet durable",
+and only the written-id set can say which ring rows are already durable, so
+the O(ring) probe under `aggMu` is the exact dedupe boundary. Current
+cold-fold costs at the default ring and the one-million-record ceiling are
+published under [implementation
+benchmarks](performance.md#implementation-benchmarks)
 (`BenchmarkKPI/records_1000000/miss`); the ceiling is a non-default
-`history_size`, and a correct-but-slow cold fold is the accepted cost of
-never double counting.
+`history_size`, and a correct-but-slow cold fold is the accepted cost of never
+double counting.
+
 SQLite data_version is read on one retained connection; unsupported external
 writers are not made safe merely by cache invalidation. Log pages push exact
 provider/client/key/conversation/status equalities into SQLite before
-decoding; model filters are always Go-owned. The Go scope matcher remains
-authoritative for canonical models, status classes, errors, tools, time buckets
-and live-only classes. Ad-hoc SELECT results are encoded once during the bounded
-scan and the endpoint writes that array directly; row/byte cap failure still
-precedes every response byte.
+decoding; model filters are always Go-owned.
+
+The Go scope matcher remains authoritative for canonical models, status
+classes, errors, tools, time buckets and live-only classes. Ad-hoc SELECT
+results are encoded once during the bounded scan and the endpoint writes that
+array directly; row/byte cap failure still precedes every response byte.
 
 Explorer uses dictionary IDs, scoped predicates and bitsets. The projection
 also owns two derived tables keyed by its immutable build: the interned
@@ -472,66 +548,81 @@ conversation topology (identities, parent declarations, resolved issues and
 public-ID groups) and the canonical model IDs/dictionary for the compiled
 model-rule revision. Appends extend both by the new rows; destructive
 replacement publishes fresh tables, and a rules change rebuilds only the model
-table. Requests mark their own rail/gallery flags on the shared topology, resolve
+table.
+
+Requests mark their own rail/gallery flags on the shared topology, resolve
 lineage metadata only for the returned conversation cards, and overlay
 ring/pending declarations without mutating the published build. Projected
-metric samples stay in shared sorted orders: single-valued dimensions retain one
-group id per row, while tool/error membership spans preserve multi-valued
-occurrences. An error's identity is `type|code|msg`; a backslash or the `|`
-separator inside a part is escaped, so arbitrary error text can never merge two
-distinct errors into one dictionary id. Ordinary text keeps the historic
-spelling, which preserves saved error-filter ids. Exact group accumulators are capped at
-`explorerGroupBudget` (8192) distinct values per fold. Values beyond the budget
-fold into one synthetic `other` card carrying aggregate count, cost, token,
-tool and health fields; no per-value accumulator and no per-card request-ID
-set is allocated for either an exact card or them. An error card's affected
-count is a counter plus the previous request id: one row's visits are
-contiguous, so that guard dedupes exactly what the old ID set did while staying
-bounded regardless of history. The card carries an explicit `synthetic` wire marker and
-no filter key, so a real value sharing its display label keeps its own exact,
-selectable card. The card ranking remains exact among tracked values, with
-`other` competing by its aggregate count, and overflow memberships map to the
-reserved other slot so their percentile samples still select correctly. Rows
-store the group's 16-bit membership slot, not its dimension-wide dictionary id,
-so the per-row table is two bytes and the selected-card lookup is a bounded
-probe instead of a max-id-sized array; the current 100,000-row provider fold
-cost is published under
-[implementation benchmarks](performance.md#implementation-benchmarks)
-(`BenchmarkAggregateFold/explorer`). Rail
-distinct-value counts, scope totals and conversation summaries remain
-whole-history values and are not derived from the truncated group set.
-Selected groups use the same exact rank reader as chart buckets,
-and only top cards derive percentile payloads. Pending dedupe retains only
-relevant pending IDs, not another history-sized seen set. Chart's rank reader
-also produces the occurrence-weighted avg/min/max in the same traversal, so a
-metric order is no longer walked separately for stats. The all-history order is
-a compacted immutable base plus a bounded value-sorted pending delta (16,384
-samples): a catch-up append folds only its new samples, so it stays
-O(delta log delta) regardless of history, and reaching the bound arms one
-background fold that runs off the request and publishes the merged base under a
-one-assignment write. Readers keep the current base and pending until then, so
-an interrupted fold only leaves the published order in place. The fold owns its
-armed flag behind a deferred release: an unwind there (recovered and logged)
-clears the arm with the pending delta intact, so the next append folds again
-instead of the flag staying set and pending keeping the whole delta for the
-process lifetime. An append that
-crosses the bound at one million rows is published under
+metric samples stay in shared sorted orders: single-valued dimensions retain
+one group id per row, while tool/error membership spans preserve multi-valued
+occurrences.
+
+An error's identity is `type|code|msg`; a backslash or the `|` separator
+inside a part is escaped, so arbitrary error text can never merge two distinct
+errors into one dictionary id. Ordinary text keeps the historic spelling,
+which preserves saved error-filter ids.
+
+Exact group accumulators are capped at `explorerGroupBudget` (8192) distinct
+values per fold. Values beyond the budget fold into one synthetic `other` card
+carrying aggregate count, cost, token, tool and health fields; no per-value
+accumulator and no per-card request-ID set is allocated for either an exact
+card or them. An error card's affected count is a counter plus the previous
+request id: one row's visits are contiguous, so that guard dedupes exactly
+what the old ID set did while staying bounded regardless of history.
+
+The card carries an explicit `synthetic` wire marker and no filter key, so a
+real value sharing its display label keeps its own exact, selectable card. The
+card ranking remains exact among tracked values, with `other` competing by its
+aggregate count, and overflow memberships map to the reserved other slot so
+their percentile samples still select correctly.
+
+Rows store the group's 16-bit membership slot, not its dimension-wide
+dictionary id, so the per-row table is two bytes and the selected-card lookup
+is a bounded probe instead of a max-id-sized array; the current 100,000-row
+provider fold cost is published under [implementation
+benchmarks](performance.md#implementation-benchmarks)
+(`BenchmarkAggregateFold/explorer`). Rail distinct-value counts, scope totals
+and conversation summaries remain whole-history values and are not derived
+from the truncated group set.
+
+Selected groups use the same exact rank reader as chart buckets, and only top
+cards derive percentile payloads. Pending dedupe retains only relevant pending
+IDs, not another history-sized seen set. Chart's rank reader also produces the
+occurrence-weighted avg/min/max in the same traversal, so a metric order is no
+longer walked separately for stats.
+
+The all-history order is a compacted immutable base plus a bounded
+value-sorted pending delta (16,384 samples): a catch-up append folds only its
+new samples, so it stays O(delta log delta) regardless of history, and
+reaching the bound arms one background fold that runs off the request and
+publishes the merged base under a one-assignment write. Readers keep the
+current base and pending until then, so an interrupted fold only leaves the
+published order in place.
+
+The fold owns its armed flag behind a deferred release: an unwind there
+(recovered and logged) clears the arm with the pending delta intact, so the
+next append folds again instead of the flag staying set and pending keeping
+the whole delta for the process lifetime.
+
+An append that crosses the bound at one million rows is published under
 [implementation benchmarks](performance.md#implementation-benchmarks), now off
-the request (`BenchmarkProjectionMetricAppend`). Chart and explorer
-walk the two runs through one merge iterator, so a fresh view allocates no
+the request (`BenchmarkProjectionMetricAppend`). Chart and explorer walk the
+two runs through one merge iterator, so a fresh view allocates no
 history-sized copy; a materialized merge stays cached per published snapshot
 only for consumers that need a slice. A full rebuild replaces the base, clears
-pending and discards a fold that has not published yet. A retained
-last-65,536-row order serves bounded chart windows whose earliest in-window
-durable row is inside that tail. It uses the same compacted base plus bounded
-pending delta design and its own per-snapshot view holder, so a sub-threshold
-catch-up merges only its new batch instead of copying the tail; a rebuild of
-the newest 65,536 rows replaces its base, clears the pending delta and releases
-samples that fell out of the tail. Older or unscoped windows fall back to the
-all-history order, so the fast path never changes rank or stat results. Chart
-membership is indexed from the first row a bounded window accepts and sized
-only to that window's remaining span. The current 15-minute view over 100,000
-rows is published under
+pending and discards a fold that has not published yet.
+
+A retained last-65,536-row order serves bounded chart windows whose earliest
+in-window durable row is inside that tail. It uses the same compacted base
+plus bounded pending delta design and its own per-snapshot view holder, so a
+sub-threshold catch-up merges only its new batch instead of copying the tail;
+a rebuild of the newest 65,536 rows replaces its base, clears the pending
+delta and releases samples that fell out of the tail.
+
+Older or unscoped windows fall back to the all-history order, so the fast path
+never changes rank or stat results. Chart membership is indexed from the first
+row a bounded window accepts and sized only to that window's remaining span.
+The current 15-minute view over 100,000 rows is published under
 [implementation benchmarks](performance.md#implementation-benchmarks); the All
 path keeps its historical allocation (`BenchmarkAggregateFold/chart_window`).
 
@@ -539,24 +630,29 @@ Both consumers share R7 rank/interpolation and the minimum-sample gate. Period
 speed/TTFT percentiles use period samples, never means of bucket percentiles.
 Prometheus and the stress harness instead share `metrics.Percentile`'s
 nearest-rank contract; do not conflate these two intentionally distinct APIs.
-Checked counts/sums/ratios prevent wrapped tokens or non-finite JSON. Cost stays
-USD in storage/API; missing/unreportable data must not become fabricated prices.
+Checked counts/sums/ratios prevent wrapped tokens or non-finite JSON. Cost
+stays USD in storage/API; missing/unreportable data must not become fabricated
+prices.
 
 `Record.IsError` and `HasRateLimit` deliberately differ. Final/retried 429
-counts once per affected request, not via the broad pacing flag. A real failure
-and 429 may overlap. A 429 whose status line a committed keepalive 200 hid is
-retained as one in-band attempt entry, so the rate-limit count still sees the
-upstream status while the same request counts as an error through its final
-`error_type`; that entry is not a retry and adds no second error entry.
-`metrics.IsNonRetryableQuotaErr` is the fixed durable
-quota/billing classification vocabulary: the retry ladder, storm evidence and
-in-band precedence all consult it, so the account condition never counts as a
-rate limit. A plain 499 (the local client's own abort) is a flow
-event; a 499 carrying a structured error observed the upstream's in-band
-failure before the client left and counts like its 200 twin. The shared
-first-membership gate keeps duplicate tool/error
-occurrences from duplicating these health counts without changing event/sample
-multiplicity. Tests cover raw/projected/durable/ring/pending parity.
+counts once per affected request, not via the broad pacing flag. A real
+failure and 429 may overlap.
+
+A 429 whose status line a committed keepalive 200 hid is retained as one
+in-band attempt entry, so the rate-limit count still sees the upstream status
+while the same request counts as an error through its final `error_type`; that
+entry is not a retry and adds no second error entry.
+
+`metrics.IsNonRetryableQuotaErr` is the fixed durable quota/billing
+classification vocabulary: the retry ladder, storm evidence and in-band
+precedence all consult it, so the account condition never counts as a rate
+limit. A plain 499 (the local client's own abort) is a flow event; a 499
+carrying a structured error observed the upstream's in-band failure before the
+client left and counts like its 200 twin.
+
+The shared first-membership gate keeps duplicate tool/error occurrences from
+duplicating these health counts without changing event/sample multiplicity.
+Tests cover raw/projected/durable/ring/pending parity.
 
 `internal/metrics/errorclass.go` owns the canonical classifier: one
 `Classify(facts)` answers "what is this", and the retry ladder, the storm
@@ -564,254 +660,333 @@ observer, the Cursor transport, the health predicates, the client-facing class
 and the published SQL all read it. `metrics.OutcomeIsError` (composed by
 `Record.IsError`) owns the health arms, and the MCP describe document and the
 durable purge filter render `metrics.IsErrorSQL`/`HasRateLimitSQL` per call
-instead of carrying their own predicates, so an operator extension applied by a
-reload reaches the published SQL too. Classification reads the status AND the
-provider's own type/code, never message text. The two questions are separate
-and answer differently in the two documented families: a 429 whose body names
-a durable quota/billing condition is ClassQuota for the retry ladder and
-quota_pause_mode while the health surface counts the 429 itself as flow
-control (not an error), and a rate-limit class on any non-429 status is
-counted in the rate-limit series while the health surface also counts the
-failed request as an error. The health predicate reads the status and the
-error type only, so a spelling carried solely in `error_code` (a shape the
-envelope parser does not produce - it pairs every code with a type) can move
-the class but not the health answer. The operator's
+instead of carrying their own predicates, so an operator extension applied by
+a reload reaches the published SQL too.
+
+Classification reads the status AND the provider's own type/code, never
+message text.
+
+The two questions are separate and answer differently in the two documented
+families: a 429 whose body names a durable quota/billing condition is
+ClassQuota for the retry ladder and quota_pause_mode while the health surface
+counts the 429 itself as flow control (not an error), and a rate-limit class
+on any non-429 status is counted in the rate-limit series while the health
+surface also counts the failed request as an error.
+
+The health predicate reads the status and the error type only, so a spelling
+carried solely in `error_code` (a shape the envelope parser does not produce -
+it pairs every code with a type) can move the class but not the health answer.
+
+The operator's
 `rate_limit_error_classes`/`quota_error_classes`/`retryable_error_classes`
 extensions are installed as one value (`metrics.InstallClassExtensions`,
-installed by `proxy.New`/`proxy.Reload`) and every consumer reads the effective
-vocabulary, including the browser mirror, which receives it in the bootstrap
-payload when extensions are installed. Extensions add only: config validation
-rejects a spelling that names a built-in of another class; the one documented
-exception is `retryable_error_classes` naming a built-in client-fault spelling,
-the explicit override for a gateway that mislabels transient failures. With
-`client_error_class: header` the relay's outer writer stamps
+installed by `proxy.New`/`proxy.Reload`) and every consumer reads the
+effective vocabulary, including the browser mirror, which receives it in the
+bootstrap payload when extensions are installed.
+
+Extensions add only: config validation rejects a spelling that names a
+built-in of another class; the one documented exception is
+`retryable_error_classes` naming a built-in client-fault spelling, the
+explicit override for a gateway that mislabels transient failures.
+
+With `client_error_class: header` the relay's outer writer stamps
 `X-Proxy-Error-Class` and a class-derived `X-Should-Retry` on every error
 status before the line commits (`suppress_client_retries` still forces false);
 relayed bodies stay verbatim.
 
 See the files under `tests/_go/internal/web/`: `aggregate_projection.go`,
-`aggregate_dimensions.go`, `aggregate_percentiles.go`, `aggregate_explorer_fold.go`,
-`aggregate_rate_limit.go` and `conversation_lineage.go`.
+`aggregate_dimensions.go`, `aggregate_percentiles.go`,
+`aggregate_explorer_fold.go`, `aggregate_rate_limit.go` and
+`conversation_lineage.go`.
 
 ## Canonical observer meaning and conversation lineage
 
 Go's compiled model-rule executor owns canonical grouping. Observer payloads
 carry exact raw-to-canonical names and a rules-content revision; only full
-authoritative snapshots install a new revision. Deltas, archive and Debug names
-merge under that revision, with recapture on conflicts. Browser dictionaries
-prune to loaded rows/selector needs. RE2 patterns do not execute in JavaScript.
+authoritative snapshots install a new revision. Deltas, archive and Debug
+names merge under that revision, with recapture on conflicts. Browser
+dictionaries prune to loaded rows/selector needs. RE2 patterns do not execute
+in JavaScript.
+
 The installed observer provider is an immutable atomic holder, so SSE
 record/end serialization never takes the ring lock. Canonical names are
 memoized across observer calls under the compiled rules revision, and each
 known-name vocabulary caches its sorted view under a set revision. Both caches
 are bounded and invalidate on content change, so bootstrap polls do not re-run
-the rules or re-sort thousands of names. The single-name memo owns the whole
-payload under one mutex keyed by the rules revision, so a repeat at event rate
-costs one lock and one lookup. Current event and vocabulary memo costs at the
-64-rule maximum are published under
+the rules or re-sort thousands of names.
+
+The single-name memo owns the whole payload under one mutex keyed by the rules
+revision, so a repeat at event rate costs one lock and one lookup. Current
+event and vocabulary memo costs at the 64-rule maximum are published under
 [implementation benchmarks](performance.md#implementation-benchmarks)
-(`BenchmarkObserveModelNameEvent`, `BenchmarkObserveModelNames4096`). The canon
-the observer reads is memoized per live config pointer, so consecutive events
-hand the compiled-rule cache the same backing array and it skips the whole-set
-compare; the wired shape's current cost is published there too
+(`BenchmarkObserveModelNameEvent`, `BenchmarkObserveModelNames4096`). The
+canon the observer reads is memoized per live config pointer, so consecutive
+events hand the compiled-rule cache the same backing array and it skips the
+whole-set compare; the wired shape's current cost is published there too
 (`BenchmarkObserveModelNameEventWired`).
 
-Pinned names are derived from the live holds, debug sessions and limit policies,
-never accumulated, so a removed document releases its scope. The derivation
-reads and applies the whole roster under the owning document locks: every
-document commit happens under the same lock and re-derives right after, so a
-stale derivation can never overwrite a newer roster and unpin a live scope.
+Pinned names are derived from the live holds, debug sessions and limit
+policies, never accumulated, so a removed document releases its scope. The
+derivation reads and applies the whole roster under the owning document locks:
+every document commit happens under the same lock and re-derives right after,
+so a stale derivation can never overwrite a newer roster and unpin a live
+scope.
 
 Observer records carry server-local `time_bucket`; browser-local dates are
 presentation only. Raw names remain raw for exact export/delete semantics.
 
 The explorer's one iterative lineage resolver validates declarations by
-client/key/conversation before applying rail/gallery scopes. The resolved graph
-is a projection-owned table, interned by dimension slot; a request only marks
-flags and overlays unprojected ring/pending declarations. Parent-only
-dictionary names do not become observed memberships. Conflicts, cycles and
-mixed namespaces remain unknown; missing parents are not invented roots.
-Summary counts follow full-filter rail scope; conversation cards follow the
-gallery cross-filter. Payloads retain small resolved fields, not a per-request
-graph. Parent pivots remain exact namespace-qualified leaves.
+client/key/conversation before applying rail/gallery scopes. The resolved
+graph is a projection-owned table, interned by dimension slot; a request only
+marks flags and overlays unprojected ring/pending declarations. Parent-only
+dictionary names do not become observed memberships.
+
+Conflicts, cycles and mixed namespaces remain unknown; missing parents are not
+invented roots. Summary counts follow full-filter rail scope; conversation
+cards follow the gallery cross-filter. Payloads retain small resolved fields,
+not a per-request graph. Parent pivots remain exact namespace-qualified
+leaves.
 
 ## Operator plane clients
 
-The HTTP client in [internal/mcp](../internal/mcp) owns the operator credential,
-request building, the bounded response read and the `.error` extraction that
-reads the flat error body regardless of the declared Content-Type. The credential
-is redacted from both the transport error and the failure body. Redirects are
-refused rather than followed: `net/http`
-strips `Authorization` only when the hostname changes, so a same-host
-different-port `307` would replay the credential and the request body. Its route
-paths are one closed set beside it, so no tool can name a path outside the
-operator plane: nothing reaches the transparent inference catch-all, and no
-restore-adjacent route is exposed. The explorer's `f=dim:id` / `s=` grammar is
-owned once and shared by every scoped tool, and the tools never loop: a
-non-advancing cursor is reported as exhaustion because the aggregate scan budget
-is bounded per call. An empty page is deliberately not exhaustion, because the
-proxy advances its cursor on every row it scanned, including rows the scope
-excluded, so an empty page with an advanced cursor is a page that must be
-continued.
+The HTTP client in [internal/mcp](../internal/mcp) owns the operator
+credential, request building, the bounded response read and the `.error`
+extraction that reads the flat error body regardless of the declared
+Content-Type. The credential is redacted from both the transport error and the
+failure body.
+
+Redirects are refused rather than followed: `net/http` strips `Authorization`
+only when the hostname changes, so a same-host different-port `307` would
+replay the credential and the request body.
+
+Its route paths are one closed set beside it, so no tool can name a path
+outside the operator plane: nothing reaches the transparent inference
+catch-all, and no restore-adjacent route is exposed.
+
+Three registry tools are local-only: `docs_list`, `docs_search` and `docs_read`
+answer from the `internal/docs` index instead of constructing an HTTP request.
+They share the generated page model with the published site and never touch
+the operator credential.
+
+The explorer's `f=dim:id` / `s=` grammar is owned once and shared by every
+scoped tool, and the tools never loop: a non-advancing cursor is reported as
+exhaustion because the aggregate scan budget is bounded per call. An empty
+page is deliberately not exhaustion, because the proxy advances its cursor on
+every row it scanned, including rows the scope excluded, so an empty page with
+an advanced cursor is a page that must be continued.
 
 The same client backs the whole tool registry. The proxy's own `/mcp` endpoint
 injects a transport that dispatches each synthesized request straight to the
-proxy's gated handler,
-with the caller's Bearer attached so the gate re-validates it, and a named
-non-routable origin (`http://millivolt.internal`) that is never dialed and
-never derived from the request Host. The endpoint is stateless and
-Bearer-only: every POST gets a temporary server session bound to that request's
-credential, nothing survives it, and the dashboard session cookie is refused
-there because a cookie must not create an internal call.
+proxy's gated handler, with the caller's Bearer attached so the gate
+re-validates it, and a named non-routable origin (`http://millivolt.internal`)
+that is never dialed and never derived from the request Host.
+
+The endpoint is stateless and Bearer-only: every POST gets a temporary server
+session bound to that request's credential, nothing survives it, and the
+dashboard session cookie is refused there because a cookie must not create an
+internal call.
 
 The SDK's own localhost DNS-rebinding `Host` check is deliberately off: the
-documented reverse-proxied placement preserves an external `Host` while dialing
-the proxy over loopback, so the check would reject that placement. Protection
-therefore rests entirely on the Bearer, which the same gate re-validates on
-every request; a missing or wrong credential is denied before any tool runs.
-The consequence is explicit: the endpoint admits any `Host` on the listener it
-is reachable from, with a valid credential, and any `Host`-based allow rule has
-to sit at the ingress rather than here.
+documented reverse-proxied placement preserves an external `Host` while
+dialing the proxy over loopback, so the check would reject that placement.
 
-The destructive surface is guarded where the risk lives. A purge needs a filter
-that constrains something (the bodyless delete-everything command is never sent),
-an exact confirmation phrase, and the opaque `preview_token` that
-`purge_preview` issued for that same filter, its count and an expiry. A count
-cannot bind the two: it is only a number, so two filters matching the same number
-would authorize each other. The token is stateless and HMAC-bound under the
-operator credential, so nothing is persisted, no server-side cleanup is needed,
-and a rotated credential invalidates every outstanding preview. It carries its
-own expiry, enforced when the token is verified, so a preview authorizes a
-deletion only shortly after it was taken. A refusal discloses no count, because
-a refusal that reports the live count is a count oracle a model can retry its
-way through. The count is compared a second time inside the delete transaction
-in `Store.purgeTransaction`, so a population that moved refuses with 409 before
-any row is removed; the remaining limit is stated rather than claimed away: a
-count compares a population, not row identities, so a same-size different row
-set passes and a refusal needs a fresh preview. Capture refuses to start without
-durable storage, and checks a scope name against the vocabulary the proxy
-reports, because either way the session would report success and store nothing.
-Stopping a capture session deletes nothing, and a purge deletes the stored
-capture document of every request it matches; the tools say which is which
-rather than implying otherwise. When that vocabulary is readable and non-empty,
-an unknown capture scope or throttle provider is refused and the known names are
-offered; both checks accept any name when it is empty, and the throttle provider
-check also accepts one when the debug read fails, while the capture tool refuses
-when the same read fails. See the [MCP server guide](mcp.md).
+Protection therefore rests entirely on the Bearer, which the same gate
+re-validates on every request; a missing or wrong credential is denied before
+any tool runs. The consequence is explicit: the endpoint admits any `Host` on
+the listener it is reachable from, with a valid credential, and any
+`Host`-based allow rule has to sit at the ingress rather than here.
+
+The destructive surface is guarded where the risk lives. A purge needs a
+filter that constrains something (the bodyless delete-everything command is
+never sent), an exact confirmation phrase, and the opaque `preview_token` that
+`purge_preview` issued for that same filter, its count and an expiry.
+
+A count cannot bind the two: it is only a number, so two filters matching the
+same number would authorize each other.
+
+The token is stateless and HMAC-bound under the operator credential, so
+nothing is persisted, no server-side cleanup is needed, and a rotated
+credential invalidates every outstanding preview. It carries its own expiry,
+enforced when the token is verified, so a preview authorizes a deletion only
+shortly after it was taken.
+
+A refusal discloses no count, because a refusal that reports the live count is
+a count oracle a model can retry its way through. The count is compared a
+second time inside the delete transaction in `Store.purgeTransaction`, so a
+population that moved refuses with 409 before any row is removed.
+
+The remaining limit is stated rather than claimed away: a count compares a
+population, not row identities, so a same-size different row set passes and a
+refusal needs a fresh preview.
+
+Capture refuses to start without durable storage, and checks a scope name
+against the vocabulary the proxy reports, because either way the session would
+report success and store nothing. Stopping a capture session deletes nothing,
+and a purge deletes the stored capture document of every request it matches;
+the tools say which is which rather than implying otherwise.
+
+When that vocabulary is readable and non-empty, an unknown capture scope or
+throttle provider is refused and the known names are offered; both checks
+accept any name when it is empty, and the throttle provider check also accepts
+one when the debug read fails, while the capture tool refuses when the same
+read fails. See the [MCP server guide](mcp.md).
 
 ## Dashboard render owners
 
 HTML embeds the canonical bootstrap builder's JSON, safely escaped in an inert
-data block. Transit gzip is negotiated from `Accept-Encoding` with only the `q`
-parameter read: unknown parameters are ignored, a bare `*` accepts gzip, and an
-explicit gzip entry outranks the wildcard; an unparseable or out-of-range
-qvalue refuses. Deferred external assets download alongside HTML; the Settings
-sheet is the one exception: its ordered `settings*.js` set is injected by the
-Settings trigger on first open, one module at a time under the same versioned
-URL, and single-flighted across concurrent opens. Saved hash/chart choices
-apply before rendering; invalid/missing seed falls back to the endpoint.
-Dynamic HTML/state is private/no-store. Every local `/dash/` CSS/JS URL in the
-shell carries the content version as `?v=`. On a hit, the service worker
-answers a `/dash/` request carrying exactly that version from its stamped
-CacheStorage before the network; on a miss it fetches once, stores a successful
-response, and returns it. This is the one cache-first path. A request with no
-`v`, a stale value, or more than one `v` stays network-first with cache
-fallback, as does every brand/PWA path, so an old index cannot pin new bytes
-under an old URL. The server serves the exact-version response
+data block. Transit gzip is negotiated from `Accept-Encoding` with only the
+`q` parameter read: unknown parameters are ignored, a bare `*` accepts gzip,
+and an explicit gzip entry outranks the wildcard; an unparseable or
+out-of-range qvalue refuses.
+
+Deferred external assets download alongside HTML; the Settings sheet is the
+one exception: its ordered `settings*.js` set is injected by the Settings
+trigger on first open, one module at a time under the same versioned URL, and
+single-flighted across concurrent opens. Saved hash/chart choices apply before
+rendering; invalid/missing seed falls back to the endpoint. Dynamic HTML/state
+is private/no-store.
+
+Every local `/dash/` CSS/JS URL in the shell carries the content version as
+`?v=`. On a hit, the service worker answers a `/dash/` request carrying
+exactly that version from its stamped CacheStorage before the network; on a
+miss it fetches once, stores a successful response, and returns it. This is
+the one cache-first path.
+
+A request with no `v`, a stale value, or more than one `v` stays network-first
+with cache fallback, as does every brand/PWA path, so an old index cannot pin
+new bytes under an old URL. The server serves the exact-version response
 `private, max-age=31536000, immutable`, while a missing or stale version
 revalidates with `no-cache`. A Bearer-authenticated response that also mints a
 session cookie keeps the gate's stricter `no-store`. Immutable asset
-representations and revalidation identities are precomputed. Content version
-changes use the same winning bootstrap gate to reload once. The cache-first
-path is asset caching only, never an offline app shell: navigation to `/` stays
-live with the static offline fallback, and live/operator routes are never
-cached.
+representations and revalidation identities are precomputed.
 
-Vanilla modules under [static/js](../internal/web/static/js) have distinct owners:
-`core` formatters/shared state, `feedback` the one clipboard and toast path,
-`entities` identities/record labels, `explorer` routing/cards, `chart` uPlot
-plans, `menu` the one open/close, placement, dismissal and focus contract for
-menu panels, `chrome_menus` the header menu registry and the remaining theme
-tray, nav and dimension class menus, `operator_console` the header readout,
-console shell, section rail, shared wording and bounded session change ledger,
-its four policy modules `operator_limits`, `operator_holds`, `operator_export`
-and `operator_overview` owning their own sections, with `chrome_operator`
-owning the mutation gate and request shape, `chrome_lists`
-the operator vocabularies, model grouping, capture storage gate and footer
-words, `chrome_restart` the restart choreography, and `chrome_settings` the
-Settings shell and trigger, the accepted debug snapshot, hold liveness and the
-download paths, `timeframe` the chart time vocabulary, stored-extent
-availability and the timeframe control, `log` the live log frame,
-`log_rows` the rows, day dividers and column registry, `log_archive` the durable
-archive window, `log_drawer` the detail drawer lifecycle and retry-attempt
-navigation, `log_detail` the detail primitives, `log_debug` the drawer's Debug
-capture section, `chrome_storm` the storm banner, incident identity and details
-dialog,
-`theme` the surface/palette registry and preview tray,
-`settings` the lazily loaded Settings sheet, and `live` bootstrap/SSE/derived
-state. `theme.js` owns
-the mode/palette registry, normalization, the single persistence shape, the
-current-vs-preview comparator state and the one canvas recolor path. A commit
+Content version changes use the same winning bootstrap gate to reload once.
+The cache-first path is asset caching only, never an offline app shell:
+navigation to `/` stays live with the static offline fallback, and
+live/operator routes are never cached.
+
+Vanilla modules under [static/js](../internal/web/static/js) have distinct
+owners:
+
+- `core`: formatters and shared state.
+- `feedback`: the one clipboard and toast path.
+- `entities`: identities and record labels.
+- `explorer`: routing and cards.
+- `chart`: uPlot plans.
+- `menu`: the one open/close, placement, dismissal and focus contract for menu
+  panels.
+- `chrome_menus`: the header menu registry and the remaining theme tray, nav
+  and dimension class menus.
+- `operator_console`: the header readout, console shell, section rail, shared
+  wording and bounded session change ledger.
+- `operator_console`'s four policy modules `operator_limits`,
+  `operator_holds`, `operator_export` and `operator_overview`, each owning its
+  own section.
+- `chrome_operator`: the mutation gate and request shape.
+- `chrome_lists`: the operator vocabularies, model grouping, capture storage
+  gate and footer words.
+- `chrome_restart`: the restart choreography.
+- `chrome_settings`: the Settings shell and trigger, the accepted debug
+  snapshot, hold liveness and the download paths.
+- `timeframe`: the chart time vocabulary, stored-extent availability and the
+  timeframe control.
+- `log`: the live log frame.
+- `log_rows`: the rows, day dividers and column registry.
+- `log_archive`: the durable archive window.
+- `log_drawer`: the detail drawer lifecycle and retry-attempt navigation.
+- `log_detail`: the detail primitives.
+- `log_debug`: the drawer's Debug capture section.
+- `chrome_storm`: the storm banner, incident identity and details dialog.
+- `theme_boot`: the palette ids, labels, order, defaults and the pre-paint guard.
+- `theme_state`: normalization, the stored pair, the one apply path and the
+  browser chrome color, shared by the dashboard and the site.
+- `theme`: the dashboard preview tray, comparator state and keyboard
+  lifecycle.
+- `settings`: the lazily loaded Settings sheet.
+- `live`: bootstrap/SSE/derived state.
+
+`theme_boot.js` is the one registry: palette ids, labels, order and defaults,
+plus the blocking guard that applies a stored pair before first paint.
+`theme_state.js` owns normalization, the single stored shape, the one apply
+path, the browser chrome color and the optional chart/menu callbacks. A commit
 changes the live document pair; normalization also repairs storage at load when
-the stored value is invalid. Hover or keyboard focus previews inside the tray
-only, and the polite live region follows the keyboard cursor: pointer-induced
-focus never announces a candidate. Arrow keys, Home and End move the cursor and
-its one tab stop; Enter/Space or a click commits. Compact touch, short and
-narrow layouts hide the comparator, preview line and hint while keeping the
-current caption, surface control and all eight rows.
+the stored value is invalid.
+
+`theme.js` owns only the dashboard tray: preview, comparator state and the
+keyboard lifecycle. The site's `site_theme.js` renders the same registry into
+its own header tray and reuses the same state module.
+
+Hover or keyboard focus previews inside the tray only, and the polite live
+region follows the keyboard cursor: pointer-induced focus never announces a
+candidate. Arrow keys, Home and End move the cursor and its one tab stop;
+Enter/Space or a click commits. Compact touch, short and narrow layouts hide
+the comparator, preview line and hint while keeping the current caption,
+surface control and all eight rows.
+
 `css/themes.css` owns the complete surface, accent and material families every
-palette resolves in both modes and the Black/Clear mode material fallbacks,
-while `dashboard.css` owns the default Instrument Black base, the header
-chrome and the theme tray, including the comparator/caption-bar layout. The
-dashboard sheet is split by surface, linked in this order: `dashboard.css`
-(palette, base, chrome and KPI band), `explorer.css`, `overlays.css` (drawer
-and settings sheet), `charts.css`, `requests.css` (including the shared
-semantic status fills) and `inspector.css`, with `themes.css` next, then
-`console.css` for the readout and operator console only, and the vendored uPlot
-sheet last. The link order is the
-cascade; `dashboard.css` remains the `:root` palette and type owner: its
-`@font-face` rules load the embedded Instrument Sans and JetBrains Mono faces
-from `static/fonts`, and its `--sans`/`--mono` tokens name the families every
-surface consumes. The docs build publishes the same files and adds Instrument
-Serif as the site-only display face for marketing and documentation titles, so
-neither surface makes a third-party font request. Each palette owns
-`--shadow-rgb` and `--veil-rgb`, and the mode veil tokens compose that hue, so
-cool Clear palettes get cool elevation and scrims. `chrome_settings.js` owns
-the Settings trigger, loader, open-state probe, shared status line and the
-single close entry point; the lazy `settings*.js` modules own the sheet's
-state, editors and apply/revert/backup/purge behavior.
+palette resolves in both modes and the Black/Clear mode material fallbacks. The
+site publishes these exact bytes and loads them after its generated tokens and
+before `site.css`; its extra contrast rungs derive from the active mode tokens
+with `color-mix`, so there is no second palette table.
+
+`dashboard.css` owns the default Instrument Black base, the header chrome and
+the theme tray, including the comparator/caption-bar layout. The dashboard
+sheet is split by surface, linked in this order: `dashboard.css` (palette,
+base, chrome and KPI band), `explorer.css`, `overlays.css` (drawer and
+settings sheet), `charts.css`, `requests.css` (including the shared semantic
+status fills) and `inspector.css`, with `themes.css` next, then `console.css`
+for the readout and operator console only, and the vendored uPlot sheet last.
+
+The link order is the cascade; `dashboard.css` remains the `:root` palette and
+type owner: its `@font-face` rules load the embedded Instrument Sans and
+JetBrains Mono faces from `static/fonts`, and its `--sans`/`--mono` tokens
+name the families every surface consumes. The docs build publishes the same
+files and adds Instrument Serif as the site-only display face for marketing
+and documentation titles, so neither surface makes a third-party font request.
+
+Each palette owns `--shadow-rgb` and `--veil-rgb`, and the mode veil tokens
+compose that hue, so cool Clear palettes get cool elevation and scrims.
+`chrome_settings.js` owns the Settings trigger, loader, open-state probe,
+shared status line and the single close entry point; the lazy `settings*.js`
+modules own the sheet's state, editors and apply/revert/backup/purge behavior.
+
 A clean open at the same document revision and writable state still fetches
-freshness but keeps the
-retained rows and baseline; revision/writable changes, drafts and Revert refill.
-The model-rule preview reuses one traffic-example cache keyed by the live
-revision, and its test spelling is preview-only: it never revalidates the
-draft or marks the sheet dirty.
+freshness but keeps the retained rows and baseline; revision/writable changes,
+drafts and Revert refill. The model-rule preview reuses one traffic-example
+cache keyed by the live revision, and its test spelling is preview-only: it
+never revalidates the draft or marks the sheet dirty.
 
-One memoized derivation serves scoped rows and shared readouts. O(1) ID upserts,
-pure-replay suppression and rAF-coalesced live rendering avoid repeated scans.
-Incremental log groups preserve scroll/selection; archive paging uses paired
-timestamp/ID cursors and stays outside the live arrival-ordered ring. One
-single-entry memo reuses the merged ring+archive window within a live revision,
-keyed by the live data and its revision plus the archive array identity/length
-and the scoped-ring (or prior merged) array identity; archive replacement or
-trim, reset, a live revision bump and a data replacement each rebuild it. The
-explorer memoizes its filter-set identity on the canonical, order-independent
-scope (filter set plus status, excluding the `by/<dim>` breakdown). A by-only
-hash change repaints the rail/gallery and fetches that one breakdown while the
-scoped log window, chart and drawer keep their state. Unchanged explorer
-renders write nothing beyond card string construction: the rail and gallery
-HTML is compared before assignment, the shared dimension trigger is rewritten
-only when its dimension/count presentation key changes, and gallery layout
-sizing runs only after the gallery content actually changes.
+One memoized derivation serves scoped rows and shared readouts. O(1) ID
+upserts, pure-replay suppression and rAF-coalesced live rendering avoid
+repeated scans. Incremental log groups preserve scroll/selection; archive
+paging uses paired timestamp/ID cursors and stays outside the live
+arrival-ordered ring.
 
-Server chart responses alone own buckets/totals at configured cadence. Presets,
-series, money/unit formatters and visible dimension order each have one registry.
-Derived series (error rate, cache hit, blended totals) recompute from those
-server bucket sums; the browser never folds events into chart data. Hidden
-lines keep stable columns; percentile/range changes reuse the plot.
+One single-entry memo reuses the merged ring+archive window within a live
+revision, keyed by the live data and its revision plus the archive array
+identity/length and the scoped-ring (or prior merged) array identity; archive
+replacement or trim, reset, a live revision bump and a data replacement each
+rebuild it.
+
+The explorer memoizes its filter-set identity on the canonical,
+order-independent scope (filter set plus status, excluding the `by/<dim>`
+breakdown). A by-only hash change repaints the rail/gallery and fetches that
+one breakdown while the scoped log window, chart and drawer keep their state.
+
+Unchanged explorer renders write nothing beyond card string construction: the
+rail and gallery HTML is compared before assignment, the shared dimension
+trigger is rewritten only when its dimension/count presentation key changes,
+and gallery layout sizing runs only after the gallery content actually
+changes.
+
+Server chart responses alone own buckets/totals at configured cadence.
+Presets, series, money/unit formatters and visible dimension order each have
+one registry. Derived series (error rate, cache hit, blended totals) recompute
+from those server bucket sums; the browser never folds events into chart data.
+Hidden lines keep stable columns; percentile/range changes reuse the plot.
 Isolated samples use filled/ring points without coordinate jitter. Shared axis
-formatting avoids duplicate labels. The percentile dropdown is the only visible
-pXX label owner; conditional error/429 badges omit zero independently.
+formatting avoids duplicate labels. The percentile dropdown is the only
+visible pXX label owner; conditional error/429 badges omit zero independently.
 
 Operators use shared mutation/revision gates, lossless Settings collection,
 stable event-path outside-click handling and a focus/inert dialog lifecycle.

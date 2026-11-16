@@ -49,7 +49,7 @@ both.
 | `GET /metrics/agg/chart`, `/explorer`, `/log` | Scoped history chart, faceted explorer, and durable log paging. The Requests-card `s=` selector accepts an exact code or a live in-flight class on all three, but only the explorer folds pending rows: the chart answers a live class with `400 invalid scope` (its buckets are finalized-only, so an accepted class could only read as "no traffic"), and the log keeps its standing empty page so the archive pager does not stop. |
 | `GET /metrics/prometheus` | Prometheus exposition over the in-memory ring, not durable since-inception dashboard totals. |
 | `GET /metrics/pprof/` | Standard Go profiling handlers behind the same credential as every `/metrics` route: the index listing plus the `profile` (CPU), `heap`, `allocs`, `goroutine`, `block`, `mutex` and `threadcreate` profiles at `/metrics/pprof/<name>`. Unregistered subpaths answer the reserved namespace 404, never inference. See the capture workflow below the route table. |
-| `POST /mcp` | Streamable HTTP MCP endpoint, operator-gated like `/metrics` and enabled by default: `mcp_enabled: false` removes it from the process (the route stays reserved, answering 404 and never inference; restart to apply). Serves the 25 MCP tools. Bearer-only: the gate admits the session cookie on gated paths, but this endpoint refuses a cookie-only request (`403`) and forwards the caller's own Bearer on its in-process calls to the routes above, so no session cookie or per-request state is retained between requests; the admitted credential keys an in-memory cache of its SDK server object (never logged or persisted) so repeated calls do not rebuild it. Stateless: `GET`/`DELETE` answer `405`. `/mcp/...` look-alikes are reserved and answer `404`, never inference, and a reserved-namespace spelling whose separator is written single-encoded (`%2f` or `%5c`, any hex case) is refused the same way. A double-encoded separator (`%252f`) is not a reserved-namespace spelling: it decodes to a literal `%2f` inside one segment, so it can reach neither the MCP handler nor a reserved namespace and is ordinary inference traffic. |
+| `POST /mcp` | Streamable HTTP MCP endpoint, operator-gated like `/metrics` and enabled by default. `mcp_enabled: false` removes it from the process; the route stays reserved, answers 404 and never reaches inference. Serves the 25 MCP tools, Bearer-only and stateless. See [MCP transport](#mcp-transport) below. |
 
 Pause/Debug/Limits successes may include a persistence warning: runtime state
 was applied, but saving it failed. Do not retry as though the mutation rolled
@@ -57,6 +57,27 @@ back. With storage disabled, Pause and Limits keep their memory-only state
 intentionally. Debug is the exception: starting a session answers 503 because
 with no store every matched request would retain bodies for a sidecar that
 could never be fetched.
+
+### MCP transport
+
+The gate admits the session cookie on gated paths, but this endpoint refuses a
+cookie-only request with `403`. It forwards the caller's own Bearer on its
+in-process calls to the routes above, so no session cookie or per-request state
+is retained between requests.
+
+The admitted credential keys an in-memory cache of its SDK server object. The
+cache is never logged or persisted, and it lets repeated calls avoid rebuilding
+the 25 registrations. `GET` and `DELETE` answer `405`.
+
+`/mcp/...` look-alikes are reserved and answer `404`, never inference. A
+reserved-namespace spelling whose separator is single-encoded (`%2f` or `%5c`,
+any hex case) is refused the same way. A double-encoded separator (`%252f`) is
+not a reserved-namespace spelling: it decodes to a literal `%2f` inside one
+segment, so it can reach neither the MCP handler nor a reserved namespace and is
+ordinary inference traffic.
+
+Three tools, `docs_list`, `docs_search` and `docs_read`, answer from the
+embedded documentation index and make no proxy request.
 
 The profiling subtree is operator-gated like every `/metrics` route: an
 unarmed plane answers 403, a wrong credential 401, and a reserved-namespace
@@ -76,25 +97,30 @@ The `seconds=N` parameter on `/metrics/pprof/profile` is the capture window:
 that one request stays open for the whole window while samples accumulate. The
 valid range is 1 to `response_write_timeout` (600 by default); an absent or
 unparseable value uses 30 and a larger one is lowered to the bound, so a
-capture never outlives the delivery contract unnoticed. A
-process runs one CPU profile at a time, so a second concurrent `profile`
+capture never outlives the delivery contract unnoticed.
+
+A process runs one CPU profile at a time, so a second concurrent `profile`
 request fails with 500 until the first finishes. On `/metrics/pprof/heap`,
 `gc=1` forces a garbage collection cycle before the sample.
 
 The proxy's own `/mcp` endpoint serves this whole surface to an LLM, using the
 same credential and the same routes. It adds no route of its own and dispatches
 each tool call in process through the same gate, so its forwarded Bearer is
-re-validated exactly like an external request. For its irreversible call, the
+re-validated exactly like an external request.
+
+For its irreversible call, the
 operator credential and the tool's own guards are the entire gate: an empty
 purge filter, a purge without the exact confirmation phrase, and a purge
 without the `purge_preview` token issued for that same filter are each refused.
 The preview token expires 15 minutes after it is issued, so a purge more than
 15 minutes after its preview needs a fresh one.
+
 It also refuses a capture session on a proxy without durable storage, and an
 unknown name in a capture scope or a throttle provider is offered the known
 values instead. The throttle provider check fails open when the proxy's
 vocabulary is empty or cannot be read; the capture scope check accepts any name
 when the vocabulary is empty but refuses when the vocabulary cannot be read.
+
 It never follows a redirect, and it presents the credential only in the
 `Authorization` header. See the [MCP server guide](mcp.md).
 
@@ -125,11 +151,14 @@ Present the credential as `Authorization: Bearer <value>`. A valid Bearer
 request on a dashboard, admin, metrics or dash route also mints a session
 cookie, because the dashboard's live feed uses EventSource, which cannot send
 Authorization headers. The `/mcp` endpoint deliberately returns no cookie: its
-caller forwards the credential on the endpoint's internal calls. The cookie is
-HttpOnly (script never reads it), SameSite Strict, scoped to 12 hours, and
-signed with a key derived from the operator token, so a container restart with
-the same credential keeps the session. Rotating the token invalidates outstanding
-cookies. The cookie carries `Secure` only when the request arrived over TLS or
+caller forwards the credential on the endpoint's internal calls.
+
+The cookie is HttpOnly (script never reads it), SameSite Strict, scoped to
+12 hours, and signed with a key derived from the operator token, so a
+container restart with the same credential keeps the session. Rotating the
+token invalidates outstanding cookies.
+
+The cookie carries `Secure` only when the request arrived over TLS or
 any `X-Forwarded-Proto` token names a secure scheme (`https` or `wss`). The
 header is a list: the canonical NGINX sample overwrites it with this server's
 `$scheme`, and an ingress that appends its own scheme after the client's
@@ -142,21 +171,27 @@ Every response to a secure presentation also carries
 outermost server wrapper from the same secure-presentation test. There is no
 `includeSubDomains`, because millivolt cannot know whether sibling or parent
 hostnames are TLS-capable. A plain-HTTP response carries no header at all
-(browsers ignore it there), so the dev instance is unaffected. The lifespan is
+(browsers ignore it there), so the dev instance is unaffected.
+
+The lifespan is
 deliberately under a quarter: moving the dashboard off TLS becomes reachable
 again within that window instead of pinning a browser for a year.
-Do not expose the listener over plaintext networks anyway. The login page
-served for unauthenticated dashboard visits exchanges the entered value for
-that cookie through `POST /session` and works without JavaScript; API
+Do not expose the listener over plaintext networks anyway.
+
+The login page served for unauthenticated dashboard visits exchanges the
+entered value for that cookie through `POST /session` and works without JavaScript; API
 clients can call the same endpoint or simply send the Bearer header on every
 request. An expired cookie re-prompts in the dashboard or reappears as the
 login page on navigation.
+
 Unregistered `/admin/*`, `/session/*`, `/metrics/*` and `/mcp/*` paths are reserved: they
 answer 404 and are never forwarded upstream. The gate also refuses 404 when an
 owned-namespace path is written with a percent-encoded separator (`%2f` or
 `%5c`, any hex case), a duplicated separator (leading or interior) or a dot
 segment: the mux cannot route it to the reserved subtree unchanged, so it
-would otherwise fall through to inference. A double-encoded separator
+would otherwise fall through to inference.
+
+A double-encoded separator
 (`%252f`) is not a reserved-namespace spelling: it decodes to a literal `%2f`
 inside one segment, matches no reserved route, and is ordinary inference
 traffic.
@@ -165,40 +200,48 @@ Failed authentications are throttled per source IP. The immediate hop is the
 only trusted one, so the throttle key is the rightmost `X-Forwarded-For`
 element (the address that hop appended) and `RemoteAddr` when the header is
 absent; a client can prepend anything, and an unparseable element is skipped.
+
 The shipped [NGINX example](../deploy/nginx.conf) resolves its own peer with
 `real_ip` first, so the rightmost element is the real client. A directly
 exposed instance lets a client choose its own key, which only ever relaxes the
 throttle, never the credential decision: after five rejected credentials the IP
 is locked out with a window that doubles from 10 seconds to a 15 minute
-ceiling. The throttle counts only
+ceiling.
+
+The throttle counts only
 presented-but-wrong credentials, so an expired-cookie dashboard polling in a
 background tab cannot lock its own operator out, and a verified credential is
 always admission: presenting the correct Bearer during a lockout clears the
 budget, because the lockout exists to rate-limit guessing, not to lock the
-operator out of their own dashboard. The map is hard-capped at 4096 source
+operator out of their own dashboard.
+
+The map is hard-capped at 4096 source
 IPs with idle expiry, so spoofed-address floods cannot grow it; reaching the
 cap is logged once per episode, because from then on a new source evicts a
-tracked one. Crossing the five-failure threshold is logged once per source. A lockout
-response is `429` with a coarse rounded `Retry-After` and a generic JSON body,
-except `GET /` (and `/index.html`): the sign-in page is still served, read-only,
-with the same `Retry-After`, the form intact and the lockout named in its
-notice slot, because the form is the only route back to a credential and `POST
-/session` keeps working through the lockout.
+tracked one. Crossing the five-failure threshold is logged once per source.
+
+A lockout response is `429` with a coarse rounded `Retry-After` and a generic JSON body,
+except `GET /` (and `/index.html`): the sign-in page is still served, read-only, with the
+same `Retry-After`, the form intact and the lockout named in its notice slot, because
+the form is the only route back to a credential and `POST /session` keeps working
+through the lockout.
 
 With the variable unset or empty the deny-all state holds: the whole dashboard
 returns 403, the open `POST /session` handshake cannot mint a cookie, and only
-`/healthz` and `/readyz`, brand/PWA files and inference respond. A nonempty
-value shorter than 16
-or longer than 512 bytes fails the boot instead of silently weakening
-the gate. The credential is process bound: config reload does not re-read it,
+`/healthz` and `/readyz`, brand/PWA files and inference respond.
+
+A nonempty value shorter than 16 or longer than 512 bytes fails the boot
+instead of silently weakening the gate.
+
+The credential is process bound: config reload does not re-read it,
 so rotating the value requires a real process restart (a supervisor restart
 or a fresh deployment; the dashboard's restart handoff inherits the parent
-environment, so it keeps the old credential by design). The dashboard asks
-for the value once per browser tab, keeps it in sessionStorage, attaches it
-to gated calls only and drops it as soon as the server rejects it.
-Non-browser callers send the header directly, for example
-`curl -H "Authorization: Bearer $MILLIVOLT_OPERATOR_TOKEN" -XPOST .../admin/purge`.
-Environment variables are readable by same-user processes through `/proc`,
+environment, so it keeps the old credential by design).
+
+The dashboard asks for the value once per browser tab, keeps it in
+sessionStorage, attaches it to gated calls only and drops it as soon as the
+server rejects it. Non-browser callers send the header directly, for example
+`curl -H "Authorization: Bearer $MILLIVOLT_OPERATOR_TOKEN" -XPOST .../admin/purge`. Environment variables are readable by same-user processes through `/proc`,
 so run the proxy under a dedicated account.
 
 ### Pause and Limits
@@ -225,7 +268,9 @@ scopes are rejected instead of silently replacing a different hold.
 The HTTP shape is closed. A resume carries only `paused:false` and an optional
 `id`; supplying a scope, duration or queue cap beside it is a 400, because the
 proxy has no scope-selective resume and accepting one would clear more holds
-than the caller named. `all:true` cannot be combined with `new` or any scope
+than the caller named.
+
+`all:true` cannot be combined with `new` or any scope
 dimension; the global hold already covers them. Named clients plus `new`
 remains a valid union. An edit restates the dimensions it supplies and preserves
 the ones it omits, so supplying an explicit empty array is how a dimension is
@@ -234,18 +279,23 @@ wrappers.
 
 The known client/provider/model vocabularies (the pause and capture pickers,
 and the snapshot a new-clients hold compares against) are bounded at 4096 names
-per dimension. Client labels and model ids come from the request, so they are
+per dimension.
+
+Client labels and model ids come from the request, so they are
 evictable: past the cap the least recently observed name makes room for the
 newest, so a client that keeps sending requests outlives a burst of one-shot
-labels that arrived after it. Names an operator documents - a hold scope, a debug session, a limit policy
+labels that arrived after it.
+
+Names an operator documents - a hold scope, a debug session, a limit policy
 (including one installed from a request's `X-Limit-*` headers or restored at
 boot) - are pinned and are never evicted by later traffic, so a flood
-of distinct labels cannot hide the client you scoped a hold to. Pins are
-derived from the documents that exist, not accumulated: resuming a hold or
-ending a debug session releases its names back to ordinary eviction. When a
-full vocabulary is entirely pinned, a new observed name is dropped rather than
-displacing operator intent, and a scope that cannot be listed is named in the
-log instead of disappearing silently.
+of distinct labels cannot hide the client you scoped a hold to.
+
+Pins are derived from the documents that exist, not accumulated: resuming a
+hold or ending a debug session releases its names back to ordinary eviction.
+When a full vocabulary is entirely pinned, a new observed name is dropped
+rather than displacing operator intent, and a scope that cannot be listed is
+named in the log instead of disappearing silently.
 
 A hold scopes on the caller's claimed client label, so it separates your own
 tools from each other, not trusted callers from untrusted ones; a caller that
@@ -256,11 +306,13 @@ Limits applies to an intersection of conditions: providers, models, clients,
 key hashes and conversations. Values inside one condition are alternatives; an
 empty condition matches any value, so a rule with no condition covers every
 request. A request must satisfy every non-empty condition, and every matching
-policy charges its own lease, so the tightest cap wins. A provider-only rule
-keeps the per-key concurrency and fairness behavior below; adding any other
-condition narrows the same machinery without changing it. Conditions select the
-request's recorded identity, so models match the request spelling, keys match
-the SHA-256 digest, and conversations match the selected leaf.
+policy charges its own lease, so the tightest cap wins.
+
+A provider-only rule keeps the per-key concurrency and fairness behavior
+below; adding any other condition narrows the same machinery without
+changing it. Conditions select the request's recorded identity, so models
+match the request spelling, keys match the SHA-256 digest, and conversations
+match the selected leaf.
 
 A rule may also carry a recurring schedule: `days` (0 = Sunday), `start_minute`
 and `end_minute` in the server's local timezone. Equal minutes mean all day, and
@@ -280,17 +332,22 @@ ambiguity instead of dropping the supplied value and reporting success.
 Choose concurrency, requests per window, tokens per window and the optional
 anti-burst ramp. The console shows whether a policy came from the console or a
 request header, its schedule, and available budget and in-flight/queued state.
+
 Queued counts every request the scheduler parks for that policy - admission
 waits and send-gate waits behind a 429/5xx pacing window alike - not only work
 blocked by the configured cap. Send-gate waits are paced by the provider's retry
 hint and the retry budget; `max_queue_size` and `max_queue_wait` bound only the
-admission FIFO. Provider admission is fair across keys: a release or refill
+admission FIFO.
+
+Provider admission is fair across keys: a release or refill
 rotates across the groups actually waiting on the shared provider gate
 (concurrency or the request/token bucket), granting one request per group per
 pass. A group parked only on its own pacing window, hold, anti-burst ramp or
 per-key cap is outside that fair set and does not delay another key's fast
 path. A release settles the gate and drains once, and the drain stops as soon as
-a grant refills a saturated provider concurrency cap. Header semantics are in
+a grant refills a saturated provider concurrency cap.
+
+Header semantics are in
 [protocol](protocol.md#routing-headers). Persisted policy does not mean the live
 scheduler's counters and in-flight requests survive a restart.
 
@@ -299,7 +356,9 @@ whose recorded provider, model or client matches the one named in the console,
 without waiting for a limit window, pause hold or retry pacing to open. The
 selector reads each parked request's own identity, so it also releases work
 parked by a hold, by pacing, or by a provider without a limit row. The overview
-shows the total parked count. Each released request answers with a retryable 503
+shows the total parked count.
+
+Each released request answers with a retryable 503
 and is recorded as `queue_drained`, never as a provider error; a request already
 exchanging bytes with the provider finishes normally. The API also accepts the
 same three scopes for scripted drains.
@@ -307,19 +366,26 @@ same three scopes for scripted drains.
 Anti-burst is opt-in and scoped to each provider+key group. It is available
 only on a single-provider rule without a schedule, because a ramp is defined
 over the provider-plus-key groups the scheduler owns; the server rejects the
-pair on any other rule. With `anti_burst` enabled and a concurrency target of at
+pair on any other rule.
+
+With `anti_burst` enabled and a concurrency target of at
 least 2, a group starts at one concurrent request and gains allowance linearly
 until it reaches the rule's `concurrency` target after `ramp_duration`. It is
 inert unless all three are set: the flag, a target of at least 2, and a duration
 above zero.
+
 `ramp_duration` accepts the same 1s..24h window grammar as request and token
 windows, including `1d`; empty, `0` or `0s` turns it off. Requests beyond the
 current allowance stay in the existing per-key FIFO. A fully idle group whose
 idle period reaches `ramp_duration` starts a new epoch on its next grant, while a
-shorter idle gap continues the existing one. Enabling the ramp while a group
+shorter idle gap continues the existing one.
+
+Enabling the ramp while a group
 already has in-flight work anchors its epoch at the current occupancy, so
 running streams are not stalled. Changing the flag, duration or concurrency
-target resets every group's epoch. Header updates change only the three cap
+target resets every group's epoch.
+
+Header updates change only the three cap
 dimensions and preserve the stored anti-burst pair. Clearing the last active cap
 drops the whole policy, ramp included. The limit composer carries the checkbox
 and the ramp chips; applying sends both, and a form whose caps are all zero
@@ -332,58 +398,70 @@ the latest whole-policy document, with bounded retry and backoff after a store
 failure. A closed store is not retried - the generation stays dirty and the
 writer stops - while a busy one keeps the ladder. That document also carries
 the anti-burst pair, and one written before
-those fields restores them off. A crash can therefore lose the most recent
+those fields restores them off.
+
+A crash can therefore lose the most recent
 header-driven changes, and a failed save never rejects inference. Graceful
 shutdown and restart flush the latest policy before storage closes or the
 restarted process opens the database. Provider labels are capped at 255 bytes
 and the persisted throttle document at 8 MiB; normal provider labels derived
 from base URLs remain below both bounds.
 
-Admission is bounded end to end. `max_inflight_requests` is the process-wide
-inference ceiling (default 10000), `max_inflight_body_bytes` its buffered
-body budget (default 256 MiB; admission charges the allocation hint, the
-declared length bounded by `max_request_bytes` and the read hint, and reconciles
-it against the bytes actually read, so a short body refunds the difference and a
-chunked one is charged as it arrives), and `max_inflight_response_bytes` its
-budget
-for buffered upstream response bodies (default 256 MiB): whole-document
-translation of non-streaming responses, the non-streaming 200 quality spool
-(at most 1 MiB plus one 32 KiB chunk), and model discovery. A request-slot
-refusal is answered with `503` and `Retry-After` before the body is read. The
-body budget charges the allocation hint at admission and reconciles it against
-the bytes actually read; when the hint cannot be covered the slot is still
-taken, and the first read decides without retaining the upload. The
-per-request cap still owns the status: a
-refused request drains at most the remaining `max_request_bytes` window so an
-over-cap body answers the definitive `413` instead of a retryable `503`, while
-a body that fits the cap answers `503`. Request-body reads must make progress within
+Admission is bounded end to end.
+
+- `max_inflight_requests` is the process-wide
+  inference ceiling (default 10000).
+- `max_inflight_body_bytes` is its buffered
+  body budget (default 256 MiB; admission charges the allocation hint, the
+  declared length bounded by `max_request_bytes` and the read hint, and reconciles
+  it against the bytes actually read, so a short body refunds the difference and a
+  chunked one is charged as it arrives).
+- `max_inflight_response_bytes` is its
+  budget for buffered upstream response bodies (default 256 MiB): whole-document
+  translation of non-streaming responses, the non-streaming 200 quality spool
+  (at most 1 MiB plus one 32 KiB chunk), and model discovery.
+
+A request-slot refusal is answered with `503` and `Retry-After` before the body is read.
+The body budget charges the allocation hint at admission and reconciles it
+against the bytes actually read; when the hint cannot be covered the slot is
+still taken, and the first read decides without retaining the upload. The
+per-request cap still owns the status: a refused request drains at most the
+remaining `max_request_bytes` window so an over-cap body answers the definitive `413` instead
+of a retryable `503`, while a body that fits the cap answers `503`.
+
+Request-body reads must make progress within
 `request_body_idle_timeout` and finish within the absolute
 `request_body_read_timeout`, so a stalled peer releases its reservation
 without cutting off a slow but progressing upload. The `POST /admin/restore`
 upload is exempt from the absolute bound only: a full database archive can
 legitimately outlast it on a slow link, while the idle bound still cuts a
 client that stops sending, and an expired deadline answers `408` with its own
-message instead of the archive-cap `413`. Buffered whole-document
+message instead of the archive-cap `413`.
+
+Buffered whole-document
 response reads use `whole_document_read_timeout` when the send has no deadline
 and `whole_document_read_max` as the ceiling even when `X-Proxy-Timeout-Ms` is
 longer, so a slow or stalled body releases its response-buffer reservation; a
 shorter caller deadline wins and configuration validation preserves the
 `models_discovery_timeout` budget below the ceiling. The three admission
 budgets accept `0` = unlimited and hot-reload.
+
 `max_queue_size` (default 1024
 per group) and `max_queue_wait` (default 10m) bound a held or saturated
 provider's parked work; both accept explicit `0` = unlimited. Independent
-per-key/header concurrency remains unlimited by default. The scheduler retains
-at most 100000 distinct provider+key groups, evicting the least-recently-idle
-group (no in-flight or queued work) to admit a new key at the bound; a new key
-is refused only when every retained group has active work, so a table full of
-active groups still fails closed. Recent pacing/backoff state for evicted
-groups is kept in a separate 4096-entry bounded LRU. The scheduler also
-retains at most 4096 header-created provider limits, refusing new ones past
-that bound rather than growing process memory without limit. A new request
-body has the `request_body_read_timeout` budget, SSE writes have the
-`sse_write_progress_timeout` per-event progress bound, and an upstream body
-that stops sending for `upstream_stream_idle_timeout` is canceled.
+per-key/header concurrency remains unlimited by default.
+
+The scheduler retains at most 100000 distinct provider+key groups, evicting
+the least-recently-idle group (no in-flight or queued work) to admit a new
+key at the bound; a new key is refused only when every retained group has
+active work, so a table full of active groups still fails closed. Recent
+pacing/backoff state for evicted groups is kept in a separate 4096-entry
+bounded LRU. The scheduler also retains at most 4096 header-created provider
+limits, refusing new ones past that bound rather than growing process memory
+without limit.
+
+A new request body has the `request_body_read_timeout` budget, SSE writes have the `sse_write_progress_timeout` per-event
+progress bound, and an upstream body that stops sending for `upstream_stream_idle_timeout` is canceled.
 
 Request budgets are strict sliding windows: at most the configured count is
 admitted in any trailing window of the configured length, so an idle provider
@@ -391,17 +469,22 @@ banks nothing and a busy one cannot spend future allowance as a present burst.
 Charging the window is what makes the limit match a provider that counts
 requests per rolling or fixed minute; a refilling budget could emit the whole
 count in one instant and then refill through the same span, which is how a
-`100 per minute` setting reached a provider's `101/100`. Each admitted request
-is charged once, at proxy admission, not again for each absorbed upstream retry.
-A count above 65536 is enforced by even spacing at the same ceiling instead of
-one timestamp per slot, so the memory a window holds stays bounded. Token
-budgets remain refilling buckets: prompt tokens are reserved from the captured
-characters divided by four and then settled against final reported usage, and a
-reservation larger than the whole capacity may proceed while credit is
-positive, leaving debt that refill or settlement repays. The client's output
-ceiling (`max_tokens` and its spellings) is deliberately not reserved: it is a
-ceiling, not expected usage, and reserving it would turn the token budget into
-a worst-case concurrency cap. A token budget therefore also sets the sustained
+`100 per minute` setting reached a provider's `101/100`.
+
+Each admitted request is charged once, at proxy admission, not again for
+each absorbed upstream retry. A count above 65536 is enforced by even
+spacing at the same ceiling instead of one timestamp per slot, so the memory
+a window holds stays bounded.
+
+Token budgets remain refilling buckets: prompt tokens are reserved from the
+captured characters divided by four and then settled against final reported
+usage, and a reservation larger than the whole capacity may proceed while
+credit is positive, leaving debt that refill or settlement repays. The
+client's output ceiling (`max_tokens` and its spellings) is deliberately not
+reserved: it is a ceiling, not expected usage, and reserving it would turn
+the token budget into a worst-case concurrency cap.
+
+A token budget therefore also sets the sustained
 average rate: 500K tokens per 6h refills at about 23 tokens/s, so once the
 initial budget is spent, later requests wait for refill unless actual usage
 settles lower than the reservation.
@@ -412,6 +495,7 @@ Open Settings, select **Error storm protection**, and turn on **Enable
 protection**. It is opt-in in both neutral defaults and the deployment example.
 Choose the rolling window, minimum samples and failure threshold, then select
 HTTP failure statuses, transient transport failures and response/stream failures.
+
 Provider protection requires all models receiving requests in that same window
 to meet the thresholds individually. A single affected model is held on its own
 while other active models remain healthy. If only one model is active, that
@@ -428,10 +512,14 @@ Use a client timeout appropriate to the desired end-to-end wait.
 Each clickable banner identifies its current scope and safe failure
 category (HTTP status, transport error or response error), percentage/count of
 failed upstream attempts, detection window, queued callers and next probe or
-recovery progress. Open an incident to inspect the distinct requests that
+recovery progress.
+
+Open an incident to inspect the distinct requests that
 encountered a selected failure, failed attempts, total sampled attempts, error
 category, queue count and next retry time. Provider entries also show affected
-versus active models. Distinct request counts follow each request's latest selected failure in the
+versus active models.
+
+Distinct request counts follow each request's latest selected failure in the
 rolling window, so repeated retries do not inflate that count. The percentage
 still describes upstream attempts. These are process-local observations, refreshed
 through the normal dashboard bootstrap/poll cadence; they are not chart history or the
@@ -449,7 +537,9 @@ Storage stays outside the detector: fixed 64 time buckets retain counters per
 scope, with oldest-edge precision within approximately `storm_window / 64`.
 `storm_max_scopes` includes provider aggregates and exact provider/model scopes;
 stale unreferenced healthy scopes can be evicted, while active or referenced
-scopes remain protected. Scope identifiers over the internal 512-byte retention
+scopes remain protected.
+
+Scope identifiers over the internal 512-byte retention
 bound and exhausted scope capacity reject admission rather than silently bypass
 protection. These bounds are not a total heap ceiling: waiting callers retain
 bounded request bodies, and existing ordinary queues remain separately sized.
@@ -487,18 +577,22 @@ enabled. It surfaces in the storm banner as a quota incident with a
 **Resume now** action (`POST /admin/quota`); manual-mode holds appear on the
 pause surface with their reason and resume like any hold, and they derive their
 provider pin through the same commit owner as a manual pause so the provider
-stays offered in the scope pickers. A quota 429 never
-arms the rate-limit pacing trip (the rate-limit health series still counts the
-429 itself), and quota re-sends never burn the transient
-`max_retries` budget. They are bounded by `storm_max_wait` instead, measured
-from the request's first park: when it expires the client receives the
-canonical retryable `error storm protection: ...` 429 rather than waiting on a
-gate that never opens, and the provider stays parked for the next request.
+stays offered in the scope pickers.
+
+A quota 429 never arms the rate-limit pacing trip (the rate-limit health
+series still counts the 429 itself), and quota re-sends never burn the
+transient `max_retries` budget. They are bounded by `storm_max_wait` instead, measured from the
+request's first park: when it expires the client receives the canonical
+retryable `error storm protection: ...` 429 rather than waiting on a gate that never opens, and the
+provider stays parked for the next request.
+
 The retry gate is in-memory - a restart drops it and
 the provider's next durable quota 429 re-arms it - while manual-mode holds
 persist like every operator pause. In-band occurrences (the same envelope
 inside a 200 stream) arm the pause the same way; that request already
-answered, so it is never parked. Translated Anthropic-format and Cursor
+answered, so it is never parked.
+
+Translated Anthropic-format and Cursor
 upstreams keep the off behavior in every mode. The built-in vocabulary is
 fixed; `quota_error_classes` may add a gateway-specific spelling as a durable
 quota class (it may never move a built-in spelling between classes, and it
@@ -522,10 +616,14 @@ The session timer selects future captures. `debug_capture_ttl` separately
 controls retained capture lifetime after completion, and
 `debug_capture_max_bytes` bounds one capture document: retained headers are
 charged first and the remainder is split between the request and the
-client-facing response body. Oversized captures are marked truncated. `debug_store_max_bytes`
+client-facing response body. Oversized captures are marked truncated.
+
+`debug_store_max_bytes`
 (default 512 MiB) caps the whole capture sidecar; once the next write would
 exceed it, new captures are skipped and TTL expiry frees capacity again.
-Capture writes are counted in bytes, not characters. The request drawer loads an
+Capture writes are counted in bytes, not characters.
+
+The request drawer loads an
 available sidecar only for a captured request; expired/absent captures are not
 recreated from ordinary metrics. Completion is published before the sidecar is
 encoded and saved, so a slow sidecar write delays neither the live end nor
@@ -542,11 +640,17 @@ to build a capture tap, so no headers or bodies are retained for an unfetchable
 sidecar. Editing or stopping a named existing session remains available.
 
 Retained request headers use the same policy as recorded response headers:
-names are visited in sorted order for the budget, each value is capped at 4 KiB
-and marked with `…` when cut, at most 16 values are kept per name, ordinary
-headers share a 16 KiB total budget per header map, a header name is capped at
-512 bytes, and at most 256 names are retained per map. A longer name or an extra
+
+- names are visited in sorted order for the budget;
+- each value is capped at 4 KiB and marked with `…` when cut;
+- at most 16 values are kept per name;
+- ordinary headers share a 16 KiB total budget per header map;
+- a header name is capped at 512 bytes;
+- at most 256 names are retained per map.
+
+A longer name or an extra
 name is omitted without a marker, exactly like a value beyond the budget.
+
 Credential headers (the
 configured auth header, `Authorization`, cookies, and token-, API-key- or
 secret-bearing names) become `[REDACTED]` before any truncation, so a cut
@@ -558,12 +662,13 @@ literally while JSON control escapes remain.
 The drawer's Debug section also carries a Download button. It fetches the same
 capture with `download=1` and saves a gzip artifact named
 `millivolt-debug-<captured_at>.json.gz`, using the record id in the name when
-the capture does not carry a readable `captured_at`. Captured request and
-response bodies render through the same bounded code surface as record
-previews, with wrap, copy and expand controls; the Download button remains the
-whole-capture path. The capture cards also surface its schema and captured-at
-time, conversation and key correlation, first-answer timing, usage, cost and
-attempt count.
+the capture does not carry a readable `captured_at`.
+
+Captured request and response bodies render through the same bounded code
+surface as record previews, with wrap, copy and expand controls; the
+Download button remains the whole-capture path. The capture cards also
+surface its schema and captured-at time, conversation and key correlation,
+first-answer timing, usage, cost and attempt count.
 
 `capture_body_preview` is a different opt-in feature: it retains short prompt/
 response previews in the normal record without starting a Debug session. The
@@ -571,11 +676,15 @@ two features also retain different request bytes: on the passthrough wire
 the record's prompt preview is the client's original body, captured at the
 metadata decode before `request_overrides` or the sub-conversations strip
 rewrites it, while a debug capture's request body is the rewritten upstream
-body sent after any rewrite. A translated Chat Completions or Anthropic target
+body sent after any rewrite.
+
+A translated Chat Completions or Anthropic target
 re-decodes the translated body for its prompt preview; a translated Responses
 target keeps the client-body prompt preview, because the generated item list is
 not re-decoded for preview. The response preview follows the client-facing
-response content on every target. Both features can retain sensitive content
+response content on every target.
+
+Both features can retain sensitive content
 even when credential headers are redacted.
 Exports/backups can outlive the configured retention period. See
 [Security](../SECURITY.md#upstream-destinations-and-credentials).
@@ -585,8 +694,12 @@ Exports/backups can outlive the configured retention period. See
 The operator console's export section downloads finalized request records as
 JSON, not the process's stderr log and not a complete administrative audit
 trail. With durable storage it reads the database; otherwise it uses available
-ring records. Open export, choose either all history or matching records, and
-review the previewed count before downloading. Provider, model, client and
+ring records.
+
+Open export, choose either all history or matching records, and
+review the previewed count before downloading.
+
+Provider, model, client and
 conversation merge the server's known vocabularies with whatever the live record
 ring holds, so a quiet proxy can still filter by what has run since it started,
 and each of them also accepts a typed value. Status is the one list-only
@@ -623,22 +736,31 @@ In the dashboard, both database deletions live in Settings, in the storage
 category, and nowhere else. Delete matching uses the same filter/count owner
 as the export, and its scope is the chosen filter; Delete everything wipes
 the whole database. Deletion requires confirmation in the dashboard; it does
-not happen when the sheet opens. A selected filter makes a read-only
+not happen when the sheet opens.
+
+A selected filter makes a read-only
 `POST /admin/purge/count` preview; the count first commits the writer's queued
 batch into the read view, so a just-finalized request cannot read as empty.
 That barrier is bounded by the query timeout: a wedged writer lets the preview
 answer from the committed snapshot instead of spinning the sheet forever, and
-the delete's transactional re-check stays the guard. Neither the caller's
-deadline nor a client cancel fails the preview, even when it expires before the
-barrier does: each step runs detached on its own query budget, so a short
-dashboard deadline answers the same as an unbounded one. A
-ring-only deployment removes through the boundary the count saw, so a record
-that finalizes during the delete stays behind instead of disappearing
-uncounted. Current traffic can still change the count
+the delete's transactional re-check stays the guard.
+
+Neither the caller's deadline nor a client cancel fails the preview, even
+when it expires before the barrier does: each step runs detached on its own
+query budget, so a short dashboard deadline answers the same as an unbounded
+one.
+
+A ring-only deployment removes through the boundary the count saw, so a
+record that finalizes during the delete stays behind instead of disappearing
+uncounted.
+
+Current traffic can still change the count
 before the action, but the UI retains the previewed age cutoff rather than
 silently moving it, and sends the rendered count with the delete so the
 proxy re-checks it inside the delete transaction and refuses a moved row
-set with 409 instead of deleting unpredicted rows. A 409 drops the sheet's
+set with 409 instead of deleting unpredicted rows.
+
+A 409 drops the sheet's
 preview and re-counts, so the operator confirms the new set instead of
 repeating the refusal. The filter selections reset every time the sheet
 refills, so a stale invisible filter never arms a destructive default.
@@ -650,7 +772,9 @@ selection (`filter="all"` for a bodyless full delete, `filter="unparsed"` while
 the body or query has not been accepted, and `members="unparsed"` likewise for
 a backup/restore), the previewed count when
 one was supplied, and the committed `deleted` / `buffer_removed` counts, or the
-error. Even a rejection at the method gate or the query grammar, before the
+error.
+
+Even a rejection at the method gate or the query grammar, before the
 selection exists, leaves a line. Each value is quoted with Go string escaping,
 so a label carrying a newline or a quote stays one token on one physical line. A
 lost or truncated response therefore stays diagnosable, and a
@@ -661,12 +785,15 @@ Export/delete filters are exact raw record fields, not display-name model
 canonicalization. The API also supports conversation/error-type/time filters
 beyond the console's common choices. See the shared
 [filter decoder](../cmd/proxy/log.go) and
-[PurgeFilter](../internal/storage/purge.go). Empty-body full deletion is
+[PurgeFilter](../internal/storage/purge.go).
+
+Empty-body full deletion is
 deliberate and destructive; never use malformed or empty JSON as an all-records
 command. The count preview applies the same empty-filter rule, so `{}` answers
 400 on both routes rather than counting the full set for an ambiguous body; a
 genuinely bodyless count previews the whole set, exactly like the bodyless
 delete.
+
 The delete fence preserves newer completions and in-flight work. A completed
 purge, and an expired debug-capture sweep, checkpoint-truncates the WAL after
 the committed delete: `secure_delete` zeroes freed cells in the pages SQLite
@@ -703,18 +830,20 @@ The In-flight tile separates work that is sending from work the scheduler is
 parking. Its summary names the two totals that fit the narrowest tile - active
 and queued - and the composition rail under the value splits every live state
 (sending, pending, operator-paused, throttled) by color; hovering the rail, or
-focusing it with assistive technology, reads the exact per-state counts. A
-queued request is one the proxy has not sent upstream yet: it can be waiting in
-the admission queue (per-key concurrency, pacing, a provider cap or an operator
-hold) or in the retry send gate behind a 429/5xx pacing window. The request
-table marks the same state with the `throttled` pill, and the status selector
-can filter on it.
+focusing it with assistive technology, reads the exact per-state counts.
+
+A queued request is one the proxy has not sent upstream yet: it can be
+waiting in the admission queue (per-key concurrency, pacing, a provider cap
+or an operator hold) or in the retry send gate behind a 429/5xx pacing
+window. The request table marks the same state with the `throttled` pill, and the
+status selector can filter on it.
 
 Explorer dimensions are Providers, Models, Client, Conversations, Tools, Time,
 Status, Errors and Keys. Their meanings are server-owned: model grouping and
 time-bucket membership are not browser guesses. Conversations can show declared
 parents and main/sub/unresolved counts; read the
 [lineage contract](protocol.md#main-and-sub-conversations) before interpreting them.
+
 Tools and error signatures can each have multiple memberships per request.
 Tool cards count affected requests for N and share, with request-level card
 metrics counted once per affected request; their calls KPI separately sums
@@ -722,22 +851,31 @@ request ToolCalls, so repeated same-name calls do not inflate the request count.
 A request using several tools contributes to each tool card. Error/429 health
 badges and every gallery share use distinct affected requests.
 
-The [visual guide](dashboard.md) covers every timeline and its controls. Overview
-is the summary: it carries no plot, and its tiles take the whole card (requests
-over the blended token volume, tokens in/out/cached with their shares, spend
-with the blended per-Mtok price, the errors / 429 pair, and average latency /
-speed over every measured request with each metric's low-high sample range);
-Traffic compares requests/errors; Tokens separates available input/output/reasoning/cache
-usage and tracks the cache-hit share of input on a percentage axis; Speed + latency
-plots throughput on its own axis with TTFT and the decode window (first token to
-last, the span decode speed measures) sharing a duration axis; Errors compares
-error count/rate; Cost places reported USD spend beside request volume. One
-percentile selection controls the timing series (the Overview keeps only the
-timeframe control). Period readouts are computed from period samples, not
-averages of bucket percentiles. Insufficient samples
-remain unavailable. All time means the available retained history, not deleted,
-dropped or never-observed requests, and the timeframe control never offers a
-window wider than it. The chart endpoint takes either a minute `window` (or
+The [visual guide](dashboard.md) covers every timeline and its controls.
+
+- Overview
+  is the summary: it carries no plot, and its tiles take the whole card (requests
+  over the blended token volume, tokens in/out/cached with their shares, spend
+  with the blended per-Mtok price, the errors / 429 pair, and average latency /
+  speed over every measured request with each metric's low-high sample range).
+- Traffic compares requests/errors.
+- Tokens separates available input/output/reasoning/cache
+  usage and tracks the cache-hit share of input on a percentage axis.
+- Speed + latency
+  plots throughput on its own axis with TTFT and the decode window (first token to
+  last, the span decode speed measures) sharing a duration axis.
+- Errors compares
+  error count/rate.
+- Cost places reported USD spend beside request volume.
+
+One percentile selection controls the timing series (the Overview keeps only
+the timeframe control). Period readouts are computed from period samples,
+not averages of bucket percentiles. Insufficient samples remain unavailable.
+All time means the available retained history, not deleted, dropped or
+never-observed requests, and the timeframe control never offers a window
+wider than it.
+
+The chart endpoint takes either a minute `window` (or
 `all`) or an explicit `from_ms`/`to_ms` pair for calendar ranges; each payload
 reports the resolved right edge `to_ms` and the unscoped `data_from_ms` extent
 the control gates on.
@@ -747,20 +885,28 @@ the control gates on.
 The log starts with recent rows and pages older durable records as you scroll.
 Live rows show in-flight/queue/retry progress; final rows retain their outcomes.
 Retry disclosure opens absorbed attempts under the original request, not another
-inference record. The attempts log keeps the newest `max_retries` plus
+inference record.
+
+The attempts log keeps the newest `max_retries` plus
 `storm_max_retries` entries (at least one): a durable quota wait re-sends
 without spending either budget, so the tail is what explains a long parked
 request.
 Click the detail arrow or a non-link row cell to open its
 drawer; previous/next controls navigate requests without changing the scope.
 
-The inspector presents available facts in four classified groups. Request covers
-identity/status/times, time bucket, wire sizes, client/runtime, provider metadata,
-model and captured parameters. Content covers conversation and parent ids, turn
-and size composition, and prompt/response previews. Usage covers token splits,
-generated tokens, timing, throughput, cost, transport decomposition and tools.
-Diagnostics covers queue/rate limits, retries, in-band upstream responses,
-retained headers and Debug. A summary readout carries the status, route, identity
+The inspector presents available facts in four classified groups.
+
+- Request covers
+  identity/status/times, time bucket, wire sizes, client/runtime, provider metadata,
+  model and captured parameters.
+- Content covers conversation and parent ids, turn
+  and size composition, and prompt/response previews.
+- Usage covers token splits,
+  generated tokens, timing, throughput, cost, transport decomposition and tools.
+- Diagnostics covers queue/rate limits, retries, in-band upstream responses,
+  retained headers and Debug.
+
+A summary readout carries the status, route, identity
 and first numbers, and a final upstream failure renders as an error alert above
 the groups. Only the selected group is shown; card headers collapse, and the
 active group and collapse choices survive live updates.
@@ -801,55 +947,68 @@ waits and response handling. TTFT is measured from the upstream attempt's own
 send start to the first token (reasoning or answer), so every retry has its own
 TTFT. The value excludes proxy scheduler queueing, request parsing and retry
 backoff, but it does span the upstream transport window from request handoff
-(dial, TLS, connection-pool wait, header wait). A request that produced no
+(dial, TLS, connection-pool wait, header wait).
+
+A request that produced no
 token, one that never sent an upstream attempt of its own (a parked cursor
 resume), and any non-streamed response have no TTFT: the log shows a
-placeholder, not 0 ms, and aggregates skip it. Rows written before
-0.3.34 stored `ttft_ms` anchored at request start (upload, queueing and retry
-backoff included) and were zeroed once by the boot repair, so they report TTFT
-as absent; their `started_at` and `first_token_at` timestamps remain, keeping
-`pre_token_ms` and decode windows usable. TPS is the single
-generation-speed measure: (generation tokens - 1) over the first-token to
-last-token window. Average TTFT and average TPS are the arithmetic means of
-those per-request samples. TPS is absent for fewer than two tokens, a
-non-positive window, or a response that did not stream (no token timestamps).
-The compact surfaces (the KPI band and the Overview timing tile) abbreviate
-this unit as `t/s`; roomier readouts spell it `tok/s`.
+placeholder, not 0 ms, and aggregates skip it.
+
+Rows written before 0.3.34 stored `ttft_ms` anchored at request start (upload,
+queueing and retry backoff included) and were zeroed once by the boot
+repair, so they report TTFT as absent; their `started_at` and `first_token_at` timestamps remain,
+keeping `pre_token_ms` and decode windows usable.
+
+TPS is the single generation-speed measure: (generation tokens - 1) over the
+first-token to last-token window. Average TTFT and average TPS are the
+arithmetic means of those per-request samples. TPS is absent for fewer than
+two tokens, a non-positive window, or a response that did not stream (no
+token timestamps). The compact surfaces (the KPI band and the Overview
+timing tile) abbreviate this unit as `t/s`; roomier readouts spell it `tok/s`.
+
 The numerator assumes the first observed content chunk carries one token; a provider that bundles several tokens into that chunk can
 still overstate the rate. These are provider-attempt measurements, not claims
 about total user wait or system-wide throughput.
 
 Money stays USD in storage and APIs. The shared UI formatter uses cents below
-$1, including fractional cents, and dollars for larger magnitudes. Usage/cost
-comes from recognized upstream fields or configured field mappings; unavailable
-reporting and a displayed zero do not establish a zero bill. Reasoning/cache
-splits depend on what the upstream actually reports. When a stream carries no
+$1, including fractional cents, and dollars for larger magnitudes.
+
+Usage/cost comes from recognized upstream fields or configured field
+mappings; unavailable reporting and a displayed zero do not establish a zero
+bill. Reasoning/cache splits depend on what the upstream actually reports.
+
+When a stream carries no
 usage object, or carries one whose output count is zero, the recorded output
 token count is restored from the streamed chunk count, which includes
-tool-argument fragments; the count is an estimate, not a provider report. Chat
-tool calls are deduplicated by delta index while the retained index set holds
-up to 1,024 distinct indexes. Once the set is full a further index cannot be
-retained, so each of its fragments counts again; a hostile stream of repeated
-indexes can overstate the tool-call count without growing memory past the
-bound.
+tool-argument fragments; the count is an estimate, not a provider report.
+
+Chat tool calls are deduplicated by delta index while the retained index set
+holds up to 1,024 distinct indexes. Once the set is full a further index
+cannot be retained, so each of its fragments counts again; a hostile stream
+of repeated indexes can overstate the tool-call count without growing memory
+past the bound.
 
 Errors count affected requests with a genuine failure, including recovered
 upstream failures. Rate limits count requests that saw a rate-limit class on
 the final, a retried or an in-band attempt: an HTTP 429, a 429 whose status
 line a committed 200 could not relay, or a provider spelling the classifier
 recognizes (such as `tier_limit_exceeded` on a 400); each request counts once.
+
 The two signals can overlap: a bare 429 is not an error, but a non-429 status
 that carries a rate-limit class failed the request and counts in both.
-Client-local
-cancellation is likewise distinct from an upstream failure - except a 499 whose
-record carries a structured error type: that observed a failure before the
-client left, either the provider's in-band stream failure (typically an error
-event the client received and aborted around) or a truncated stream whose
-completion marker never arrived, independent of which relay write failed. It
-counts as the upstream error it is. Zero
-explorer health badges are hidden independently. Error-dimension card
+
+Client-local cancellation is likewise distinct from an upstream failure -
+except a 499 whose record carries a structured error type: that observed a
+failure before the client left, either the provider's in-band stream failure
+(typically an error event the client received and aborted around) or a
+truncated stream whose completion marker never arrived, independent of which
+relay write failed. It counts as the upstream error it is.
+
+Zero explorer health badges are hidden independently. Error-dimension card
 headlines count failure events (final plus absorbed), while card N counts
-distinct affected requests. The gallery share denominator `error_total` is the
+distinct affected requests.
+
+The gallery share denominator `error_total` is the
 union of affected requests represented by the error cards, so a card's share
 is N / `error_total` and can never exceed 100%. This denominator includes
 recovered quality failures whose final status is not an error (for example an
@@ -862,10 +1021,14 @@ The explorer gallery renders at most 24 cards. Its fold tracks exact
 per-value accumulators for at most 8192 distinct values in the active
 dimension; later values are combined into a synthetic `other` card with
 aggregate count, cost, token, tool and health fields, competing for the 24
-cards by that count. The synthetic card carries `synthetic: true` on the wire,
+cards by that count.
+
+The synthetic card carries `synthetic: true` on the wire,
 renders as `other (grouped)`, and is not filterable. A real value named `other`
 keeps its own exact card and filter; `other` is a display bucket only when the
-card is synthetic. Rail distinct-value counts, footer scope totals and
+card is synthetic.
+
+Rail distinct-value counts, footer scope totals and
 conversation summaries still cover the whole filtered history, so card counts
 need not add up to them.
 
@@ -875,18 +1038,25 @@ The HTML includes the canonical bootstrap state so the first paint need not wait
 for a second state request. Live SSE carries pending progress and finalization;
 KPI/operator polling and configured aggregate refresh keep derived surfaces current.
 Reconnects use sequence/feed identity and fall back to full snapshots when replay
-cannot be trusted. The footer distinguishes live/offline, active holds/Debug,
+cannot be trusted.
+
+The footer distinguishes live/offline, active holds/Debug,
 process-local storage drops, totals degraded by a failed startup history scan,
-and a degraded operator-state restore. The last one is the difference between
+and a degraded operator-state restore.
+
+The last one is the difference between
 "nothing is held" and "a saved hold or limit document could not be read": the
 served `pause` and `throttle` snapshots carry `restore_degraded`, so a truncated
 document does not boot as a healthy, unpaused proxy with its saved rules silently
 gone. The flag stays true for the life of the process; a restart that reads a
-document which decodes is what clears it. Each key holds one value, so the next
+document which decodes is what clears it.
+
+Each key holds one value, so the next
 accepted operator write replaces the unreadable document rather than preserving
-it: capture the bytes first if they are needed as evidence. An offline
-indicator alone does not prove inference is down. None of these mechanisms makes
-initial history preload instantaneous.
+it: capture the bytes first if they are needed as evidence.
+
+An offline indicator alone does not prove inference is down. None of these
+mechanisms makes initial history preload instantaneous.
 
 For integrations, use the documented read routes rather than scraping the DOM.
 Bootstrap/live data is a recent observation window; scoped aggregate routes query
@@ -909,26 +1079,29 @@ The gated query route (`GET /metrics/query?q=`, above) and the [MCP](mcp.md)
 `query` tool both take exactly one `SELECT` with no statement separator, and
 results are bounded by `storage_query_max_rows` and
 `storage_query_max_bytes`; an over-budget result is an error on the route, so
-keep wide scans behind a `started_at` window or a `LIMIT`. The statement gate
-also denies the read-only capabilities SQLite exposes outside ordinary tables
-and columns: `ATTACH`, `DETACH`, `PRAGMA`, `LOAD_EXTENSION`, the
-`sqlite_dbpage` and `dbstat` table-valued functions, the whole result-bearing
-`pragma_*` family and the `readfile`/`writefile` functions. Those would read
-raw pages, page statistics or the absolute database path, which is not part of
-this console's surface.
+keep wide scans behind a `started_at` window or a `LIMIT`.
+
+The statement gate also denies the read-only capabilities SQLite exposes
+outside ordinary tables and columns: `ATTACH`, `DETACH`, `PRAGMA`, `LOAD_EXTENSION`, the `sqlite_dbpage` and `dbstat`
+table-valued functions, the whole result-bearing `pragma_*` family and the `readfile`/`writefile`
+functions. Those would read raw pages, page statistics or the absolute
+database path, which is not part of this console's surface.
 
 The denial is lexical over the raw query text, string literals included, so a
 keyword spelled inside a literal is refused too: `SELECT 'attach' AS x` and
 `SELECT 'pragma_table_info'` both fail. A name only has to contain the bare
-word at an ASCII boundary; `attachment` and `attach_x` pass. The driver
-executes a multi-statement string wholesale, returning the rows of the last
-statement, so both rules are load-bearing: without the `;` refusal a second
-`ATTACH` statement would run behind a `SELECT` prefix the prefix check accepts,
-and the keyword scan alone would not see it. Column meanings
-come from the MCP `describe` tool. `started_at` is Unix milliseconds: a
-relative window is `started_at >= strftime('%s','now')*1000 - 3600000`, and
-calendar math divides by 1000 and applies SQLite's `unixepoch` modifier,
-with `localtime` for the host's zone. The recipes below earn their keep in
+word at an ASCII boundary; `attachment` and `attach_x` pass.
+
+The driver executes a multi-statement string wholesale, returning the rows
+of the last statement, so both rules are load-bearing: without the `;`
+refusal a second `ATTACH` statement would run behind a `SELECT` prefix the prefix
+check accepts, and the keyword scan alone would not see it.
+
+Column meanings come from the MCP `describe` tool. `started_at` is Unix milliseconds: a
+relative window is `started_at >= strftime('%s','now')*1000 - 3600000`, and calendar math divides by 1000 and applies
+SQLite's `unixepoch` modifier, with `localtime` for the host's zone.
+
+The recipes below earn their keep in
 the derived shapes no dashboard surface computes: the outlier ratio, the
 write/read ratio, the latency decompositions. Their ingredient aggregates
 are conceded up front, the way the decode window already is: the explorer
@@ -936,7 +1109,9 @@ sums per-group counts and cache reads (its `N` and `Cache` fields) and a
 per-group blended $/Mtok (its `cost_per_mtok` KPI, the same cost-reporting
 in+out rule), and the chart's dec series samples the shared decode window
 (`last_token_at - first_token_at`) that recipe 1 decomposes latency
-around. Several of the columns a recipe reads do overlap the aggregate
+around.
+
+Several of the columns a recipe reads do overlap the aggregate
 scans: `ttft_ms`, `reasoning_tokens`, `status_code`, `attempts`,
 `output_tokens` and `cache_read_tokens` all appear in the dashboard's scan
 lists. The recipes' private reading set, which no aggregate scan reads, is
@@ -962,13 +1137,14 @@ LIMIT 20
 
 `pre_token_ms` is the wait the caller felt, including queue and retry waits;
 `ttft_ms` is measured from the adopted upstream attempt's send start, so a
-retried request shows a small ttft beside a large `pre_token_ms`. Rows written
-before 0.3.34 carry a start-anchored `ttft_ms` and were zeroed once by the
-boot repair, so their `ttft_ms` reads 0 (absent) while `pre_token_ms` and
-`decode_ms` stay usable from the stored timestamps. `decode_ms` is the
-streaming window and `tail_ms` what remains after the last token, where a
-millisecond of rounding noise is normal. A request that produced no token, or
-was not streamed, has nothing to decompose, hence the `first_token_at > 0` gate.
+retried request shows a small ttft beside a large `pre_token_ms`.
+
+Rows written before 0.3.34 carry a start-anchored `ttft_ms` and were zeroed once
+by the boot repair, so their `ttft_ms` reads 0 (absent) while `pre_token_ms` and `decode_ms` stay
+usable from the stored timestamps. `decode_ms` is the streaming window and `tail_ms` what
+remains after the last token, where a millisecond of rounding noise is
+normal. A request that produced no token, or was not streamed, has nothing
+to decompose, hence the `first_token_at > 0` gate.
 
 **How long did a model think before answering?**
 
