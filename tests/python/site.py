@@ -19,9 +19,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from scripts.build_site import (DEFAULT_BASE_URL, README_ANCHORS, build_site, image_size,
+from scripts.build_site import (DEFAULT_BASE_URL, README_ANCHORS, build_site,
                                 markdown_engine, performance_headline, render_fragment,
                                 site_fonts, toc_html)
+from scripts.site_media import SITE_IMAGE_EXCLUDES, image_size
 from scripts.perf_docs import check as performance_drift_errors
 from tests.repository_check import markdown_anchors
 from tests.support import (PALETTE_OWNER, ROOT, SITE_STYLESHEET, root_custom_properties,
@@ -159,24 +160,47 @@ def entity_color_errors() -> list[str]:
             for value in sorted(used - canonical)]
 
 
-BRAND_IMAGE_CONTRACTS = {
-    "docs/images/brand/readme-cover-dark.png": (1600, 640),
-    "docs/images/brand/readme-cover-light.png": (1600, 640),
-    "docs/images/brand/readme-spec.svg": (1600, 192),
-    "docs/images/brand/readme-spec-mobile.svg": (800, 447),
-    "site-src/assets/og.png": (1200, 630),
-    ".github/social-preview.png": (1280, 640),
-}
+BRAND_MANIFEST = ROOT / "scripts/brand/manifest.json"
+
+
+def brand_assets() -> dict[str, dict]:
+    payload = json.loads(BRAND_MANIFEST.read_text(encoding="utf-8"))
+    if payload.get("schema") != 1:
+        raise ValueError("scripts/brand/manifest.json schema is not 1")
+    return {entry["path"]: entry for entry in payload["assets"]}
 
 
 def brand_image_errors() -> list[str]:
-    """Pin the dimensions of artwork that GitHub renders or a maintainer
-    uploads. The PWA icon pixel contracts live in the Go web tests."""
+    """Verify every generated brand plate against its one manifest.
+
+    Dimensions used to be a second hand-maintained map here. The manifest is
+    written by scripts/brand/build.py, so the asset, its contract and its hash
+    move together; a hand edit to a PNG or an SVG fails instead of shipping.
+    """
     errors = []
-    for name, expected in BRAND_IMAGE_CONTRACTS.items():
-        actual = image_size(ROOT / name)
+    assets = brand_assets()
+    for name, entry in assets.items():
+        path = ROOT / name
+        if not path.is_file():
+            errors.append(f"{name}: missing generated brand asset")
+            continue
+        actual = image_size(path)
+        expected = (entry["width"], entry["height"])
         if actual != expected:
             errors.append(f"{name}: dimensions are {actual}, expected {expected[0]}x{expected[1]}")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != entry["sha256"]:
+            errors.append(f"{name}: sha256 does not match scripts/brand/manifest.json; "
+                          "run python3 -m scripts.brand.build")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for tag in re.findall(r"<img\b[^>]*>", readme):
+        src = re.search(r'\bsrc="([^"]*)"', tag)
+        if not src or src.group(1) not in assets:
+            continue
+        width = re.search(r'\bwidth="(\d+)"', tag)
+        if width and int(width.group(1)) != assets[src.group(1)]["width"]:
+            errors.append(f"README width {width.group(1)} does not match the manifest "
+                          f"width {assets[src.group(1)]['width']} for {src.group(1)}")
     return errors
 
 
@@ -371,8 +395,6 @@ def image_size_errors() -> list[str]:
     cannot parse would silently waive that rule, so the WebP header parse is
     exercised directly rather than only through the current artwork.
     """
-    from scripts.build_site import image_size
-
     width, height = 1234, 567
     header = (b"RIFF" + (30).to_bytes(4, "little") + b"WEBPVP8X"
               + (10).to_bytes(4, "little") + b"\x00" * 4

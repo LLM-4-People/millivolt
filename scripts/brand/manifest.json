@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "generator": "python3 -m scripts.brand.build",
+  "assets": [
+    {
+      "path": "docs/images/brand/readme-cover-dark.png",
+      "width": 1600,
+      "height": 640,
+      "builder": "cover",
+      "bytes": 548339,
+      "sha256": "8ec9d16386cd280035375e3428e29fcf61b24c57c9839cca75239926b4bc915f"
+    },
+    {
+      "path": "docs/images/brand/readme-cover-light.png",
+      "width": 1600,
+      "height": 640,
+      "builder": "cover",
+      "bytes": 726916,
+      "sha256": "aba5eb3657401da79cc13158278c10b8d40aacb3113d19e4ec926c5282aa1416"
+    },
+    {
+      "path": "docs/images/brand/readme-spec.svg",
+      "width": 1600,
+      "height": 192,
+      "builder": "spec",
+      "bytes": 48771,
+      "sha256": "17aee2898f2421f8b1c27cd612f0002e89a3eedca29f0f98dd2ef6a94f3618da"
+    },
+    {
+      "path": "docs/images/brand/readme-spec-mobile.svg",
+      "width": 800,
+      "height": 447,
+      "builder": "spec",
+      "bytes": 56010,
+      "sha256": "ee6358730149e7d078e5997c9397b5500c121f21cab700f5e023cb90e6a5da08"
+    },
+    {
+      "path": "site-src/assets/og.png",
+      "width": 1200,
+      "height": 630,
+      "builder": "og",
+      "bytes": 400739,
+      "sha256": "591d185664fd4b49b5c4bd549f935c559bcf3fb1169f65d4117210cb8c08bbc8"
+    },
+    {
+      "path": ".github/social-preview.png",
+      "width": 1280,
+      "height": 640,
+      "builder": "social",
+      "bytes": 403226,
+      "sha256": "93413883f8a1ab3001e50c6ffa620ba6c3a664499618cfc8627ba3c1b8ffd317"
+    }
+  ]
+}

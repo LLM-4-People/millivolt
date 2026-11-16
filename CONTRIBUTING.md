@@ -329,6 +329,31 @@ a different host than `DEFAULT_BASE_URL`, because that is what a half-finished
 migration looks like. GitHub ignores a `CNAME` file in an Actions deployment, so
 this repository does not ship one.
 
+### Brand plates
+
+The README covers, specification strips, Open Graph card and GitHub social
+preview are generated, not hand-edited. `scripts/brand/facts.py` owns the
+headline, the four specification facts and the sample-history values.
+`scripts/brand/manifest.json` owns each target's dimensions and hash.
+
+Regenerate every plate after a copy or fact change:
+
+```sh
+python3 -m pip install --require-hashes -r requirements-docs.txt
+python3 -m scripts.brand.build
+```
+
+The PNG renders need Playwright's Chromium; the SVG strips do not.
+`python3 -m scripts.brand.build --check` verifies every committed asset against
+the manifest and re-renders both SVG strips from source. CI runs that check.
+The tool count in the specification strip comes from
+`scripts/mcp_registry.py`, the same parser the MCP docs test uses, so adding a
+tool cannot leave the art behind.
+
+Upload `.github/social-preview.png` under the repository's Settings, Social
+preview after it changes. That upload is a GitHub setting, not a repository
+file.
+
 ### Push gate
 
 Never push `main` directly: open a promotion pull request and merge it with a
