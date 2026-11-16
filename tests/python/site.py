@@ -620,6 +620,11 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
             value = parsed[page].meta.get(key, "")
             if value and not value.startswith(base_url):
                 errors.append(f"{rel}: {key} {value!r} is not on the published base {base_url}")
+        if page == site / "index.html":
+            for key in ("og:image:alt", "twitter:image:alt"):
+                value = parsed[page].meta.get(key, "")
+                if "not a benchmark" not in value:
+                    errors.append(f"index.html: {key} must label the dashboard values as a sample")
         canonical = re.search(r'<link rel="canonical" href="([^"]+)"',
                               page_texts[page])
         if canonical and not html_unescape(canonical.group(1)).startswith(base_url):

@@ -3,8 +3,12 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/readme-cover-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/brand/readme-cover-light.png">
-  <img src="docs/images/brand/readme-cover-dark.png" alt="millivolt cover: the headline See every AI request. Keep your own routing. beside a dashboard capture showing request count, total cost, cache hit rate, and provider totals" width="1600">
+  <img src="docs/images/brand/readme-cover-dark.png" alt="millivolt cover: the headline See every AI request. Keep your own routing. beside a static dashboard capture from redacted history showing request count, total cost, cache hit rate, and provider totals; sample values, not a benchmark" width="1600">
 </picture>
+
+<sub>Dashboard values are a sample from one redacted self-hosted history, not
+a benchmark or a capacity measurement. Published measurements live in
+[performance](docs/performance.md).</sub>
 
 <picture>
   <source media="(min-width: 761px)" srcset="docs/images/brand/readme-spec.svg">

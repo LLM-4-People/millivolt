@@ -754,7 +754,7 @@ def base_values(
         "canonical_tag": canonical_tag,
         "og_url": attr_escape(og_url),
         "og_image": attr_escape(og_image),
-        "og_image_alt": attr_escape("millivolt: See every AI request. Keep your own routing. The dashboard band shows request count, total cost, cache hit rate, and provider totals from a redacted fixture capture."),
+        "og_image_alt": attr_escape("millivolt: See every AI request. Keep your own routing. A static dashboard band shows request count, total cost, cache hit rate and provider totals from redacted history; sample values, not a benchmark."),
         "site_name": "millivolt",
         "root": root,
         "body": body,
@@ -1143,8 +1143,13 @@ def readme_image_errors() -> list[str]:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     errors = []
     images = re.findall(r"<img\b[^>]*>", readme)
-    if not any("readme-cover-dark.png" in tag for tag in images):
+    covers = [tag for tag in images if "readme-cover-dark.png" in tag]
+    if not covers:
         errors.append("README is missing the cover fallback image")
+    elif not any("sample values, not a benchmark" in tag for tag in covers):
+        errors.append("README cover alt must say the dashboard values are a sample, not a benchmark")
+    if "not a benchmark or a capacity measurement" not in " ".join(readme.split()):
+        errors.append("README must label the cover dashboard values as a sample")
     for tag in images:
         if not re.search(r"\bheight=", tag):
             continue
