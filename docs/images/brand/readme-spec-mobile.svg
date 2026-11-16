@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="800" height="384" viewBox="0 0 800 384" role="img" aria-labelledby="title desc">
   <title id="title">millivolt at a glance</title>
-  <desc id="desc">Three client wires, four upstream formats, one Go binary, 22 MCP tools, one operator plane.</desc>
+  <desc id="desc">Three client wires, four upstream formats, one Go binary, 25 MCP tools, one operator plane.</desc>
   <defs>
     <clipPath id="frame">
       <rect x="0.5" y="0.5" width="799" height="383" rx="18"/>
@@ -21,7 +21,7 @@
       <g fill="#e8e4de" font-size="76" font-weight="500">
         <text x="28" y="136">04</text>
         <text x="428" y="136">01</text>
-        <text x="28" y="302">22</text>
+        <text x="28" y="302">25</text>
         <text x="428" y="302">01</text>
       </g>
       <g fill="#97907e" font-size="24" letter-spacing="2.2">

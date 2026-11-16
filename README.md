@@ -12,7 +12,7 @@ a benchmark or a capacity measurement. Published measurements live in
 
 <picture>
   <source media="(min-width: 761px)" srcset="docs/images/brand/readme-spec.svg">
-  <img src="docs/images/brand/readme-spec-mobile.svg" alt="Readout: four upstream formats, one Go binary, 22 MCP tools, one operator plane" width="800">
+  <img src="docs/images/brand/readme-spec-mobile.svg" alt="Readout: four upstream formats, one Go binary, 25 MCP tools, one operator plane" width="800">
 </picture>
 
 **See every AI request. Keep your own routing.** millivolt is a patch bay for
@@ -187,7 +187,7 @@ opens the policies, export and restart controls. Capture scoped debug bodies, ex
 you filtered, and turn on error-storm protection with recovery probes. These are
 operator actions, not per-user permissions.
 
-One Go service also carries the dashboard, SQLite, and a 22-tool MCP server at
+One Go service also carries the dashboard, SQLite, and a 25-tool MCP server at
 `/mcp`. An LLM client needs only the endpoint and its Bearer credential. See
 the [MCP server guide](docs/mcp.md).
 
@@ -251,7 +251,7 @@ vulnerabilities.
 | `01` | [Quickstart](#quickstart) · [container operation](docs/containers.md#containers) | First run, images, volumes, shutdown |
 | `02` | [Protocol](docs/protocol.md) · [adapters](docs/adapters.md) | Client setup, translation, compatibility |
 | `03` | [Operations](docs/operations.md) · [operator CLI](docs/cli.md) · [performance](docs/performance.md) · [reverse proxy](docs/reverse-proxy.md) | Day-to-day operation and measurements |
-| `04` | [MCP server](docs/mcp.md) | The 22-tool operator API |
+| `04` | [MCP server](docs/mcp.md) | The 25-tool operator API |
 | `05` | [Architecture](docs/architecture.md) | Ownership and invariants |
 | `06` | [Contributing](CONTRIBUTING.md) · [support](SUPPORT.md) · [security](SECURITY.md) | Development, help, reporting |
 

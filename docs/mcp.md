@@ -7,7 +7,7 @@ It is a client of a running proxy: it never starts, stops or restarts the proxy
 process. Its operator tools can reconfigure a running proxy, but only through
 the same credential and the same routes the dashboard uses.
 
-The endpoint serves 22 tools from one implementation. It is operator-gated
+The endpoint serves 25 tools from one implementation. It is operator-gated
 and Bearer-only, enabled by default: `mcp_enabled: false` removes it from the
 process (the route stays reserved, answering 404 and never inference; restart
 to apply), and the limits are config fields in the `mcp` category. It
@@ -79,7 +79,7 @@ of choosing a client:
   either, unlike `/admin`, `/session`, `/metrics` and `/dash`, so an MCP client's
   cookie jar gains no dashboard credential; a client must not expect or send a
   session id. The admitted credential does key an in-process cache of the SDK
-  server object, so repeated calls do not rebuild all 22 tool registrations;
+  server object, so repeated calls do not rebuild all 25 tool registrations;
   admitting a different credential replaces it. The credential is only the
   in-memory cache key: it is never logged or persisted.
 - SSE resumption is not offered: no event store exists, so `Last-Event-ID`
@@ -112,12 +112,17 @@ of choosing a client:
 
 ## Tools
 
-`describe` is the one to call first. Without the live schema and the column
-semantics below, correct SQL is guesswork.
+`describe` is the one to call first for this instance's live schema; without
+it, correct SQL is guesswork. `docs_list` is the one to call first for how
+millivolt itself works: it indexes the same Markdown as the published site and
+needs no proxy request.
 
 | Tool | Purpose |
 | --- | --- |
 | `describe` | Live SQLite schema, the complete `requests`/`request_debug`/`meta` column reference, the exact health predicates, a value vocabulary for every filter dimension, the live known client/provider/model and tool names, the indexes, the complete result-limit set (the query row default and explicit `max_rows` ceiling, query bytes, log page band, default page size, explorer group and chart bucket caps, Prometheus line cap and capture byte budget), and the working SQL idioms for this build. |
+| `docs_list` | Every published documentation page in navigation order, with its path, title, description, public URL, Markdown URL and section count. Starts the docs flow; local only. |
+| `docs_search` | Ranked section search across titles, headings and body text, with path, anchor, heading context and a snippet. Every query word must match; the result reports its total and truncation. Local only. |
+| `docs_read` | One page by path, or one anchored section by heading id. Full-page Markdown is capped at 256 KiB with an explicit marker. This is the canonical explanation of millivolt's routes, configuration, protocol and operator behavior. Local only. |
 | `query` | One bounded `SELECT`, clamped on both rows and encoded size, truncating with an explicit marker. The only tool that can express a time range. |
 | `values` | The distinct values one dimension has in durable history, most frequent first, so a filter value is discovered rather than guessed. |
 | `explore` | Faceted breakdown over all matching history by one dimension, with at most 24 groups. No time window. |
@@ -487,14 +492,15 @@ capture cycle (`audit_start` and `audit_stop`), and the purge path: the
 missing confirmation, the wrong phrase, an unauthorized token and a token
 issued for a different filter each refuse with the row count unchanged, and
 then an authorized purge deletes the fixture rows. The read-only tools are
-`describe`, `query`, `explore`, `chart`, `records`, `snapshot`, `prometheus`,
-`audit_status`, `audit_captures_list`, `audit_capture_get`, `operator_state`,
-`config_get`, `values` and `purge_preview`; the run drives each of them. A
+`describe`, `docs_list`, `docs_search`, `docs_read`, `query`, `explore`,
+`chart`, `records`, `snapshot`, `prometheus`, `audit_status`,
+`audit_captures_list`, `audit_capture_get`, `operator_state`, `config_get`,
+`values` and `purge_preview`; the run drives each of them. A
 successful purge and the config write are safe here because the instance, its
 database and its config copy all belong to the test and are discarded.
 
 The same run drives the proxy's own `/mcp` endpoint with a real streamable
-HTTP client: `initialize`, `tools/list` (22 tools), and `describe` and
+HTTP client: `initialize`, `tools/list` (25 tools), and `describe` and
 `records` returning the same documents the in-process session returns, plus the
 auth boundary (401 without a credential, 401 for a wrong Bearer from the shared
 gate, 403 for a cookie-only request or a wrong Bearer beside an admitted

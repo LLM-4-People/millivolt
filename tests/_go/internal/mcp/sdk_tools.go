@@ -89,7 +89,8 @@ func textOf(t *testing.T, result *sdk.CallToolResult) string {
 // owner of the contract, so count checks elsewhere compare against it instead
 // of repeating a number that a tool addition would leave stale.
 var registeredToolNames = []string{
-	"describe", "query", "values", "explore", "chart", "records", "snapshot", "prometheus",
+	"describe", "docs_list", "docs_search", "docs_read",
+	"query", "values", "explore", "chart", "records", "snapshot", "prometheus",
 	"audit_status", "audit_start", "audit_stop", "audit_captures_list", "audit_capture_get",
 	"operator_state", "set_pause", "set_throttle", "resume_quota", "set_config", "config_get",
 	"reload_config", "purge_preview", "purge",
@@ -189,6 +190,9 @@ func TestRegisteredToolsReachTheProxy(t *testing.T) {
 		wantKey   string
 	}{
 		{"describe", map[string]any{}, "schema"},
+		{"docs_list", map[string]any{}, "pages"},
+		{"docs_search", map[string]any{"query": "operator token"}, "results"},
+		{"docs_read", map[string]any{"path": "docs/mcp.md", "section": "tools"}, "text"},
 		{"query", map[string]any{"sql": "SELECT 1", "max_rows": 5}, "rows"},
 		{"explore", map[string]any{"dim": "provider"}, "groups"},
 		{"chart", map[string]any{"window": "5"}, "buckets"},

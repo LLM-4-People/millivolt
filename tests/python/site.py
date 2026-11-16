@@ -289,6 +289,61 @@ def shell_asset_errors(site: Path) -> list[str]:
     return errors
 
 
+def docs_manifest_errors(site: Path, base_url: str) -> list[str]:
+    """The LLM/MCP index is generated from the same pages as the site.
+
+    The checked-in copy is the MCP embed; a stale copy would answer with an old
+    title, anchor or route. The site output also has to carry the per-page
+    Markdown and the two llms files, and every absolute Markdown URL must name
+    a file that exists beside its rendered twin.
+    """
+    import scripts.build_site as build_site
+
+    errors: list[str] = []
+    generated_path = site / "docs.json"
+    if not generated_path.is_file():
+        return ["docs.json was not generated"]
+    generated = json.loads(generated_path.read_text(encoding="utf-8"))
+    if generated.get("schema") != 1:
+        errors.append(f"docs.json schema is {generated.get('schema')!r}, want 1")
+    pages = generated.get("pages", [])
+    if not pages:
+        errors.append("docs.json contains no pages")
+    if base_url.rstrip("/") != build_site.DEFAULT_BASE_URL.rstrip("/"):
+        return errors
+    checked = ROOT / "internal/docs/docs.json"
+    if not checked.is_file():
+        errors.append("internal/docs/docs.json is missing; run scripts/build_site.py --write-manifest")
+    elif checked.read_bytes() != generated_path.read_bytes():
+        errors.append("internal/docs/docs.json is stale; run scripts/build_site.py --write-manifest")
+    for record in pages:
+        for key in ("path", "title", "description", "url", "markdown_url", "markdown", "markdown_text", "sections"):
+            if key not in record:
+                errors.append(f"docs.json page {record.get('path', '?')} has no {key}")
+                break
+        markdown = site / record.get("markdown", "")
+        if not markdown.is_file():
+            errors.append(f"docs.json names a missing Markdown twin: {record.get('markdown')}")
+        if not record.get("markdown_text"):
+            errors.append(f"docs.json page {record.get('path')} carries no Markdown")
+        for section in record.get("sections", []):
+            if not section.get("id") or not section.get("heading"):
+                errors.append(f"docs.json page {record.get('path')} has an incomplete section")
+                break
+    llms = site / "llms.txt"
+    if not llms.is_file():
+        errors.append("llms.txt was not generated")
+    else:
+        text = llms.read_text(encoding="utf-8")
+        for record in pages:
+            if record["markdown_url"] not in text:
+                errors.append(f"llms.txt does not link {record['markdown_url']}")
+                break
+    if not (site / "llms-full.txt").is_file():
+        errors.append("llms-full.txt was not generated")
+    return errors
+
+
 def theme_asset_errors(site: Path) -> list[str]:
     """The site publishes the dashboard's palette owner and shared state verbatim.
 
@@ -744,6 +799,7 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
 
     errors.extend(shell_asset_errors(site))
     errors.extend(theme_asset_errors(site))
+    errors.extend(docs_manifest_errors(site, base_url))
     errors.extend(docs_shell_layout_errors(site))
 
     site_css_path = ROOT / SITE_STYLESHEET

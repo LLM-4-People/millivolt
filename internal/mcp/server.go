@@ -113,6 +113,27 @@ func (s *Service) Register(server *sdk.Server) {
 	}, s.describe)
 
 	addTool(server, &sdk.Tool{
+		Name:        "docs_list",
+		Title:       "List the product documentation",
+		Description: "Start here for how millivolt itself works. Returns every published documentation page in navigation order, with its repository path, title, description, public URL, Markdown URL and section count. The index is generated from the same Markdown as the published site, so titles and anchors match. Call docs_read with a path for a page, or docs_search for a term. This reads a local embedded index: it does not call the proxy and works with durable storage disabled.",
+		Annotations: readOnly("List the product documentation"),
+	}, s.docsList)
+
+	addTool(server, &sdk.Tool{
+		Name:        "docs_search",
+		Title:       "Search the product documentation",
+		Description: "Search titles, headings and body text across the embedded documentation. Every query word must appear in a candidate section; title and heading matches rank above body matches. Returns a path, title, anchor, heading context and a short snippet, plus an explicit total and truncated flag. Follow a hit with docs_read using the path and anchor as section. Use this instead of guessing a route, header or configuration name. Optional path narrows the search to one page. Reads local content only; no proxy request.",
+		Annotations: readOnly("Search the product documentation"),
+	}, s.docsSearch)
+
+	addTool(server, &sdk.Tool{
+		Name:        "docs_read",
+		Title:       "Read a documentation page or section",
+		Description: "Read one published document by its repository path, for example docs/mcp.md. Pass a heading id as section for a bounded, anchored answer; omit it for the full Markdown source, which is capped at 256 KiB with an explicit truncated marker. The response includes the page title, description, public URL, Markdown URL, section headings with ids, and either the section text or the Markdown source. This is the canonical explanation of millivolt's routes, configuration, protocol and operator behavior. Reads local embedded content only; no proxy call, storage or credential.",
+		Annotations: readOnly("Read a documentation page or section"),
+	}, s.docsRead)
+
+	addTool(server, &sdk.Tool{
 		Name:        "query",
 		Title:       "Run a SQL SELECT",
 		Description: "Run ONE bounded SELECT against the durable database and return the rows. Must start with SELECT, contain no ';', and name no ATTACH/DETACH/PRAGMA/LOAD_EXTENSION. This is the ONLY tool that can express a time range: use WHERE started_at >= strftime('%s','now')*1000 - 3600000 for the last hour, because unixnow() does not exist in this build. There is no cursor, so page in SQL with keyset pagination (WHERE (started_at, id) < (?, ?)) instead of OFFSET. Rows are clamped on BOTH volume and encoded size, with an explicit marker naming what was withheld, so a wide SELECT * is clamped long before the row cap. Returns 503 when durable storage is disabled. This is not a sandbox: it reads the same tables the dashboard reads, including sensitive request_debug.payload bodies.",

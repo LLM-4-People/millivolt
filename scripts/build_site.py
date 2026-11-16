@@ -31,6 +31,9 @@ import nh3
 from markdown.extensions.toc import TocExtension
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts import site_llm
 SITE_SRC = ROOT / "site-src"
 TEMPLATES = SITE_SRC / "templates"
 # The published site's canonical origin. The Pages workflow passes the live base
@@ -919,6 +922,8 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
         theme_color=theme_color,
         active="docs",
         assets=assets,
+        head_extra='<link rel="alternate" type="text/markdown" href="'
+        + attr_escape(site_llm.markdown_name(page.output)) + '">',
     )
     return render_base(values), {
         "title": title,
@@ -1241,6 +1246,10 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
         json.dumps(search_index, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    records = site_llm.page_records(
+        pages, search_index, NAV_GROUPS, root=ROOT,
+        base_url=base_url, version=version)
+    site_llm.write_outputs(output, records, base_url=base_url, version=version)
     write_sitemap(
         output,
         base_url,
@@ -1261,6 +1270,11 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("SITE_URL", DEFAULT_BASE_URL),
         help="public site URL used for canonical and social metadata",
     )
+    parser.add_argument(
+        "--write-manifest",
+        action="store_true",
+        help="also copy the generated docs index into internal/docs/docs.json for the MCP embed",
+    )
     args = parser.parse_args(argv)
     # The domain has one owner outside this repository: the Pages setting. Warn
     # when a build for the live site disagrees with the committed default, which
@@ -1275,6 +1289,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     try:
         outputs = build_site(Path(args.output), base_url=args.base_url)
+        if args.write_manifest:
+            site_llm.write_checked_manifest(
+                Path(args.output), ROOT / "internal/docs/docs.json")
     except BuildError as exc:
         print(f"build_site: {exc}", file=sys.stderr)
         return 1
