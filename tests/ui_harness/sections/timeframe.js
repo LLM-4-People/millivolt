@@ -150,7 +150,10 @@ module.exports = async function timeframe(H) {
     check('the duration rail fills the last window of the stored coverage',
       !fill.hidden &&
       Math.abs(parseFloat(fill.style.width) - (180 * 60000 / (3 * 3600000 + 12 * 60000)) * 100) < 0.01 &&
-      Math.abs(parseFloat(fill.style.left) - (100 - parseFloat(fill.style.width))) < 1e-6);
+      // jsdom 31 serializes the percentage to five decimals, so the two
+      // independently rounded edges can differ by 1e-5. The rail geometry is
+      // still the check: both edges must meet at 100 within a hundredth.
+      Math.abs(parseFloat(fill.style.left) - (100 - parseFloat(fill.style.width))) < 0.01);
     check('the duration note names the window and the stored coverage',
       note.textContent === '3 hours · ' + w.eval('fmtDur(3 * 3600000 + 12 * 60000)') + ' of history');
     ctrl.sync('all');
