@@ -9,6 +9,7 @@ temporary repository with its own bare origin; no network and no real remote.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -20,9 +21,23 @@ from ..support import ROOT
 PROMOTE = ROOT / "scripts" / "promote.sh"
 
 
+def local_environment() -> dict[str, str]:
+    """The environment a developer's push gate sees, not the CI one.
+
+    The script skips its ancestry check under GITHUB_ACTIONS because the
+    promotion workflow repeats it against the exact pull-request head. These
+    tests exercise the local guard, so the variable that selects the other
+    mode must not leak in from a runner that is executing the suite.
+    """
+    environment = dict(os.environ)
+    environment.pop("GITHUB_ACTIONS", None)
+    return environment
+
+
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     result = subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True, timeout=30, check=False)
+        ["git", *args], cwd=repo, capture_output=True, text=True, timeout=30,
+        check=False, env=local_environment())
     if check and result.returncode != 0:
         raise AssertionError(f"git {' '.join(args)} failed: {result.stderr or result.stdout}")
     return result
@@ -63,7 +78,8 @@ class PromotionGuardTests(unittest.TestCase):
     def promote(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["bash", str(self.repo / "scripts" / "promote.sh"), *args],
-            cwd=self.repo, capture_output=True, text=True, timeout=60, check=False)
+            cwd=self.repo, capture_output=True, text=True, timeout=60,
+            check=False, env=local_environment())
 
     def test_check_fails_when_main_is_not_an_ancestor(self):
         result = self.promote("check")
