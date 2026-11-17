@@ -1,0 +1,32 @@
+name: Plugin ABI conformance
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out millivolt
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out plugin SDK
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: LLM-4-People/millivolt-plugin-sdk
+          path: sdk
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Check SDK contract and conformance suite
+        run: cd sdk && go test ./...
+      - name: Check core plugin host and management API
+        run: bash scripts/check.sh go test ./internal/plugins ./cmd/proxy

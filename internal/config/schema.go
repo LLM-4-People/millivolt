@@ -74,6 +74,7 @@ func Categories() []Category {
 		{ID: "models", Label: "Models", Help: "Model grouping rules - an ordered rewrite pipeline merging spelling variants of the same model in every grouped surface. Records keep their exact spelling; hot-reloads."},
 		{ID: "providers", Label: "Providers", Help: "Optional per-provider JSON field-name maps: usage/cost response keys, the models metadata endpoint merged into /v1/models, ensured tool names injected into relayed chat bodies, and optional upstream wire headers. Empty = auto-detect."},
 		{ID: "overrides", Label: "Request overrides", Help: "Scoped rewrites of the upstream request: set, replace or remove HTTP headers and set output-token ceilings per client, provider and/or model. Rules match exactly, all matching rules apply in list order, and the later rule wins. Default: an empty list, the feature fully off."},
+		{ID: "plugins", Label: "Plugins", Help: "Declarative rule packs loaded from a directory at boot and reload. Rule packs contribute data only, never code, and cannot change boot-bound settings. Restart to apply directory changes."},
 	}
 }
 
@@ -371,6 +372,31 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 		{Key: "request_overrides", Category: "overrides", Label: "Request override rules",
 			Help: "Ordered rules that rewrite the upstream request before relay. A rule matches when every non-empty scope field equals the request's value exactly: client as the classified client, provider as the canonical label after provider_aliases, model as the recorded model id; an empty scope field matches anything. All matching rules apply in list order, and for the same header or body field the later rule wins. headers sets or replaces upstream headers (names are canonicalized, values must be non-empty single-line), remove_headers deletes them, and body sets max_tokens / max_completion_tokens (1..1000000) on the OpenAI wire. Credential and protocol headers (such as authorization, cookie, host, content-type, and the whole x-proxy- control prefix) are rejected at load. The override applies after provider headers and the client's X-Proxy-Headers map and wins over both; it covers inference sends only, never model discovery or token refresh. Body rewrites apply to passthrough and translated-anthropic requests and re-stamp the recorded request cap; the Cursor bridge reads no body fields, so body is skipped for cursor targets while header rules still apply. An empty list leaves every request untouched. Hot-reloads.",
 			Kind: KindRequestOverrides, HotReload: true},
+		// ---- plugins ----
+		{Key: "plugins_enabled", Category: "plugins", Label: "Load rule packs",
+			Help: "Load YAML rule packs from plugin_dir at boot and on reload. Each pack may contribute only provider_aliases, model_rules, providers, request_overrides and sub_conversations; any other key, oversized file, or invalid merged config fails closed. Rules append in filename order and all existing caps still apply. Restart required.",
+			Kind: KindBool, HotReload: false},
+		{Key: "plugin_dir", Category: "plugins", Label: "Rule pack directory",
+			Help: "Directory of direct .yaml/.yml rule packs, read in sorted filename order. Empty disables loading. Files are size-capped and must be regular files; symlinks and unknown keys are refused. Restart required.",
+			Kind: KindString, HotReload: false},
+		{Key: "plugin_credentials_file", Category: "plugins", Label: "Scoped plugin credentials",
+			Help: "Optional JSON file of SHA-256 token digests and capability scopes for plugin clients. Raw tokens are never stored here and are excluded from config backups. Empty disables scoped credentials; only the full operator token is accepted. Restart required.",
+			Kind: KindString, HotReload: false},
+		{Key: "plugin_trust_file", Category: "plugins", Label: "Trusted plugin signers",
+			Help: "Optional JSON file of Ed25519 public keys keyed by signer id. Empty permits unsigned development manifests; when set, every plugin manifest must carry a valid signer and signature. Restart required.",
+			Kind: KindString, HotReload: false},
+		{Key: "plugin_lock_file", Category: "plugins", Label: "Plugin digest pins",
+			Help: "Optional JSON file pinning module filenames to SHA-256 digests. A pinned module with a changed digest fails boot until pins are refreshed through /admin/plugins. Restart required for pin changes to load.",
+			Kind: KindString, HotReload: false},
+		{Key: "plugin_inbox_dir", Category: "plugins", Label: "Plugin inbox directory",
+			Help: "Optional directory of .mvplugin files scanned on demand by the operator install route. Empty disables inbox scanning. Files are size-capped and must be regular files; symlinks are refused. Restart required.",
+			Kind: KindString, HotReload: false},
+		{Key: "plugin_downloads_enabled", Category: "plugins", Label: "Allow plugin downloads",
+			Help: "Permit the operator install and update routes to fetch signed plugins from allowlisted GitHub release URLs. Remote plugin sources are refused while false. Restart required.",
+			Kind: KindBool, HotReload: false},
+		{Key: "plugin_http_allow_hosts", Category: "plugins", Label: "Plugin HTTP fetch hosts",
+			Help: "Exact host[:port] allowlist for the generic http:fetch plugin capability. Empty disables all outbound guest fetches. Guests never receive credentials; the host enforces this allowlist, GET-only methods, a 5s timeout, and a 64 KiB response cap. Restart required.",
+			Kind: KindStrings, HotReload: false},
 	})
 })
 

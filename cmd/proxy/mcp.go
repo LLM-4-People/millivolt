@@ -31,14 +31,14 @@ import (
 // values are validated at the config boundary before the boot reaches here.
 func newMCPHandler(gate *operatorGate, dispatch http.Handler, limits mcp.Limits) http.Handler {
 	streamable := mcp.NewHTTPHandler(func(r *http.Request) *mcp.Service {
-		token, ok := bearerToken(r)
-		if !ok || !gate.valid(token) {
+		token, scopes, ok := gate.authorizeMCP(r)
+		if !ok {
 			return nil
 		}
-		service, err := mcp.NewServiceWithTransport(mcp.InProcessOrigin, token, limits, inProcessTransport{
+		service, err := mcp.NewServiceWithTransportAndScopes(mcp.InProcessOrigin, token, limits, inProcessTransport{
 			dispatch: dispatch,
 			timeout:  limits.Timeout,
-		})
+		}, scopes)
 		if err != nil {
 			// The wrapper validated the same credential this constructor
 			// validates, so a failure here is an internal inconsistency; the
@@ -49,8 +49,8 @@ func newMCPHandler(gate *operatorGate, dispatch http.Handler, limits mcp.Limits)
 		return service
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if token, ok := bearerToken(r); !ok || !gate.valid(token) {
-			denyOperator(w, http.StatusForbidden, "MCP requires the operator token as a Bearer credential; the session cookie is not accepted here")
+		if _, _, ok := gate.authorizeMCP(r); !ok {
+			denyOperator(w, http.StatusForbidden, "MCP requires the full operator token or a scoped plugin credential as a Bearer credential; the session cookie is not accepted here")
 			return
 		}
 		streamable.ServeHTTP(w, r)
@@ -94,6 +94,8 @@ func (t inProcessTransport) RoundTrip(request *http.Request) (*http.Response, er
 		defer cancel()
 		request = request.WithContext(ctx)
 	}
+	ctx = markInternalMCP(ctx)
+	request = request.Clone(ctx)
 	recorder := &inProcessRecorder{header: http.Header{}}
 	done := make(chan struct{})
 	go func() {

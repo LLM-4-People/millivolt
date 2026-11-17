@@ -21,6 +21,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
+	"github.com/LLM-4-People/millivolt/internal/plugins"
 )
 
 // The operator plane is the whole embedded dashboard, standardized as the
@@ -120,10 +121,20 @@ type operatorGate struct {
 	tokenHash  [sha256.Size]byte
 	sessionKey [32]byte
 	limiter    authLimiter
+	// scopes is the optional boot-loaded set of hashed plugin credentials.
+	// The full operator token never consults it and remains a superset.
+	scopes *plugins.Credentials
 }
 
 func newOperatorGate(token string) *operatorGate {
-	g := &operatorGate{armed: token != ""}
+	return newOperatorGateWithScopes(token, nil)
+}
+
+// newOperatorGateWithScopes adds the boot-loaded scoped credential store.
+// Keeping the original constructor as a wrapper preserves every existing
+// test and call site that builds a full-token-only gate.
+func newOperatorGateWithScopes(token string, scopes *plugins.Credentials) *operatorGate {
+	g := &operatorGate{armed: token != "", scopes: scopes}
 	g.tokenHash = sha256.Sum256([]byte(token))
 	if token != "" {
 		g.sessionKey = sessionKeyFromToken(token)
@@ -148,6 +159,26 @@ func sessionKeyFromToken(token string) [32]byte {
 func (g *operatorGate) valid(presented string) bool {
 	sum := sha256.Sum256([]byte(presented))
 	return subtle.ConstantTimeCompare(sum[:], g.tokenHash[:]) == 1
+}
+
+// authorizeMCP admits the full operator token or a scoped plugin token for
+// the MCP transport. A scoped token never mints a dashboard cookie and is
+// never accepted by this helper on any other path.
+func (g *operatorGate) authorizeMCP(r *http.Request) (string, mcp.CapabilitySet, bool) {
+	if !g.armed {
+		return "", nil, false
+	}
+	token, ok := bearerToken(r)
+	if !ok {
+		return "", nil, false
+	}
+	if g.valid(token) {
+		return token, mcp.AllCapabilities(), true
+	}
+	if scopes, ok := g.scopes.Lookup(token); ok {
+		return token, scopes, true
+	}
+	return "", nil, false
 }
 
 // gatedPath reports whether the request belongs to the dashboard/operator
@@ -449,6 +480,27 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 			}
 			sameOrigin.ServeHTTP(w, r)
 			return
+		}
+		if hasBearer {
+			if scopes, ok := gate.scopes.Lookup(credential); ok {
+				// A valid scoped token is not a guess, so it never burns the
+				// brute-force budget even when its capability is too narrow.
+				gate.limiter.success(ip)
+				if mcpNamespace(r.URL.Path) {
+					sameOrigin.ServeHTTP(w, r.WithContext(mcp.WithCapabilities(r.Context(), scopes)))
+					return
+				}
+				if isInternalMCP(r.Context()) {
+					if required, mapped := internalRouteScope(r); mapped && scopes.Allows(required) {
+						sameOrigin.ServeHTTP(w, r.WithContext(mcp.WithCapabilities(r.Context(), scopes)))
+						return
+					}
+					denyOperator(w, http.StatusForbidden, "plugin credential lacks the required scope")
+					return
+				}
+				denyOperator(w, http.StatusForbidden, "scoped plugin credentials are accepted only by /mcp")
+				return
+			}
 		}
 		if gate.denyLockedOut(w, ip) {
 			return

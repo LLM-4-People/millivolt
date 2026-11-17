@@ -439,6 +439,41 @@ type Config struct {
 	// identity is never rejected, and strip removes every configured field
 	// present at the top level of the relayed upstream body.
 	// validateSubConversations owns the normalization and validation.
+
+	// PluginsEnabled loads declarative rule packs at boot and on reload.
+	// Rule packs only contribute allowlisted config fields; they execute no
+	// code. Restart required: the pack directory is read when the config is
+	// loaded, not by the hot-reload path.
+	PluginsEnabled bool `yaml:"plugins_enabled" json:"plugins_enabled"`
+	// PluginDir is the directory of YAML rule packs. Empty disables loading
+	// even when PluginsEnabled is true. Only direct .yaml/.yml files are read.
+	PluginDir string `yaml:"plugin_dir" json:"plugin_dir"`
+	// PluginCredentialsFile is an optional JSON file of hashed, scoped
+	// plugin credentials. It is never a YAML rule pack and never part of
+	// proxy.yaml. Restart required: the gate is built at boot.
+	PluginCredentialsFile string `yaml:"plugin_credentials_file" json:"plugin_credentials_file"`
+	// PluginTrustFile is an optional JSON file of trusted Ed25519 verifiers.
+	// Empty is development mode: unsigned manifests may load. Restart required.
+	PluginTrustFile string `yaml:"plugin_trust_file" json:"plugin_trust_file"`
+	// PluginLockFile is an optional JSON file pinning module filename→digest.
+	// Empty means unpinned. Restart required for changes to take effect.
+	PluginLockFile string `yaml:"plugin_lock_file" json:"plugin_lock_file"`
+	// PluginDownloadsEnabled permits the operator install/update routes to
+	// fetch signed plugins from allowlisted GitHub release URLs. Remote
+	// sources are refused while false. Restart required.
+	PluginDownloadsEnabled bool `yaml:"plugin_downloads_enabled" json:"plugin_downloads_enabled"`
+	// PluginInboxDir is an optional directory of .mvplugin files scanned on
+	// demand by the operator install route. Empty disables inbox scanning.
+	// Restart required.
+	PluginInboxDir string `yaml:"plugin_inbox_dir" json:"plugin_inbox_dir"`
+	// PluginHTTPAllowHosts is the exact host[:port] allowlist for the generic
+	// http:fetch plugin capability. Empty disables all outbound guest fetches.
+	// Restart required: the host gate is built at boot.
+	PluginHTTPAllowHosts []string `yaml:"plugin_http_allow_hosts" json:"plugin_http_allow_hosts"`
+	// RulePackOrigins records which pack contributed which keys. It is
+	// runtime metadata, not a user-tunable: yaml:"-" keeps it out of the
+	// schema registry, the written config and the config revision.
+	RulePackOrigins  []RulePackOrigin  `yaml:"-" json:"-"`
 	SubConversations []SubConversation `yaml:"sub_conversations" json:"sub_conversations"`
 }
 
@@ -836,6 +871,12 @@ func (c *Config) Clone() *Config {
 		copy(out.ModelRules, c.ModelRules)
 	}
 	out.RequestOverrides = cloneRequestOverrides(c.RequestOverrides)
+	if c.RulePackOrigins != nil {
+		out.RulePackOrigins = make([]RulePackOrigin, len(c.RulePackOrigins))
+		for i, origin := range c.RulePackOrigins {
+			out.RulePackOrigins[i] = RulePackOrigin{File: origin.File, Keys: append([]string(nil), origin.Keys...)}
+		}
+	}
 	out.SubConversations = cloneSubConversations(c.SubConversations)
 	return &out
 }
@@ -1045,7 +1086,12 @@ func Default() *Config {
 		DashChartRefresh:  15 * time.Second,
 		DashExplorerStale: 15 * time.Second,
 
-		DashBackgroundRefresh: false,
+		DashBackgroundRefresh:  false,
+		PluginsEnabled:         false,
+		PluginTrustFile:        "",
+		PluginInboxDir:         "",
+		PluginDownloadsEnabled: false,
+		PluginHTTPAllowHosts:   []string{},
 	}
 }
 
@@ -1175,6 +1221,29 @@ func (c *Config) Validate() error {
 	n, portErr := strconv.Atoi(port)
 	if err != nil || portErr != nil || n < 0 || n > 65535 || strings.ContainsAny(host, " /?#@\t\r\n") {
 		return fmt.Errorf("listen: must be host:port with a numeric port in 0..65535")
+	}
+	if len(c.PluginDir) > 4096 {
+		return fmt.Errorf("plugin_dir: path must be at most 4096 bytes")
+	}
+	if len(c.PluginCredentialsFile) > RulePackMaxPathLen {
+		return fmt.Errorf("plugin_credentials_file: path must be at most %d bytes", RulePackMaxPathLen)
+	}
+	if len(c.PluginTrustFile) > RulePackMaxPathLen {
+		return fmt.Errorf("plugin_trust_file: path must be at most %d bytes", RulePackMaxPathLen)
+	}
+	if len(c.PluginLockFile) > RulePackMaxPathLen {
+		if len(c.PluginInboxDir) > RulePackMaxPathLen {
+			return fmt.Errorf("plugin_inbox_dir: path must be at most %d bytes", RulePackMaxPathLen)
+		}
+	}
+	if len(c.PluginHTTPAllowHosts) > 64 {
+		return fmt.Errorf("plugin_http_allow_hosts: at most 64 entries are allowed")
+	}
+	for _, host := range c.PluginHTTPAllowHosts {
+		if host == "" || len(host) > 253 || strings.TrimSpace(host) != host ||
+			strings.ContainsAny(host, "/?#@ \t\r\n") {
+			return fmt.Errorf("plugin_http_allow_hosts: invalid host %q", host)
+		}
 	}
 	// allowed_base_urls entries are byte-prefix-matched against request base
 	// URLs at runtime (internal/proxy), which are trailing-slash-trimmed and

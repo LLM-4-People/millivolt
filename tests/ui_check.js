@@ -139,6 +139,46 @@ let chartPayload = {
 };
 let restartState = { restarted: false, postCount: 0, statusGate: null, postGate: null, status: {} };
 let cfgFetches = 0;
+
+const pluginAdminFixture = {
+  status: {
+    enabled: true,
+    modules: [
+      {
+        id: 'fixture', version: '0.1.0', abi: 'v1', module: 'fixture.mvplugin',
+        capabilities: ['log', 'declare_ui_panel'], failures: 0,
+      },
+      {
+        id: 'opencode-usage-limits', version: '0.3.0', abi: 'v1', module: 'opencode-usage-limits.mvplugin',
+        capabilities: ['log', 'emit_metric', 'read:records', 'read:config', 'declare_tool', 'declare_ui_panel', 'http:fetch'], failures: 0,
+      },
+    ],
+    descriptors: [
+      { plugin_id: 'fixture', panels: [{ id: 'fixture-panel', title: '<img src=x onerror=alert(1)>panel' }] },
+      {
+        plugin_id: 'opencode-usage-limits',
+        tools: [{ name: 'opencode_usage_summary', description: 'usage summary', capability: 'read:records' }],
+        panels: [{
+          id: 'opencode-usage-limits', title: '<img src=x onerror=alert(1)>OpenCode Go usage',
+          data: {
+            provider: 'opencode-go', requests: '12', models: '1', input_tokens: '100', output_tokens: '20',
+            cost: '0.002000', rate_limited: '1', remaining: '120', last_model: 'hy4-flash-free',
+            last_status: 'tracking', resets: '0', model_list: 'hy4-flash-free',
+            config_schema: '3', config_values: '2',
+            quota_status: 'ok', rolling: 'rolling used: 62% · left: 38% · limited: false · resets: 2026-09-20T00:00:00Z',
+            weekly: 'weekly used: 81% · left: 19% · limited: false · resets: 2026-09-27T00:00:00Z',
+            monthly: 'monthly used: 37% · left: 63% · limited: false · resets: 2026-10-20T00:00:00Z',
+          },
+        }],
+      },
+    ],
+  },
+  config: {
+    enabled: true, dir: '/plugins', credentials_file: '', trust_file: '/plugins/trust.json',
+    lock_file: '/plugins/plugins.lock.json', downloads_enabled: true,
+  },
+};
+const pluginRequests = [];
 // Default model canonicalization pipeline - the ui_check mirror of
 // config.DefaultModelRules, kept in lockstep with the Go table. It seeds
 // the harness like a real boot (the bootstrap payload's model_canon.rules,
@@ -219,6 +259,38 @@ const pageOptions = {
         return restartState.statusGate ? restartState.statusGate.then(() => response) : Promise.resolve(response);
       }
       if (u.includes('/admin/pause')) return Promise.resolve({ json: async () => ({ ok: true, paused: false, clients: [], providers: [], holds: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], until: null, queued: 0, default_max_queued: 0 }) });
+      if (u.includes('/admin/plugins')) {
+        const method = (opts && opts.method) || 'GET';
+        let body = null;
+        try { body = opts && opts.body ? JSON.parse(opts.body) : null; } catch (e) {}
+        if (u.includes('/admin/plugins/install')) {
+          if (body && body.action === 'install_inbox') {
+            return Promise.resolve({ ok: true, json: async () => ({ scanned: 1, installed: [{ id: 'fixture', version: '0.1.0', restart_required: true }], restart_required: true }) });
+          }
+          return Promise.resolve({ ok: true, json: async () => ({ id: 'fixture', version: '0.1.0', signature: 'verified', pin: 'updated', restart_required: true }) });
+        }
+        if (u.includes('/admin/plugins/install')) {
+          return Promise.resolve({ ok: true, json: async () => ({ id: 'fixture', version: '0.1.0', signature: 'verified', pin: 'updated', restart_required: true }) });
+        }
+        if (u.includes('/admin/plugins/update')) {
+          return Promise.resolve({ ok: true, json: async () => ({ id: 'fixture', from_version: '0.1.0', to_version: '0.2.0', signature: 'verified', pin: 'updated', restart_required: true }) });
+        }
+        if (u.includes('/admin/plugins/rollback')) {
+          return Promise.resolve({ ok: true, json: async () => ({ id: 'fixture', version: '0.1.0', signature: 'verified', pin: 'updated', restart_required: true }) });
+        }
+        if (u.includes('/admin/plugins/uninstall')) {
+          pluginAdminFixture.status.modules = [];
+          pluginAdminFixture.status.descriptors = [];
+          return Promise.resolve({ ok: true, json: async () => ({ id: 'fixture', restart_required: true }) });
+        }
+        if (method === 'POST' && body && body.action === 'verify') {
+          return Promise.resolve({ ok: true, json: async () => ({ ok: true, modules: [] }) });
+        }
+        if (method === 'POST' && body && body.action === 'pin') {
+          return Promise.resolve({ ok: true, json: async () => ({ pinned: ['fixture.mvplugin'] }) });
+        }
+        return Promise.resolve({ ok: true, json: async () => JSON.parse(JSON.stringify(pluginAdminFixture)) });
+      }
       if (u.includes('/admin/debug')) return Promise.resolve({ json: async () => ({ ok: true, enabled: false, sessions: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], known_models: ['m'], until: null, ttl: '24h', max_bytes: '1MiB' }) });
       if (u.includes('/admin/throttle')) return Promise.resolve({ json: async () => ({ ok: true, throttles: [], known_providers: ['p'], active: false }) });
       if (u.includes('/admin/config')) { cfgFetches++; return Promise.resolve({ ok: true, json: async () => JSON.parse(JSON.stringify(cfgDoc)) }); }
@@ -6865,7 +6937,7 @@ async function main() {
       JSON.stringify(visibleKeys()) === JSON.stringify(['conc_cap']) &&
       d.querySelector('#settings-pane-hd h4').textContent === '1 match');
     check('the rail badges count the visible rows per category',
-      JSON.stringify(badges()) === JSON.stringify({rate: 1, window: 0}) &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 1, window: 0, plugins: 0}) &&
       d.querySelector('[data-st-cat="rate"]').classList.contains('has-hit') &&
       d.querySelector('[data-st-cat="window"]').classList.contains('is-miss'));
     q.value = 'per-minute';
@@ -6874,19 +6946,19 @@ async function main() {
       JSON.stringify(visibleKeys()) === JSON.stringify(['rpm_limit', 'tpm_limit']) &&
       d.querySelector('#settings-pane-hd h4').textContent === '2 matches');
     check('the multi-hit badge counts stay per-category',
-      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 2}));
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 2, plugins: 0}));
     q.value = 'rpm_limit';
     w.filterSettings();
     check('a key word matches by the row key alone',
       JSON.stringify(visibleKeys()) === JSON.stringify(['rpm_limit']) &&
       d.querySelector('#settings-pane-hd p').textContent === 'rpm_limit');
     check('the key-word hit re-badges both categories',
-      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 1}) &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 1, plugins: 0}) &&
       d.querySelector('[data-st-cat="window"]').classList.contains('has-hit'));
     q.value = '';
     w.filterSettings();
     check('clearing the query restores the category view',
-      JSON.stringify(badges()) === JSON.stringify({rate: 2, window: 2}) &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 2, window: 2, plugins: 0}) &&
       ![...d.querySelectorAll('#settings-rail .st-rail-item')].some(b => b.classList.contains('has-hit')));
     w.__filterDoc = JSON.parse(JSON.stringify(cfgDoc));
     w.eval('settingsDoc = window.__filterDoc; fillSettingsForm(settingsDoc)');
@@ -6947,13 +7019,13 @@ async function main() {
     w.filterSettings();
     delete box.querySelectorAll;
     check('one settings row query serves a keystroke regardless of rail length',
-      rail.querySelectorAll('.st-rail-item').length === 3 && rowQueries === 1);
+      rail.querySelectorAll('.st-rail-item').length === 4 && rowQueries === 1);
     check('a trimmed lowercase query shows every cross-category hit with exact copy',
       JSON.stringify(visibleKeys()) === JSON.stringify(['gamma_window', 'delta_window', 'epsilon_client']) &&
       d.querySelector('#settings-pane-hd h4').textContent === '3 matches' &&
       d.querySelector('#settings-pane-hd p').textContent === 'ledger');
     check('one query pass sets every rail badge and its hit/miss class',
-      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 2, client: 1}) &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 2, client: 1, plugins: 0}) &&
       !railState('rate').hit && railState('rate').miss &&
       railState('window').hit && !railState('window').miss &&
       railState('client').hit && !railState('client').miss);
@@ -6962,7 +7034,7 @@ async function main() {
     w.eval("settingsCat = 'window'; showSettingsCat()");
     check('switching category under a query keeps every hit and badge unchanged',
       JSON.stringify(visibleKeys()) === JSON.stringify(['gamma_window', 'delta_window', 'epsilon_client']) &&
-      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 2, client: 1}) &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 2, client: 1, plugins: 0}) &&
       d.querySelector('#settings-pane-hd h4').textContent === '3 matches' &&
       ['rate', 'window', 'client'].every(id => !railState(id).active && railState(id).current === 'false'));
     q.value = 'zeta';
@@ -6970,27 +7042,27 @@ async function main() {
     check('a one-row query uses the singular copy and one badge hit',
       JSON.stringify(visibleKeys()) === JSON.stringify(['zeta_client']) &&
       d.querySelector('#settings-pane-hd h4').textContent === '1 match' &&
-      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 0, client: 1}) &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 0, client: 1, plugins: 0}) &&
       railState('client').hit && railState('rate').miss && railState('window').miss);
     q.value = 'delta_window';
     w.filterSettings();
     check('a row key alone is part of the cached search haystack',
       JSON.stringify(visibleKeys()) === JSON.stringify(['delta_window']) &&
       d.querySelector('#settings-pane-hd h4').textContent === '1 match' &&
-      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 1, client: 0}));
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 1, client: 0, plugins: 0}));
     q.value = 'no-such-setting';
     w.filterSettings();
     check('an empty result hides every row and marks every rail item a miss',
       visibleKeys().length === 0 &&
       d.querySelector('#settings-pane-hd h4').textContent === '0 matches' &&
-      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 0, client: 0}) &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 0, client: 0, plugins: 0}) &&
       ['rate', 'window', 'client'].every(id => railState(id).miss));
     w.eval("settingsCat = 'rate'");
     q.value = '';
     w.filterSettings();
     check('clearing the query restores the active category rows and full badges',
       JSON.stringify(visibleKeys()) === JSON.stringify(['alpha_rate', 'beta_rate']) &&
-      JSON.stringify(badges()) === JSON.stringify({rate: 2, window: 2, client: 2}) &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 2, window: 2, client: 2, plugins: 0}) &&
       d.querySelector('#settings-pane-hd h4').textContent === 'Rate' &&
       d.querySelector('#settings-pane-hd p').textContent === 'rate controls' &&
       railState('rate').active && railState('rate').current === 'page' &&
@@ -10330,6 +10402,104 @@ async function main() {
     }
   }
 
+  // ---- plugin management card ----
+  {
+    const card = d.getElementById('plugins-card');
+    const list = d.getElementById('plugins-list');
+    const source = d.getElementById('plugin-source');
+    const caps = d.getElementById('plugin-confirm-caps');
+    w.eval("pluginAdminDoc = " + JSON.stringify({ config: pluginAdminFixture.config }) +
+      "; settingsCat = 'plugins'; settingsQ = ''; settingsDoc = " + JSON.stringify(cfgDoc) +
+      "; fillSettingsForm(settingsDoc); applyPluginState(" + JSON.stringify(pluginAdminFixture.status) + ")");
+    check('plugin management lives in Settings with local, source and inbox controls',
+      !!d.querySelector('#settings-sheet #plugins-card') && !d.querySelector('main #plugins-card') &&
+      !!card && !card.hidden && !!d.getElementById('plugin-file') &&
+      !!d.getElementById('plugin-install-file') && !!source && !!caps &&
+      !!d.getElementById('plugin-install-source') && !!d.getElementById('plugin-scan-inbox'));
+    check('plugin row renders core-owned module metadata and per-plugin actions',
+      list.textContent.includes('fixture') && list.textContent.includes('0.1.0') &&
+      list.querySelectorAll('[data-plug-action="verify"][data-plug-id="fixture"]').length === 1 &&
+      list.querySelectorAll('[data-plug-action="rollback"][data-plug-id="fixture"]').length === 1);
+    check('guest panel descriptors render as escaped text, never markup',
+      list.textContent.includes('<img src=x onerror=alert(1)>panel') &&
+      !list.querySelector('img'));
+    check('plugin config summary reports runtime, downloads, signing and pin state',
+      d.getElementById('plugins-config').textContent ===
+      'runtime on · downloads on · signed · pins on');
+
+    check('inbox scan summary renders counts as escaped text',
+      w.pluginInboxSummary({ scanned: 2, installed: [{ id: 'fixture' }], failed: [{ file: '<img>', error: 'bad' }], restart_required: true }) ===
+      'scanned 2 · installed 1 · failed 1 · <img>: bad · restart required');
+
+    check('inbox scan summary renders counts as escaped text',
+      w.pluginInboxSummary({ scanned: 2, installed: [{ id: 'fixture' }], failed: [{ file: '<img>', error: 'bad' }], restart_required: true }) ===
+      'scanned 2 · installed 1 · failed 1 · <img>: bad · restart required');
+
+    // ---- dedicated OpenCode tab ----
+    check('dashboard exposes overview and OpenCode view tabs',
+      !!d.getElementById('view-tab-overview') && !!d.getElementById('view-tab-opencode') &&
+      d.getElementById('view-tab-overview').getAttribute('aria-selected') === 'true');
+    w.setDashboardView('opencode');
+    const opencodeView = d.getElementById('opencode-view');
+    const kpis = d.getElementById('kpis');
+    check('OpenCode tab shows only its own view panel',
+      !!opencodeView && !opencodeView.hidden && kpis.hidden &&
+      d.getElementById('view-tab-opencode').getAttribute('aria-selected') === 'true');
+    const ocGrid = d.getElementById('opencode-grid');
+    const ocDetail = d.getElementById('opencode-detail');
+    check('OpenCode tab renders escaped descriptor data as fixed fields',
+      ocGrid.textContent.includes('opencode-go') && ocGrid.textContent.includes('12') &&
+      ocGrid.textContent.includes('38% left') && ocGrid.textContent.includes('63% left') &&
+      ocDetail.textContent.includes('opencode_usage_summary') &&
+      ocDetail.textContent.includes('hy4-flash-free') &&
+      !ocGrid.querySelector('img') && !ocDetail.querySelector('img'));
+    w.setDashboardView('overview');
+    check('overview tab restores the main dashboard panels',
+      !kpis.hidden && opencodeView.hidden &&
+      d.getElementById('view-tab-overview').getAttribute('aria-selected') === 'true');
+
+    // ---- plugin-declared focus layout ----
+    const focusState = JSON.parse(JSON.stringify(pluginAdminFixture.status));
+    focusState.modules.push({
+      id: 'dashboard-focus', version: '0.1.0', abi: 'v1', module: 'dashboard-focus.mvplugin',
+      capabilities: ['log', 'declare_ui_panel'], failures: 0,
+    });
+    focusState.descriptors.unshift({
+      plugin_id: 'dashboard-focus',
+      panels: [{
+        id: 'dashboard-focus', title: '<img src=x onerror=alert(1)>Focus',
+        data: {
+          view: 'focus', include_plugin: 'opencode-usage-limits', include_panel: 'opencode-usage-limits',
+          arrange: 'quota,traffic,plugins', heading: 'Quota and traffic together',
+          requests: '12', models: '1', errors: '0', input_tokens: '100', output_tokens: '20',
+          last_model: 'hy4-flash-free', layout_revisions: '1',
+          note: '<img src=x onerror=alert(1)>layout note',
+        },
+      }],
+    });
+    check('dashboard exposes the plugin-declared focus tab',
+      !!d.getElementById('view-tab-focus') && !!d.getElementById('focus-view'));
+    w.applyPluginState(focusState);
+    const focusView = d.getElementById('focus-view');
+    const focusGrid = d.getElementById('focus-grid');
+    const focusDetail = d.getElementById('focus-detail');
+    check('focus layout activates and shows composed descriptor fields',
+      !focusView.hidden && kpis.hidden && opencodeView.hidden &&
+      d.getElementById('view-tab-focus').getAttribute('aria-selected') === 'true' &&
+      d.getElementById('focus-intro').textContent.includes('Quota and traffic together') &&
+      focusGrid.textContent.includes('12') &&
+      focusGrid.textContent.includes('38% left') &&
+      focusGrid.textContent.includes('0.3.0 · healthy'));
+    check('focus layout lists both plugins without executing guest markup',
+      focusDetail.textContent.includes('dashboard-focus') &&
+      focusDetail.textContent.includes('opencode-usage-limits') &&
+      focusDetail.textContent.includes('<img src=x onerror=alert(1)>Focus') &&
+      !focusGrid.querySelector('img') && !focusDetail.querySelector('img'));
+    w.setDashboardView('overview');
+    check('focus tab returns to the core overview',
+      !kpis.hidden && focusView.hidden &&
+      d.getElementById('view-tab-overview').getAttribute('aria-selected') === 'true');
+  }
   reportFailures(false);
   process.exit(failures.length ? 1 : 0);
 }

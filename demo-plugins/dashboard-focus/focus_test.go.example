@@ -1,0 +1,91 @@
+package dashboardfocus
+
+import (
+	"strings"
+	"testing"
+
+	v1 "github.com/LLM-4-People/millivolt-plugin-sdk/abi/v1"
+	"github.com/LLM-4-People/millivolt-plugin-sdk/guest/go"
+)
+
+type recordingHost struct {
+	panels []v1.UIPanel
+}
+
+func (h *recordingHost) Log(string, string) bool                            { return true }
+func (h *recordingHost) EmitMetric(string, float64, map[string]string) bool { return true }
+func (h *recordingHost) ReadRecord() (*v1.Record, bool)                     { return nil, false }
+func (h *recordingHost) ReadConfigView() (*v1.ConfigView, bool)             { return nil, false }
+func (h *recordingHost) DeclareTool(string, string, string) bool            { return true }
+func (h *recordingHost) HTTPFetch(v1.HTTPFetchRequest) (*v1.HTTPFetchResponse, bool) {
+	return nil, false
+}
+func (h *recordingHost) DeclareUIPanel(id, title string, data map[string]string) bool {
+	h.panels = append(h.panels, v1.UIPanel{ID: id, Title: title, Data: data})
+	return true
+}
+
+func TestFocusPluginPublishesVisualControlDeck(t *testing.T) {
+	p := New()
+	host := &recordingHost{}
+	events := []v1.Event{
+		{Type: v1.EventRequestRecorded, Record: &v1.Record{Provider: "opencode-go", Model: "hy4-flash-free", Client: "pi", Status: 200, InputTokens: 20, OutputTokens: 1, Cost: 0.1, DurationMs: 1000}},
+		{Type: v1.EventRequestRecorded, Record: &v1.Record{Provider: "opencode-go", Model: "hy4-flash-free", Client: "pi", Status: 429, InputTokens: 4, OutputTokens: 0, Cost: 0.2, DurationMs: 2000}},
+		{Type: v1.EventConfigChanged, Config: &v1.ConfigView{SchemaVersion: 7, Values: map[string]string{"a": "b", "c": "d"}}},
+	}
+	const wantPanels = 8
+	for _, event := range events {
+		if _, err := guest.Run(p, host, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, err := guest.Run(p, host, v1.Event{Type: v1.EventOperatorCommand, Command: &v1.OperatorCommand{Name: "probe"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(host.panels) != (len(events)+1)*wantPanels {
+		t.Fatalf("declared panels = %d, want %d", len(host.panels), (len(events)+1)*wantPanels)
+	}
+	if len(resp.Panels) != wantPanels {
+		t.Fatalf("panels = %d, want %d", len(resp.Panels), wantPanels)
+	}
+	if resp.Panels[0].ID != PanelID {
+		t.Fatalf("first panel = %q, want %q", resp.Panels[0].ID, PanelID)
+	}
+	data := resp.Panels[0].Data
+	want := map[string]string{
+		"view": "focus", "include_plugin": DefaultInclude, "include_panel": DefaultIncludeTab,
+		"input_tokens": "24", "output_tokens": "1", "last_model": "hy4-flash-free",
+		"config_schema": "7", "config_values": "2", "cost": "0.300000", "rate_limited": "1",
+		"top_client": "pi:2", "throughput_spark": "▁",
+	}
+	for key, value := range want {
+		if data[key] != value {
+			t.Errorf("%s = %q, want %q", key, data[key], value)
+		}
+	}
+	if !strings.Contains(data["requests"], "2 ") || !strings.Contains(data["requests"], "▰") {
+		t.Errorf("requests meter = %q", data["requests"])
+	}
+	if !strings.Contains(data["errors"], "1 ") || !strings.Contains(data["errors"], "▱") {
+		t.Errorf("error meter = %q", data["errors"])
+	}
+	if !strings.Contains(data["note"], "▰ REQ 2") || !strings.Contains(data["note"], "QUOTA via opencode-usage-limits") {
+		t.Errorf("visual note = %q", data["note"])
+	}
+	ids := map[string]bool{}
+	for _, panel := range resp.Panels {
+		ids[panel.ID] = true
+		if !strings.ContainsAny(panel.Title, "▰◉") {
+			t.Errorf("panel %q title is not visual: %q", panel.ID, panel.Title)
+		}
+	}
+	for _, id := range []string{PanelID, "visual-traffic", "visual-health", "visual-tokens", "visual-models", "visual-clients", "visual-rate", "visual-quota"} {
+		if !ids[id] {
+			t.Errorf("missing visual panel %q", id)
+		}
+	}
+	if len(resp.Metrics) != 1 || resp.Metrics[0].Name != "dashboard_focus_panels" || resp.Metrics[0].Value != wantPanels {
+		t.Fatalf("metrics = %+v", resp.Metrics)
+	}
+}

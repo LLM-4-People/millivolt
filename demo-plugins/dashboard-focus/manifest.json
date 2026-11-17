@@ -1,0 +1,19 @@
+{
+  "id": "dashboard-focus",
+  "version": "0.2.0",
+  "abi": "v1",
+  "min_millivolt": "0.3.26",
+  "capabilities": [
+    "log",
+    "emit_metric",
+    "read:records",
+    "read:config",
+    "declare_tool",
+    "declare_ui_panel"
+  ],
+  "module": "module.wasm",
+  "module_sha256": "8edcb71e8e8115d994d254294222b82fc11cab0b218d17410d0102ddde6a321a",
+  "license": "MIT",
+  "signer": "dashboard-dev",
+  "signature": "60f698cb01d0121f9443a8d1ac0b092e467cf8d0364ecc8c5d2373518edd5a20d3f80ef8bfcb4f14b7406c5b9d46012f4438a407718767b189dfa68c7465cc01"
+}

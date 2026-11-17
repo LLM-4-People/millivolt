@@ -57,6 +57,9 @@ type Handler struct {
 	// dashboard's last_reload section; the Settings sheet renders it as
 	// its last-apply row. Nil omits the section; a nil return omits it
 	// too (tests).
+	// RulePacks reports which rule packs contributed to the live snapshot.
+	// Nil omits the object; production wires it to liveCfg.RulePackOrigins.
+	RulePacks    func() any
 	ReloadStatus func() any
 }
 
@@ -83,6 +86,13 @@ func (h *Handler) serveGet(w http.ResponseWriter) {
 		return
 	}
 	body := h.state(file)
+	var origins any = []RulePackOrigin{}
+	if h.RulePacks != nil {
+		if v := h.RulePacks(); v != nil {
+			origins = v
+		}
+	}
+	body["rule_packs"] = origins
 	body["fields"] = Schema()
 	body["categories"] = Categories()
 	body["defaults"] = Default().Map()

@@ -14,12 +14,15 @@ that matches what you need to do.
 ## Guides
 
 - [Upstream compatibility and adapters](adapters.md) - OpenAI-compatible, Anthropic Messages, Cursor Connect, and token refresh.
+- [Plugin ecosystem](plugin-ecosystem.md) - what plugins can do, how packages, trust, updates, and the dashboard surfaces work.
+- [Author a plugin](plugin-authoring.md) - build, test, sign, package, install, and publish an ABI v1 plugin.
 - [Reverse proxy](reverse-proxy.md) - protected ingress, credentials, and NGINX.
 - [MCP server](mcp.md) - the 22-tool operator API for LLM-driven analysis.
 - [Container operation](operations.md#containers) - image selection, volumes, backups, and shutdown.
 
 ## Reference
 
+- [Plugin system](plugin-system.md) - rule packs, scoped credentials, the embedded WASM host and the management API.
 - [Operations](operations.md) - configuration, persistence, routes, storage, performance, and limits.
 - [Performance and resource usage](performance.md) - current measured tables, method, commands, and limitations.
 - [Architecture](architecture.md) - ownership, invariants, and where each behavior lives.
@@ -32,6 +35,10 @@ that matches what you need to do.
 - [Security](../SECURITY.md) - exposure boundary, reporting, and supported versions.
 - [Releases](https://github.com/LLM-4-People/millivolt/releases) - published versions and notes.
 - [License](../LICENSE) - MIT terms and dependency notices.
+
+- Agent guide (`AGENTS.md`) - repository invariants and plugin task routing.
+- [Plugin author skill](../skills/millivolt-plugin/SKILL.md) - reusable agent workflow for plugin work.
+- [Demo plugins](../demo-plugins/README.md) - two working signed plugins with source and READMEs.
 
 ## Verification and limitations
 

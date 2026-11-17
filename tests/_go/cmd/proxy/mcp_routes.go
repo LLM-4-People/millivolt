@@ -21,7 +21,7 @@ import (
 // directly and never observes main, so main calling it (or keeping its
 // installation) is not asserted here.
 func TestMCPRouteIsRegisteredOnTheOperatorMux(t *testing.T) {
-	want := []string{"/admin", "/admin/", "/session", "/session/", "/metrics", "/metrics/", "/mcp", "/mcp/"}
+	want := []string{"/admin", "/admin/", "/session", "/session/", "/metrics", "/metrics/", "/plugins", "/plugins/", "/mcp", "/mcp/"}
 	namespacePatterns := func(t *testing.T, gate *operatorGate, boot *config.Config) ([]string, *http.ServeMux, http.Handler) {
 		t.Helper()
 		mux, handler := newOperatorMux(gate, boot)

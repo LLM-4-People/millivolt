@@ -752,3 +752,63 @@ provider_aliases: {}
 # Hot-reload: yes.
 #   type: ordered list of {client, provider, model, headers, remove_headers, body} upstream rewrite rules · default []
 request_overrides: []
+
+# ---- Plugins ----
+# Declarative rule packs loaded from a directory at boot and reload. Rule packs contribute
+# data only, never code, and cannot change boot-bound settings. Restart to apply directory
+# changes.
+# Load YAML rule packs from plugin_dir at boot and on reload. Each pack may contribute
+# only provider_aliases, model_rules, providers, request_overrides and sub_conversations;
+# any other key, oversized file, or invalid merged config fails closed. Rules append in
+# filename order and all existing caps still apply. Restart required.
+# Hot-reload: NO (restart required).
+#   type: bool · default false
+plugins_enabled: false
+
+# Directory of direct .yaml/.yml rule packs, read in sorted filename order. Empty disables
+# loading. Files are size-capped and must be regular files; symlinks and unknown keys are
+# refused. Restart required.
+# Hot-reload: NO (restart required).
+#   type: string · default 
+plugin_dir: ""
+
+# Optional JSON file of SHA-256 token digests and capability scopes for plugin clients.
+# Raw tokens are never stored here and are excluded from config backups. Empty disables
+# scoped credentials; only the full operator token is accepted. Restart required.
+# Hot-reload: NO (restart required).
+#   type: string · default 
+plugin_credentials_file: ""
+
+# Optional JSON file of Ed25519 public keys keyed by signer id. Empty permits unsigned
+# development manifests; when set, every plugin manifest must carry a valid signer and
+# signature. Restart required.
+# Hot-reload: NO (restart required).
+#   type: string · default 
+plugin_trust_file: ""
+
+# Optional JSON file pinning module filenames to SHA-256 digests. A pinned module with a
+# changed digest fails boot until pins are refreshed through /admin/plugins. Restart
+# required for pin changes to load.
+# Hot-reload: NO (restart required).
+#   type: string · default 
+plugin_lock_file: ""
+
+# Optional directory of .mvplugin files scanned on demand by the operator install route.
+# Empty disables inbox scanning. Files are size-capped and must be regular files; symlinks
+# are refused. Restart required.
+# Hot-reload: NO (restart required).
+#   type: string · default 
+plugin_inbox_dir: ""
+
+# Permit the operator install and update routes to fetch signed plugins from allowlisted
+# GitHub release URLs. Remote plugin sources are refused while false. Restart required.
+# Hot-reload: NO (restart required).
+#   type: bool · default false
+plugin_downloads_enabled: false
+
+# Exact host[:port] allowlist for the generic http:fetch plugin capability. Empty disables
+# all outbound guest fetches. Guests never receive credentials; the host enforces this
+# allowlist, GET-only methods, a 5s timeout, and a 64 KiB response cap. Restart required.
+# Hot-reload: NO (restart required).
+#   type: list of string
+plugin_http_allow_hosts: []

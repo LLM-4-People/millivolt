@@ -48,6 +48,7 @@ const SETTINGS_CAT_REF = {
   models:     { dim: 'model' },
   providers:  { dim: 'provider' },
   overrides:  { dim: 'request' },
+  plugins:    { dim: 'tool' },
 };
 
 function settingsCatVisual(id) {
@@ -233,9 +234,12 @@ function fillSettingsForm(doc) {
   const defaults = doc.defaults || {};
   const overrides = doc.overrides || {};
   const cats = (doc.categories || []).filter(c => doc.fields.some(f => f.category === c.id));
+  if (!cats.some(c => c.id === 'plugins')) {
+    cats.push({ id: 'plugins', label: 'Plugins', help: 'Install, inspect and manage WASM plugin modules.' });
+  }
   if (!settingsCat || !cats.some(c => c.id === settingsCat)) settingsCat = (cats[0] && cats[0].id) || '';
   rail.innerHTML = cats.map(c => {
-    const n = doc.fields.filter(f => f.category === c.id).length;
+    const n = c.id === 'plugins' ? 1 : doc.fields.filter(f => f.category === c.id).length;
     const vis = settingsCatVisual(c.id);
     const on = c.id === settingsCat ? ' active' : '';
     const ref = SETTINGS_CAT_REF[c.id] || SETTINGS_CAT_REF.server;
@@ -2952,6 +2956,13 @@ function showSettingsCat() {
   const rail = $('settings-rail');
   if (!box) return;
   const q = (settingsQ || '').trim().toLowerCase();
+  const pluginPane = $('plugins-card');
+  const pluginSearch = 'plugins install list modules descriptors';
+  const pluginHit = q ? pluginSearch.includes(q) : settingsCat === 'plugins';
+  if (pluginPane) pluginPane.hidden = !pluginHit;
+  if (pluginHit && typeof applyPluginState === 'function') {
+    applyPluginState(opencodeState || pluginAdminDoc?.status);
+  }
   const cats = (settingsDoc && settingsDoc.categories) || [];
   const cat = cats.find(c => c.id === settingsCat) || cats[0];
   let shown = 0, restarts = 0;
@@ -2981,7 +2992,7 @@ function showSettingsCat() {
       const on = !q && btn.dataset.stCat === settingsCat;
       btn.classList.toggle('active', on);
       btn.setAttribute('aria-current', on ? 'page' : 'false');
-      const n = perCat.get(btn.dataset.stCat) || 0;
+      const n = btn.dataset.stCat === 'plugins' ? (pluginHit ? 1 : 0) : (perCat.get(btn.dataset.stCat) || 0);
       const badge = btn.querySelector('.rail-n');
       if (badge) badge.textContent = n;
       btn.classList.toggle('has-hit', !!q && n > 0);

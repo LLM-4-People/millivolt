@@ -249,10 +249,16 @@ try {
 <section id="storm-banner" class="storm-banner" hidden role="status" aria-live="polite" aria-label="Error storm protection" tabindex="0"></section>
 
 <main>
+  <nav class="view-tabs" id="view-tabs" aria-label="Dashboard views">
+    <button type="button" class="view-tab" id="view-tab-overview" data-view="overview" aria-selected="true">Overview</button>
+    <button type="button" class="view-tab" id="view-tab-opencode" data-view="opencode" aria-selected="false">OpenCode</button>
+    <button type="button" class="view-tab" id="view-tab-focus" data-view="focus" aria-selected="false">Focus</button>
+  </nav>
+
   <!-- Static KPI skeleton: full-height placeholders from the first paint,
        so the first payload only swaps text and nothing below the band
        moves. The live renderer replaces this innerHTML wholesale. -->
-  <div class="kpis" id="kpis">
+  <div class="kpis" id="kpis" data-view-panel="overview">
     <div class="kpi"><h2>Requests</h2><div class="val">-</div><div class="sub2">-</div></div>
     <div class="kpi"><h2>In-flight</h2><div class="val">-</div><div class="sub2">-</div></div>
     <div class="kpi k-cost"><h2>Total cost</h2><div class="val">-</div><div class="sub2">-</div></div>
@@ -264,9 +270,8 @@ try {
     <div class="kpi"><h2>Error rate</h2><div class="val">-</div><div class="sub2">-</div></div>
   </div>
 
-  <!-- The explorer is the central organizing surface. Traffic, footer, and
        request log react to its scope; the KPI band stays global. -->
-  <section class="card" id="explorer" aria-label="Explorer">
+  <section class="card" id="explorer" data-view-panel="overview" aria-label="Explorer">
     <div class="xp-scope" id="xp-scope"></div>
     <div class="xp-body">
       <div class="xp-rail-col">
@@ -282,7 +287,7 @@ try {
   <!-- Under the explorer: traffic + requests stack vertically in the
        scrolling page; they sit side-by-side only in the locked one-screen
        layout. Both react to the explorer scope. -->
-  <div class="grid-pair">
+  <div class="grid-pair" data-view-panel="overview">
     <div class="card traffic-card">
       <div class="card-hd"><h2>Timeline</h2>
         <div class="chart-controls">
@@ -310,7 +315,23 @@ try {
       <div class="scroll" id="tbl-requests"></div>
     </div>
   </div>
+
+  <section class="card opencode-card" id="opencode-view" data-view-panel="opencode" hidden aria-label="OpenCode plugin">
+    <div class="card-hd"><h2>OpenCode Go</h2><span class="oc-status" id="opencode-status"></span></div>
+    <div class="oc-intro" id="opencode-intro"></div>
+    <div class="oc-grid" id="opencode-grid"></div>
+    <div class="oc-detail" id="opencode-detail"></div>
+  </section>
 </main>
+
+  <!-- A plugin-declared view: the core still owns every element and renders
+       only escaped descriptor text, including the composed OpenCode panel. -->
+  <section class="card opencode-card" id="focus-view" data-view-panel="focus" hidden aria-label="Focus plugin view">
+    <div class="card-hd"><h2>Focus</h2><span class="oc-status" id="focus-status"></span></div>
+    <div class="oc-intro" id="focus-intro"></div>
+    <div class="oc-grid" id="focus-grid"></div>
+    <div class="oc-detail" id="focus-detail"></div>
+  </section>
 
 <div class="st-veil" id="settings-veil" onclick="closeSettings()"></div>
 <section class="st-sheet" id="settings-sheet" hidden inert tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -327,6 +348,21 @@ try {
     <div class="st-main">
       <div class="st-pane-hd" id="settings-pane-hd"></div>
       <div class="st-fields" id="settings-fields"></div>
+      <div class="plugins-card" id="plugins-card" hidden aria-label="Plugins">
+        <div class="plug-hd"><h3>Plugins</h3><span class="plug-config" id="plugins-config"></span></div>
+        <div class="plug-tools" id="plugin-tools">
+          <input type="file" id="plugin-file" accept=".mvplugin" aria-label="Plugin archive">
+          <button type="button" class="btn" id="plugin-install-file">Install file</button>
+          <input type="text" id="plugin-source" placeholder="github:owner/repo@latest" aria-label="Plugin source">
+          <label class="plug-caps"><input type="checkbox" id="plugin-confirm-caps"> Allow new capabilities</label>
+          <button type="button" class="btn" id="plugin-install-source">Install URL</button>
+          <button type="button" class="btn" id="plugin-scan-inbox">Scan inbox</button>
+          <button type="button" class="btn" id="plugin-refresh">Refresh</button>
+          <span class="plug-status" id="plugin-status" role="status" aria-live="polite"></span>
+        </div>
+        <div class="plug-list" id="plugins-list"></div>
+        <div class="plug-updates" id="plugin-updates"></div>
+      </div>
     </div>
   </div>
   <div class="st-ft">

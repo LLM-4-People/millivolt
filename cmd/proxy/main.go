@@ -24,6 +24,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/plugins"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 	"github.com/LLM-4-People/millivolt/internal/web"
@@ -36,16 +37,17 @@ import (
 // boot snapshot); liveProxy is the running proxy server; liveConfigPath is
 // the -config flag value.
 var (
-	liveMu             sync.Mutex
-	reloadMu           sync.Mutex // serializes reload transactions; Settings takes Handler.mu first; never held by readers
-	liveCfg            *config.Config
-	bootCfg            *config.Config // immutable process-bound settings
-	liveProxy          *proxy.Server
-	liveBuf            *metrics.Buffer
-	liveStore          *storage.Store
-	liveConfigPath     string
-	liveListenOverride string
-	liveDBOverride     string
+	liveMu                sync.Mutex
+	reloadMu              sync.Mutex // serializes reload transactions; Settings takes Handler.mu first; never held by readers
+	liveCfg               *config.Config
+	bootCfg               *config.Config // immutable process-bound settings
+	liveProxy             *proxy.Server
+	liveBuf               *metrics.Buffer
+	liveStore             *storage.Store
+	liveConfigPath        string
+	liveListenOverride    string
+	liveDBOverride        string
+	livePluginDirOverride string
 )
 
 // rejectUnless is the RFC 9110 method gate for mux handlers in this
@@ -110,6 +112,8 @@ func operatorNamespaces(gate *operatorGate, dispatch http.Handler, boot *config.
 		{"/session/", http.NotFoundHandler()},
 		{"/metrics", http.NotFoundHandler()},
 		{"/metrics/", http.NotFoundHandler()},
+		{"/plugins", http.NotFoundHandler()},
+		{"/plugins/", http.NotFoundHandler()},
 	}
 	// The MCP streamable HTTP endpoint is registered from the boot config's
 	// mcp_enabled and gated like /metrics. When it is off the root stays
@@ -152,6 +156,7 @@ func main() {
 	// real config. Empty = keep the config-file/default value.
 	listenOverride := flag.String("listen", "", "override listen address (e.g. 127.0.0.1:8081); keeps instances on distinct ports")
 	dbOverride := flag.String("db-path", "", `override storage DB path ("" = config value; "none" = disable durable storage)`)
+	pluginDirOverride := flag.String("plugin-dir", "", "override rule pack directory (empty = config value)")
 	// Lets scripts/dev.sh keep tracking the dev instance across UI-triggered
 	// restarts: the handoff child inherits this flag and rewrites the file
 	// with its own pid on boot.
@@ -163,6 +168,7 @@ func main() {
 	liveConfigPath = *configPath
 	liveListenOverride = *listenOverride
 	liveDBOverride = *dbOverride
+	livePluginDirOverride = *pluginDirOverride
 	outputs := 0
 	for _, enabled := range []bool{*printVersion, *printConfig, *printExampleConfig} {
 		if enabled {
@@ -206,6 +212,34 @@ func main() {
 	logDroppedConfigKeys(*configPath, skipped)
 	recordReloadStatus(true, "", skipped, nil)
 	applyCLIOverrides(cfg)
+	cfg, _, err = config.ApplyRulePacks(cfg)
+	if err != nil {
+		log.Fatalf("rule packs: %v", err)
+	}
+	credentials, err := plugins.LoadCredentials(cfg.PluginCredentialsFile)
+	if err != nil {
+		log.Fatalf("plugin credentials: %v", err)
+	}
+	trust, err := plugins.LoadTrust(cfg.PluginTrustFile)
+	if err != nil {
+		log.Fatalf("plugin trust: %v", err)
+	}
+	locks, err := plugins.LoadLocks(cfg.PluginLockFile)
+	if err != nil {
+		log.Fatalf("plugin locks: %v", err)
+	}
+	var pluginRuntime *plugins.Runtime
+	if cfg.PluginsEnabled {
+		pluginRuntime, err = plugins.NewRuntime(context.Background())
+		if err != nil {
+			log.Fatalf("plugin runtime: %v", err)
+		}
+		pluginRuntime.SetLockPath(cfg.PluginLockFile)
+		pluginRuntime.SetHTTPAllowHosts(cfg.PluginHTTPAllowHosts)
+		if err := pluginRuntime.LoadDirWithPolicy(context.Background(), cfg.PluginDir, trust, locks); err != nil {
+			log.Fatalf("plugin modules: %v", err)
+		}
+	}
 	// The soft runtime memory limit is startup-only by design: it must be
 	// active before the startup projection preload allocates its burst. A
 	// zero config value leaves an operator GOMEMLIMIT untouched and otherwise
@@ -295,6 +329,9 @@ func main() {
 	if store != nil {
 		proxySrv.AttachPausePersist(store)
 	}
+	if pluginRuntime != nil {
+		proxySrv.PluginHook = pluginRuntime.PublishRecord
+	}
 	// Publish live state for config reload (SIGHUP + /admin/reload).
 	liveCfg = cfg
 	bootCfg = cfg.Clone()
@@ -305,7 +342,7 @@ func main() {
 	// The operator gate's credential is process-bound (env only, re-read on
 	// restart or handoff, never on reload). Failing the boot on an invalid
 	// credential keeps deny-by-default honest - no silent weaker policy.
-	gate := newOperatorGate(mustOperatorToken())
+	gate := newOperatorGateWithScopes(mustOperatorToken(), credentials)
 
 	mux, handler := newOperatorMux(gate, cfg)
 	// The liveness probe is the one open server route besides inference:
@@ -347,6 +384,7 @@ func main() {
 		defer liveMu.Unlock()
 		return liveCfg.ModelCanon()
 	}
+	agg.Plugins = func() any { return pluginRuntime.Status() }
 	buf.SetModelObserver(agg.ObserveModels)
 	proxySrv.ModelObserver = agg.ObserveModelNames
 	// The agg endpoints are buffered dashboard JSON (log pages can be
@@ -369,6 +407,13 @@ func main() {
 	mux.Handle("/admin/throttle", http.HandlerFunc(proxySrv.HandleThrottle))
 	mux.Handle("/admin/debug", http.HandlerFunc(proxySrv.HandleDebug))
 	mux.Handle("/admin/debug/capture", web.Gzip(http.HandlerFunc(proxySrv.HandleDebugCapture)))
+	mux.Handle("/admin/plugins", handlePlugins(pluginRuntime, cfg))
+	pluginSource := plugins.NewGitHubSource()
+	mux.Handle("/admin/plugins/install", handlePluginInstall(cfg, pluginSource))
+	mux.Handle("/admin/plugins/uninstall", handlePluginUninstall(cfg))
+	mux.Handle("/admin/plugins/updates/check", handlePluginUpdatesCheck(cfg, pluginSource))
+	mux.Handle("/admin/plugins/update", handlePluginUpdate(cfg, pluginSource))
+	mux.Handle("/admin/plugins/rollback", handlePluginRollback(cfg))
 
 	// Config hot-reload. POST re-reads the config file and hot-applies the
 	// reloadable subset with zero dropped requests (the listener never closes).
@@ -517,6 +562,11 @@ func main() {
 		if store != nil {
 			if err := store.Close(); err != nil {
 				log.Printf("storage close: %v", err)
+			}
+		}
+		if pluginRuntime != nil {
+			if err := pluginRuntime.Close(context.Background()); err != nil {
+				log.Printf("plugin runtime close: %v", err)
 			}
 		}
 	}
@@ -685,6 +735,9 @@ func adminConfigHandler() *config.Handler {
 	if liveDBOverride != "" {
 		ov["db_path"] = liveDBOverride
 	}
+	if livePluginDirOverride != "" {
+		ov["plugin_dir"] = livePluginDirOverride
+	}
 	return &config.Handler{
 		Path:    liveConfigPath,
 		Startup: bootCfg,
@@ -705,6 +758,11 @@ func adminConfigHandler() *config.Handler {
 		Persist:      reloadConfigLocked,
 		Backup:       backupStatus,
 		ReloadStatus: lastReloadDoc,
+		RulePacks: func() any {
+			liveMu.Lock()
+			defer liveMu.Unlock()
+			return liveCfg.RulePackOrigins
+		},
 	}
 }
 
@@ -743,6 +801,9 @@ func applyCLIOverrides(cfg *config.Config) {
 		cfg.DBPath = "" // in-memory only
 	default:
 		cfg.DBPath = liveDBOverride
+	}
+	if livePluginDirOverride != "" {
+		cfg.PluginDir = livePluginDirOverride
 	}
 }
 
@@ -834,6 +895,16 @@ func reloadConfigLocked() ([]string, error) {
 	}
 	logDroppedConfigKeys(liveConfigPath, dropped)
 	applyCLIOverrides(fresh)
+	packCfg := fresh.Clone()
+	packCfg.PluginsEnabled = bootCfg.PluginsEnabled
+	packCfg.PluginDir = bootCfg.PluginDir
+	fresh, _, err = config.ApplyRulePacks(packCfg)
+	if err != nil {
+		err = fmt.Errorf("rule packs: %w", err)
+		log.Printf("config reload failed (keeping current): %v", err)
+		recordReloadStatus(false, err.Error(), dropped, nil)
+		return nil, err
+	}
 	// Compute which startup-bound fields changed (these can't move on a live
 	// process) so we can report them as restart-required. Schema().HotReload
 	// is the single source of that classification.

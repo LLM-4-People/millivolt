@@ -126,6 +126,8 @@ type AggAPI struct {
 	// eligibility fields (available, reason) and none of the live phase, pid or
 	// drain state: this is the boot-time verdict, immutable by construction.
 	Restart func() any
+	// Plugins is the boot-loaded plugin status view. Nil omits the section.
+	Plugins func() any
 	// ModelCanon serves the effective model-canonicalization rules (single
 	// owner config.CanonicalModel) for the bootstrap payload; the fold reads
 	// it via canonizer() per request. Nil = no canonicalization (raw
@@ -1234,6 +1236,7 @@ type bootstrapPayload struct {
 	Debug            any           `json:"debug,omitempty"`
 	Storm            any           `json:"storm,omitempty"`
 	Restart          any           `json:"restart,omitempty"`
+	Plugins          any           `json:"plugins,omitempty"`
 	Storage          storageSignal `json:"storage"`
 }
 
@@ -1346,6 +1349,9 @@ func (a *AggAPI) bootstrap(snapshot metrics.Snapshot) bootstrapPayload {
 	}
 	if a.Restart != nil {
 		payload.Restart = a.Restart()
+	}
+	if a.Plugins != nil {
+		payload.Plugins = a.Plugins()
 	}
 	return payload
 }

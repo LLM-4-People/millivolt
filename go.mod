@@ -6,6 +6,7 @@ require (
 	github.com/klauspost/compress v1.20.3
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/segmentio/asm v1.2.1
+	github.com/tetratelabs/wazero v1.11.0
 	golang.org/x/net v0.61.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.60.1

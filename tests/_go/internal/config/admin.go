@@ -332,6 +332,7 @@ type settingsWireDoc struct {
 	ModelFields     json.RawMessage `json:"model_fields"`
 	Backup          json.RawMessage `json:"backup,omitempty"`
 	LastReload      json.RawMessage `json:"last_reload,omitempty"`
+	RulePacks       json.RawMessage `json:"rule_packs"`
 	Saved           bool            `json:"saved,omitempty"`
 	Error           string          `json:"error,omitempty"`
 }

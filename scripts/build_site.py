@@ -89,6 +89,7 @@ NAV_GROUPS = (
             ("Operations", "docs/operations.html", "docs/operations.md"),
             ("Performance", "docs/performance.html", "docs/performance.md"),
             ("Architecture", "docs/architecture.html", "docs/architecture.md"),
+            ("Plugin system", "docs/plugin-system.html", "docs/plugin-system.md"),
         ),
     ),
     (

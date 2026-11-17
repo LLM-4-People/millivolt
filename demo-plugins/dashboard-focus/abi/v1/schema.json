@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "millivolt plugin ABI v1 messages",
+  "type": "object",
+  "definitions": {
+    "Event": {
+      "type": "object",
+      "required": ["type", "seq"],
+      "properties": {
+        "type": {"type": "string", "enum": ["request.recorded", "config.changed", "operator.command"]},
+        "seq": {"type": "integer", "minimum": 0},
+        "record": {"$ref": "#/definitions/Record"},
+        "config": {"$ref": "#/definitions/ConfigView"},
+        "command": {"$ref": "#/definitions/OperatorCommand"}
+      }
+    },
+    "Record": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "start": {"type": "string"},
+        "status": {"type": "integer"},
+        "provider": {"type": "string"},
+        "model": {"type": "string"},
+        "client": {"type": "string"},
+        "duration_ms": {"type": "integer"},
+        "input_tokens": {"type": "integer"},
+        "output_tokens": {"type": "integer"},
+        "error_type": {"type": "string"},
+        "cost": {"type": "number", "minimum": 0},
+        "rate_limit_remaining": {"type": "integer", "minimum": 0}
+      }
+    },
+    "HTTPFetchRequest": {
+      "type": "object",
+      "required": ["url"],
+      "properties": {
+        "url": {"type": "string", "maxLength": 2048},
+        "method": {"type": "string", "enum": ["GET"]},
+        "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+        "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 5000},
+        "credential_id": {"type": "string", "maxLength": 64},
+        "credential_header": {"type": "string", "maxLength": 128},
+        "max_response_bytes": {"type": "integer", "minimum": 1, "maximum": 65536}
+      }
+    },
+    "HTTPFetchResponse": {
+      "type": "object",
+      "properties": {
+        "status": {"type": "integer"},
+        "body": {"type": "string", "maxLength": 65536},
+        "error": {"type": "string"}
+      }
+    },
+    "ConfigView": {
+      "type": "object",
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "values": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "OperatorCommand": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "args": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "Response": {
+      "type": "object",
+      "properties": {
+        "logs": {"type": "array", "items": {"$ref": "#/definitions/LogEntry"}, "maxItems": 64},
+        "metrics": {"type": "array", "items": {"$ref": "#/definitions/Metric"}, "maxItems": 64},
+        "tools": {"type": "array", "items": {"$ref": "#/definitions/ToolDescriptor"}, "maxItems": 16},
+        "panels": {"type": "array", "items": {"$ref": "#/definitions/UIPanel"}, "maxItems": 16},
+        "error": {"type": "string"}
+      }
+    },
+    "LogEntry": {
+      "type": "object",
+      "properties": {
+        "level": {"type": "string", "enum": ["debug", "info", "warn", "error"]},
+        "message": {"type": "string", "maxLength": 4096}
+      }
+    },
+    "Metric": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string", "maxLength": 128},
+        "value": {"type": "number"},
+        "labels": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "ToolDescriptor": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string", "maxLength": 128},
+        "description": {"type": "string", "maxLength": 4096},
+        "capability": {"type": "string"}
+      }
+    },
+    "UIPanel": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string", "maxLength": 128},
+        "title": {"type": "string", "maxLength": 128},
+        "data": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    }
+  }
+}

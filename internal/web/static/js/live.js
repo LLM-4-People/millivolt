@@ -1080,6 +1080,435 @@ function fetchBootstrap(mode, after) {
   if (mode === 'full') _bootFull = request;
   return request;
 }
+// Plugin management is core-owned. The guest supplies text descriptors only;
+// every control, label and action in this card is authored here.
+let pluginAdminDoc = null;
+let pluginCandidates = [];
+
+function pluginStatusText(message, kind = '') {
+  const el = $('plugin-status');
+  if (!el) return;
+  el.textContent = String(message || '');
+  if (kind) el.dataset.kind = kind;
+  else delete el.dataset.kind;
+}
+
+function pluginConfigText(cfg) {
+  if (!cfg || typeof cfg !== 'object') return '';
+  const bits = [];
+  bits.push(cfg.enabled ? 'runtime on' : 'runtime off');
+  bits.push(cfg.downloads_enabled ? 'downloads on' : 'downloads off');
+  bits.push(cfg.trust_file ? 'signed' : 'unsigned dev');
+  bits.push(cfg.lock_file ? 'pins on' : 'pins off');
+  return bits.join(' · ');
+}
+
+function pluginActionButton(action, id, label) {
+  return '<button type="button" class="btn plug-btn" data-plug-action="' + escapeHtml(action) +
+    '" data-plug-id="' + escapeHtml(id) + '">' + escapeHtml(label) + '</button>';
+}
+
+function renderPluginCandidates() {
+  const box = $('plugin-updates');
+  if (!box) return;
+  if (!pluginCandidates.length) { box.innerHTML = ''; return; }
+  box.innerHTML = pluginCandidates.map(c => {
+    const id = escapeHtml(String(c.id || 'plugin'));
+    const from = escapeHtml(String(c.current_version || '?'));
+    const to = escapeHtml(String(c.version || '?'));
+    return '<div class="plug-update">update available · ' + id + ' ' + from + ' → ' + to + '</div>';
+  }).join('');
+}
+
+let activeDashboardView = 'overview';
+let opencodeState = null;
+let focusAutoActivated = false;
+
+function setDashboardView(view) {
+  const next = view === 'opencode' || view === 'focus' ? view : 'overview';
+  activeDashboardView = next;
+  for (const panel of document.querySelectorAll('[data-view-panel]')) {
+    panel.hidden = panel.dataset.viewPanel !== next;
+  }
+  for (const tab of document.querySelectorAll('[data-view]')) {
+    tab.setAttribute('aria-selected', tab.dataset.view === next ? 'true' : 'false');
+  }
+  if (next === 'opencode') renderOpenCodeTab();
+  if (next === 'focus') renderFocusTab();
+}
+function opencodePanel(state) {
+  const descriptors = Array.isArray(state?.descriptors) ? state.descriptors : [];
+  for (const desc of descriptors) {
+    if (desc?.plugin_id !== 'opencode-usage-limits') continue;
+    const panels = Array.isArray(desc.panels) ? desc.panels : [];
+    const panel = panels.find(p => p?.id === 'opencode-usage-limits');
+    if (panel) return panel;
+  }
+  return null;
+}
+
+// A bounded, generic descriptor lookup. The core chooses which plugin and
+// panel a layout hint may compose; guests only publish escaped text data.
+function pluginPanel(state, pluginID, panelID) {
+  const descriptors = Array.isArray(state?.descriptors) ? state.descriptors : [];
+  for (const desc of descriptors) {
+    if (String(desc?.plugin_id || '') !== pluginID) continue;
+    const panels = Array.isArray(desc.panels) ? desc.panels : [];
+    const panel = panels.find(p => String(p?.id || '') === panelID);
+    if (panel) return panel;
+  }
+  return null;
+}
+
+function focusDescriptor(state) {
+  const descriptors = Array.isArray(state?.descriptors) ? state.descriptors : [];
+  for (const desc of descriptors) {
+    const panels = Array.isArray(desc?.panels) ? desc.panels : [];
+    for (const panel of panels) {
+      const data = panel?.data && typeof panel.data === 'object' ? panel.data : {};
+      if (data.view === 'focus') return { desc: desc, panel: panel, data: data };
+    }
+  }
+  return null;
+}
+
+function opencodeField(label, value) {
+  return '<div class="oc-field"><span class="oc-label">' + escapeHtml(label) +
+    '</span><span class="oc-value">' + escapeHtml(value == null || value === '' ? '-' : value) + '</span></div>';
+}
+
+function parseOpenCodeQuota(value) {
+  const match = /used:\s*([\d.]+)%\s*(?:\||·|Â·)\s*left:\s*([\d.]+)%\s*(?:\||·|Â·)\s*limited:\s*(true|false)\s*(?:\||·|Â·)\s*resets:\s*(.+)$/.exec(String(value == null ? '' : value));
+  if (!match) return null;
+  const used = Math.max(0, Math.min(100, Number(match[1]) || 0));
+  return { used: used, left: 100 - used, limited: match[3] === 'true', resets: match[4].trim() };
+}
+
+function opencodeQuotaCard(label, value, tone) {
+  const quota = parseOpenCodeQuota(value);
+  if (!quota) {
+    return '<div class="oc-quota oc-quota-empty ' + tone + '"><span class="oc-quota-label">' +
+      escapeHtml(label) + '</span><span class="oc-muted">unavailable</span></div>';
+  }
+  return '<div class="oc-quota ' + tone + '">' +
+    '<div class="oc-quota-top"><span class="oc-quota-label">' + escapeHtml(label) + '</span>' +
+    (quota.limited ? '<span class="oc-quota-badge">limited</span>' : '') + '</div>' +
+    '<div class="oc-quota-value">' + escapeHtml(String(quota.left)) + '% <span>left</span></div>' +
+    '<div class="oc-quota-track"><div class="oc-quota-fill" style="width:' + quota.used + '%"></div></div>' +
+    '<div class="oc-quota-meta">' + escapeHtml(quota.resets) + '</div></div>';
+}
+
+function renderOpenCodeTab() {
+  const status = $('opencode-status');
+  const intro = $('opencode-intro');
+  const grid = $('opencode-grid');
+  const detail = $('opencode-detail');
+  if (!status || !intro || !grid || !detail) return;
+  const modules = Array.isArray(opencodeState?.modules) ? opencodeState.modules : [];
+  const module = modules.find(m => m?.id === 'opencode-usage-limits');
+  const panel = opencodePanel(opencodeState);
+  if (!module) {
+    status.textContent = 'not installed';
+    intro.textContent = 'Install the opencode-usage-limits plugin to populate this view.';
+    grid.innerHTML = '';
+    detail.innerHTML = '';
+    return;
+  }
+  if (!panel) {
+    const failures = Number(module.failures || 0);
+    status.textContent = [module.version, failures ? failures + ' failures' : 'waiting'].filter(Boolean).join(' · ');
+    intro.textContent = 'Waiting for the first recorded OpenCode request.';
+    grid.innerHTML = '';
+    detail.innerHTML = '';
+    return;
+  }
+  const failures = Number(module.failures || 0);
+  const data = panel.data && typeof panel.data === 'object' ? panel.data : {};
+  status.textContent = [module.version, failures ? failures + ' failures' : 'healthy'].filter(Boolean).join(' · ');
+  intro.textContent = panel.title || 'OpenCode Go usage';
+  const fields = [
+    ['provider', data.provider], ['requests', data.requests],
+    ['input tokens', data.input_tokens], ['output tokens', data.output_tokens],
+    ['cost', data.cost], ['rate limited', data.rate_limited],
+    ['header remaining', data.remaining], ['last model', data.last_model],
+  ];
+  const quotaCards = [
+    ['rolling', data.rolling, 'oc-quota-rolling'],
+    ['weekly', data.weekly, 'oc-quota-weekly'],
+    ['monthly', data.monthly, 'oc-quota-monthly'],
+  ].map(parts => opencodeQuotaCard(parts[0], parts[1], parts[2])).join('');
+  const quotaNote = data.quota_status === 'ok'
+    ? ''
+    : '<div class="oc-quota-note">Quota source unavailable. Allow the plugin\'s fetch host and reload after a request.</div>';
+  grid.innerHTML = fields.map(([label, value]) => opencodeField(label, value)).join('') +
+    '<div class="oc-quota-grid">' + quotaCards + '</div>' + quotaNote;
+  const tools = [];
+  for (const desc of Array.isArray(opencodeState?.descriptors) ? opencodeState.descriptors : []) {
+    if (desc?.plugin_id !== 'opencode-usage-limits') continue;
+    for (const tool of Array.isArray(desc.tools) ? desc.tools : []) {
+      tools.push('<div class="oc-tool">' + escapeHtml(String(tool?.name || '')) +
+        '<span>' + escapeHtml(String(tool?.description || tool?.capability || '')) + '</span></div>');
+    }
+  }
+  const modelList = String(data.model_list || '').split(',').map(s => s.trim()).filter(Boolean);
+  const models = modelList.length
+    ? '<div class="oc-models">' + modelList.map(m => '<span>' + escapeHtml(m) + '</span>').join('') + '</div>'
+    : '';
+  detail.innerHTML = '<div class="oc-section"><h3>Declared tool</h3>' +
+    (tools.join('') || '<span class="oc-muted">none</span>') + '</div>' +
+    '<div class="oc-section"><h3>Models</h3>' + (models || '<span class="oc-muted">none</span>') + '</div>' +
+    '<div class="oc-section"><h3>Config view</h3>' +
+    opencodeField('schema', data.config_schema) + opencodeField('values', data.config_values) + '</div>';
+}
+
+// A plugin-declared layout view. It composes the plugin's own bounded summary
+// with the descriptor it asks for; no guest HTML or JS is ever interpolated.
+function renderFocusTab() {
+  const status = $('focus-status');
+  const intro = $('focus-intro');
+  const grid = $('focus-grid');
+  const detail = $('focus-detail');
+  if (!status || !intro || !grid || !detail) return;
+  const layout = focusDescriptor(opencodeState);
+  if (!layout) {
+    status.textContent = 'not installed';
+    intro.textContent = 'Install the dashboard-focus plugin to enable this view.';
+    grid.innerHTML = '';
+    detail.innerHTML = '';
+    return;
+  }
+  const data = layout.data;
+  const includeID = String(data.include_plugin || '');
+  const includePanel = String(data.include_panel || includeID);
+  const source = includeID ? pluginPanel(opencodeState, includeID, includePanel) : null;
+  const sourceData = source?.data && typeof source.data === 'object' ? source.data : {};
+  const modules = Array.isArray(opencodeState?.modules) ? opencodeState.modules : [];
+  const sourceModule = modules.find(m => String(m?.id || '') === includeID);
+  status.textContent = [layout.desc.plugin_id, data.layout_revisions ? 'rev ' + data.layout_revisions : '']
+    .filter(Boolean).join(' · ');
+  intro.textContent = data.heading || layout.panel.title || 'Focus view';
+  const fields = [
+    ['arrange', data.arrange],
+    ['plugin requests', data.requests],
+    ['models', data.models],
+    ['errors', data.errors],
+    ['tokens in/out', String(data.input_tokens || '0') + ' / ' + String(data.output_tokens || '0')],
+    ['last model', data.last_model],
+    ['included plugin', includeID || 'none'],
+    ['included panel', source ? (source.title || includePanel) : 'waiting'],
+    ['quota source', sourceModule
+      ? [sourceModule.version, sourceModule.failures ? sourceModule.failures + ' failures' : 'healthy'].join(' · ')
+      : 'not installed'],
+    ['quota status', sourceData.quota_status || 'unavailable'],
+    ['provider', sourceData.provider],
+    ['cost', sourceData.cost],
+  ];
+  const quotaCards = [
+    ['rolling', sourceData.rolling, 'oc-quota-rolling'],
+    ['weekly', sourceData.weekly, 'oc-quota-weekly'],
+    ['monthly', sourceData.monthly, 'oc-quota-monthly'],
+  ].map(parts => opencodeQuotaCard(parts[0], parts[1], parts[2])).join('');
+  const quotaNote = source && sourceData.quota_status === 'ok'
+    ? ''
+    : '<div class="oc-quota-note">Quota source unavailable. Allow the OpenCode fetch host and reload after a request.</div>';
+  grid.innerHTML = fields.map(([label, value]) => opencodeField(label, value)).join('') +
+    '<div class="oc-quota-grid">' + quotaCards + '</div>' + quotaNote;
+  const descriptors = Array.isArray(opencodeState?.descriptors) ? opencodeState.descriptors : [];
+  const descriptorRows = descriptors.map(desc => {
+    const titles = (Array.isArray(desc?.panels) ? desc.panels : [])
+      .map(panel => String(panel?.title || panel?.id || '')).filter(Boolean);
+    return '<div class="oc-tool">' + escapeHtml(String(desc?.plugin_id || 'plugin')) +
+      '<span>' + escapeHtml(titles.join(', ') || 'no panels') + '</span></div>';
+  }).join('');
+  detail.innerHTML = '<div class="oc-section"><h3>Loaded plugins</h3>' +
+    (descriptorRows || '<span class="oc-muted">none</span>') + '</div>' +
+    '<div class="oc-section"><h3>Layout note</h3><span class="oc-muted">' +
+    escapeHtml(String(data.note || '')) + '</span></div>';
+}
+
+function applyPluginState(state) {
+  opencodeState = state || null;
+  const pane = $('plugins-card');
+  const list = $('plugins-list');
+  const modules = Array.isArray(state?.modules) ? state.modules : [];
+  // The pane lives in Settings. Populate it only while revealed; the focus
+  // view below always runs because it drives the dashboard, not the pane.
+  if (pane && list && !pane.hidden) {
+    const config = $('plugins-config');
+    if (config && pluginAdminDoc && pluginAdminDoc.config) {
+      config.textContent = pluginConfigText(pluginAdminDoc.config);
+    }
+    const rows = [];
+    for (const mod of modules) {
+      if (!mod || typeof mod !== 'object') continue;
+      const id = String(mod.id || mod.module || 'plugin');
+      const caps = Array.isArray(mod.capabilities) ? mod.capabilities.join(', ') : '';
+      const meta = [mod.version, mod.abi, caps].filter(Boolean).join(' · ');
+      const failures = Number(mod.failures || 0);
+      rows.push('<div class="plug-row plug-installed"><span class="plug-name">' + escapeHtml(id) + '</span>' +
+        (meta || failures ? '<span class="plug-meta">' + escapeHtml(meta + (failures ? ' · ' + failures + ' failures' : '')) + '</span>' : '') +
+        '<span class="plug-actions">' +
+        pluginActionButton('verify', id, 'Verify') +
+        pluginActionButton('pin', id, 'Pin') +
+        pluginActionButton('updates', id, 'Check update') +
+        pluginActionButton('update', id, 'Update') +
+        pluginActionButton('rollback', id, 'Rollback') +
+        pluginActionButton('uninstall', id, 'Uninstall') +
+        '</span></div>');
+    }
+    const descriptors = Array.isArray(state?.descriptors) ? state.descriptors : [];
+    for (const desc of descriptors) {
+      for (const tool of Array.isArray(desc?.tools) ? desc.tools : []) {
+        rows.push('<div class="plug-row plug-desc"><span class="plug-tag">tool</span><span>' + escapeHtml(String(tool?.name || '')) + '</span></div>');
+      }
+      for (const panel of Array.isArray(desc?.panels) ? desc.panels : []) {
+        rows.push('<div class="plug-row plug-desc"><span class="plug-tag">panel</span><span>' + escapeHtml(String(panel?.title || '')) + '</span></div>');
+      }
+    }
+    if (!rows.length) rows.push('<div class="plug-empty">No plugins installed.</div>');
+    list.innerHTML = rows.join('');
+    renderPluginCandidates();
+  }
+  if (!focusAutoActivated && focusDescriptor(state) && activeDashboardView === 'overview') {
+    focusAutoActivated = true;
+    setDashboardView('focus');
+  }
+  if (activeDashboardView === 'opencode') renderOpenCodeTab();
+  if (activeDashboardView === 'focus') renderFocusTab();
+}
+function pluginMutationReport(report, fallback) {
+  if (!report || typeof report !== 'object') { pluginStatusText(fallback, 'error'); return; }
+  const bits = [];
+  if (report.id) bits.push(String(report.id));
+  if (report.ok !== undefined) bits.push(report.ok ? 'verify ok' : 'verify failed');
+  if (Array.isArray(report.pinned)) bits.push('pinned ' + report.pinned.length);
+  if (report.from_version && report.to_version) bits.push(String(report.from_version) + ' → ' + String(report.to_version));
+  if (report.version) bits.push(String(report.version));
+  if (report.signature) bits.push(String(report.signature));
+  const restart = !!report.restart_required;
+  if (restart) bits.push('restart required');
+  pluginStatusText(bits.join(' · ') || fallback, restart ? 'restart' : 'ok');
+}
+
+async function fetchPluginAdmin() {
+  try {
+    const doc = await operatorJson('/admin/plugins');
+    if (!doc || typeof doc !== 'object' || !doc.status) throw new Error('invalid plugin status');
+    pluginAdminDoc = doc;
+    applyPluginState(doc.status);
+    return doc;
+  } catch (err) {
+    pluginStatusText(String(err && err.message ? err.message : 'plugin status failed'), 'error');
+    return null;
+  }
+}
+
+function pluginJSONPost(url, body, fallback) {
+  return operatorJsonBody(url, {
+    method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body),
+  }, fallback);
+}
+
+async function pluginInstallFile() {
+  const input = $('plugin-file');
+  const file = input && input.files ? input.files[0] : null;
+  if (!file) { pluginStatusText('choose a .mvplugin file', 'error'); return; }
+  pluginStatusText('installing ' + file.name);
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const report = await operatorJsonBody('/admin/plugins/install', { method: 'POST', body: form }, 'plugin install failed');
+    pluginMutationReport(report, 'installed');
+    input.value = '';
+    await fetchPluginAdmin();
+  } catch (err) {
+    pluginStatusText(String(err && err.message ? err.message : 'plugin install failed'), 'error');
+  }
+}
+
+async function pluginInstallSource() {
+  const input = $('plugin-source');
+  const source = input ? input.value.trim() : '';
+  if (!source) { pluginStatusText('paste a GitHub release link', 'error'); return; }
+  pluginStatusText('fetching ' + source);
+  try {
+    const report = await pluginJSONPost('/admin/plugins/install', { source }, 'plugin install failed');
+    pluginMutationReport(report, 'installed');
+    await fetchPluginAdmin();
+  } catch (err) {
+    pluginStatusText(String(err && err.message ? err.message : 'plugin install failed'), 'error');
+  }
+}
+
+function pluginInboxSummary(report) {
+  if (!report || typeof report !== 'object') return 'inbox scan failed';
+  const bits = [];
+  bits.push('scanned ' + Number(report.scanned || 0));
+  bits.push('installed ' + (Array.isArray(report.installed) ? report.installed.length : 0));
+  if (Array.isArray(report.failed) && report.failed.length) {
+    bits.push('failed ' + report.failed.length + ' · ' + String(report.failed[0].file || 'file') + ': ' + String(report.failed[0].error || 'invalid'));
+  }
+  if (report.restart_required) bits.push('restart required');
+  return bits.join(' · ');
+}
+
+async function pluginScanInbox() {
+  pluginStatusText('scanning inbox');
+  try {
+    const report = await pluginJSONPost('/admin/plugins/install', { action: 'install_inbox' }, 'inbox scan failed');
+    pluginStatusText(pluginInboxSummary(report), report && report.restart_required ? 'restart' : 'ok');
+    await fetchPluginAdmin();
+  } catch (err) {
+    pluginStatusText(String(err && err.message ? err.message : 'inbox scan failed'), 'error');
+  }
+}
+
+async function pluginRunAction(action, id) {
+  if (!id) return;
+  const sourceInput = $('plugin-source');
+  const source = sourceInput ? sourceInput.value.trim() : '';
+  const caps = $('plugin-confirm-caps');
+  pluginStatusText(action + ' ' + id);
+  try {
+    let report;
+    switch (action) {
+      case 'verify':
+        report = await pluginJSONPost('/admin/plugins', { action: 'verify' }, 'verify failed');
+        break;
+      case 'pin':
+        report = await pluginJSONPost('/admin/plugins', { action: 'pin' }, 'pin failed');
+        break;
+      case 'updates': {
+        const doc = await operatorJson('/admin/plugins/updates/check?id=' + encodeURIComponent(id));
+        pluginCandidates = Array.isArray(doc?.candidates) ? doc.candidates : [];
+        renderPluginCandidates();
+        pluginStatusText(pluginCandidates.length ? 'update found' : 'no updates', pluginCandidates.length ? 'ok' : '');
+        return;
+      }
+      case 'update': {
+        const body = { id };
+        if (source) body.source = source;
+        if (caps && caps.checked) body.confirm_capability_change = true;
+        report = await pluginJSONPost('/admin/plugins/update', body, 'update failed');
+        break;
+      }
+      case 'rollback':
+        report = await pluginJSONPost('/admin/plugins/rollback', { id }, 'rollback failed');
+        break;
+      case 'uninstall':
+        if (!window.confirm('Uninstall plugin ' + id + '?')) return;
+        report = await pluginJSONPost('/admin/plugins/uninstall', { id }, 'uninstall failed');
+        break;
+      default:
+        return;
+    }
+    pluginMutationReport(report, action + ' done');
+    await fetchPluginAdmin();
+  } catch (err) {
+    pluginStatusText(String(err && err.message ? err.message : action + ' failed'), 'error');
+  }
+}
+
 function applyBootstrapState(p, revisions = captureOperatorRevisions()) {
   applyDashValues(p.dash);
   applyModelCanon(p.model_canon, true);
@@ -1106,13 +1535,37 @@ function applyBootstrapState(p, revisions = captureOperatorRevisions()) {
     storageState = p.storage;
     refreshFooterState();
   }
+  const pluginState = p.plugins && Array.isArray(p.plugins.modules) ? p.plugins : pluginAdminDoc?.status;
+  applyPluginState(pluginState);
   if (lastData) { renderBand(); updateScopeLine(); }
 }
 function bootDashboard() {
   fetchBootstrap('full');
+  fetchPluginAdmin();
 }
-
+// The plugin pane is rendered by settings.js after first load, so its
+// controls are wired through delegation at the document root.
+document.addEventListener('click', e => {
+  const card = e.target.closest && e.target.closest('#plugins-card');
+  if (!card) return;
+  const action = e.target.closest('[data-plug-action]');
+  if (action) {
+    pluginRunAction(action.dataset.plugAction, action.dataset.plugId);
+    return;
+  }
+  if (e.target.closest('#plugin-install-file')) pluginInstallFile();
+  else if (e.target.closest('#plugin-scan-inbox')) pluginScanInbox();
+  else if (e.target.closest('#plugin-install-source')) pluginInstallSource();
+  else if (e.target.closest('#plugin-refresh')) fetchPluginAdmin();
+});
 watchGallery(); // self-correcting gallery sizing from the very first paint
+
+const viewTabs = $('view-tabs');
+viewTabs?.addEventListener('click', e => {
+  const tab = e.target.closest('[data-view]');
+  if (tab && viewTabs.contains(tab)) setDashboardView(tab.dataset.view);
+});
+setDashboardView('overview');
 bootDashboard();
 if (window.isSecureContext && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' }).catch(() => {});

@@ -17,6 +17,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/plugincred"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
@@ -282,6 +283,9 @@ type Server struct {
 	// ModelObserver is wired before serving. Debug state uses the same Go
 	// canonical-name metadata provider as all other dashboard observers.
 	ModelObserver func([]string) any
+	// PluginHook is wired once at boot when a plugin runtime was loaded.
+	// It runs after the record is finalized, never inside ServeHTTP's
+	PluginHook func(context.Context, *metrics.Record)
 	// inflight bounds buffered inference requests process-wide (see
 	// MaxInflightRequests). Lock-free so reload can change the bound live.
 	inflight inflightLimiter
@@ -727,6 +731,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// The live recorder finalizes pending state and emits end atomically
 		// with this record, under the same boundary used by log deletion.
 		s.rec.Record(rec)
+		if s.PluginHook != nil {
+			hookCtx := plugincred.With(context.Background(), t.authHeader, t.authPrefix+key)
+			s.PluginHook(hookCtx, rec)
+		}
 		if saveCapture != nil {
 			saveCapture()
 		}
