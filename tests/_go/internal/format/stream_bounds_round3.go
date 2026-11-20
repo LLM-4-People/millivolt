@@ -134,8 +134,12 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 	if err == nil || !strings.Contains(err.Error(), "announced content parts") {
 		t.Fatalf("summary key bound error = %v", err)
 	}
-	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 64<<20 {
-		t.Fatalf("summary key bound allocated %d bytes, want <64 MiB", alloc)
+	// The semantic cap is the error above. This ceiling only catches a gross
+	// retention regression: decoding the 10k-event stream itself allocates
+	// about 63 MiB under -race, so the old 64 MiB bound sat inside normal
+	// runtime variation. Keep a wide margin above that fixed cost.
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 96<<20 {
+		t.Fatalf("summary key bound allocated %d bytes, want <96 MiB", alloc)
 	}
 
 	repeated := terminalStreamCreated + `event: response.output_item.added
