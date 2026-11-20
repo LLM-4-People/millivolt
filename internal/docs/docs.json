@@ -2,7 +2,7 @@
   "schema": 1,
   "generated_by": "scripts/build_site.py",
   "base_url": "https://millivolt.llm4people.dev/",
-  "version": "0.4.24",
+  "version": "0.4.25",
   "pages": [
     {
       "path": "docs/README.md",
