@@ -461,10 +461,10 @@ fingerprint is separate: it detects changed embedded frontend bytes, not a
 semantic release or a complete backend change.
 
 `main` is promotion-only. Full source, browser and live MCP integration, and
-native container checks run on all `testing` pull requests, code-bearing
-`testing` pushes, manually dispatched `testing` gates, and manually pushed `v*`
-tags; docs and site-only pushes use `docs.yml`. They also run on Dependabot's
-`main` security PRs.
+native container checks run on all `testing` pull requests, non-docs `testing`
+pushes, manually dispatched `testing` gates, and manually pushed `v*` tags;
+docs and site-only pushes use `docs.yml`. They also run on Dependabot's `main`
+security PRs.
 
 An ordinary promotion pull request from `testing` requires its head to be the
 current `testing` tip, `main` to be already merged back into `testing`, and a
@@ -478,22 +478,35 @@ the closest gated testing commit from canonical `testing` push runs, with no
 commit-count bound. The proof polls pending exact check runs a bounded number of
 times and fails closed if they are still pending.
 
-For a code-bearing head, let the `testing` `check.yml` push gate finish before
-opening or re-running a promotion PR. A docs/site-only head has no canonical
-`check.yml` push run of its own, so wait for `docs.yml` or only the `required`
-docs validation. It does not rerun the suite.
+For a head that changes any non-docs path, let the `testing` `check.yml` push
+gate finish before opening or re-running a promotion PR. A docs/site-only head
+has no canonical `check.yml` push run of its own, so wait for `docs.yml` or only
+the `required` docs validation. It does not rerun the suite.
 
-A code-bearing promotion must also have a `VERSION` newer than every existing
-release tag. Docs/site-only promotions skip the version and full-gate proofs,
-validate docs, workflow policy and the site in `required` within its ten-minute
-budget, and do not rebuild images or cut a release.
+A promotion that changes a shipped artifact must also have a `VERSION` newer
+than every existing release tag. Shipped artifacts are the files compiled into,
+embedded in, or copied into the image, except the generated embedded docs index.
+That index is documentation content, so a docs edit does not force a release;
+the next application release carries it.
+
+The shipped notices `LICENSE` and `THIRD_PARTY_NOTICES.md` are the reverse
+exception: they are docs-filter paths but release-bearing, because the image
+copies them into its license bundle. The publish image build fails closed if the
+bundle is empty or missing, so a bad notice cannot produce a release.
+Docs/site-only promotions skip the version
+and full-gate proofs, validate docs, workflow policy and the site in `required`
+within its ten-minute budget, and do not rebuild images or cut a release, except
+for those shipped notices. Test, workflow and site-tooling promotions run the
+full gate when they are not docs-only, but they are also release-free.
 
 Merge with a merge commit. The merged-PR release workflow tags that reviewed
-merge commit and publishes the image; a delivered code-bearing main push is an
-idempotent fallback. It never pushes `main`.
+merge commit and publishes the image; a delivered main push is an idempotent
+fallback. Both classify the change and skip publication when no shipped
+artifact changed. It never pushes `main`.
 
 Dependabot security pull requests are the only other exception and normally do
-not cut a release by themselves; an untagged pending `VERSION` can publish. A
+not cut a release by themselves; when they change a shipped artifact, an
+untagged pending `VERSION` can publish. A
 manually pushed `v*` tag ships exactly as tagged.
 
 If the version tag already points at the released commit but its GitHub release
@@ -515,7 +528,7 @@ are not intrinsically immutable; moving branch and stable aliases can change.
 
 The [workflow](../.github/workflows/check.yml) runs source, race and browser
 checks, then native container smoke checks on Linux `amd64` and `arm64` for all
-`testing` pull requests, code-bearing `testing` pushes, manually dispatched
+`testing` pull requests, non-docs `testing` pushes, manually dispatched
 `testing` gates, and manually pushed `v*` tags, and for Dependabot's `main`
 security PRs. The `unit`, `browser` and `container` jobs start together. Docs
 and site-only pushes use `docs.yml` instead.
@@ -526,20 +539,23 @@ only docs changes after it, and requires a successful
 [escalation](../.github/workflows/escalation.yml) run (every Go test under the
 race detector plus a five-run clock-sensitive flake sweep) for the reviewed
 head; docs-only promotions validate the docs, workflow policy and site
-directly.
+directly. A promotion with no shipped artifact does not require a version and
+does not publish.
 
-The merged promotion PR carries the reviewed merge commit and releases it; a
-delivered code-bearing `main` push only reuses the same reviewed merge and is
-idempotent. Publication is limited to this repository's merged promotion pull
-requests, delivered pushes to `main`, matching release tags, and
-`testing`-branch pushes (which publish only the moving `testing` tag).
+The merged promotion PR carries the reviewed merge commit and releases it when a
+shipped artifact changed; a delivered `main` push only reuses the same reviewed
+merge and is idempotent. Publication is limited to this repository's merged
+promotion pull requests, delivered pushes to `main`, matching release tags, and
+`testing`-branch pushes (which publish only the moving `testing` tag). A
+`testing` push with no shipped artifact does not republish the testing image.
 
 The release `publish` job waits for `required`. The `publish-testing` job waits
 for `unit`, `browser` and `container` instead, because a testing push has no
 promotion proof to wait for.
 
 A release run whose `VERSION` is already tagged, such as a Dependabot security
-merge, normally does not publish; if main carries an untagged pending `VERSION`,
+merge, normally does not publish; if the merge changes a shipped artifact and
+main carries an untagged pending `VERSION`,
 that run can publish it. Open or unmerged pull requests do not publish images; a
 merged promotion PR does.
 

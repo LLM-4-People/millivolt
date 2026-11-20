@@ -11,6 +11,10 @@ from .workflows_docs import (
     docs_classifier_errors,
     docs_only_fail_open_errors,
     docs_pattern_errors,
+    release_classifier_errors,
+    release_exemption_errors,
+    release_pattern_errors,
+    release_shipped_input_errors,
     shell_case_family,
 )
 from .workflows_escalation import escalation_proof_behavior_errors
@@ -524,6 +528,16 @@ def check_gate_proof(checks: dict, errors: list[str]) -> None:
     docs_patterns = " ".join(str((required_job.get("env") or {}).get("DOCS_PATH_PATTERNS", "")).split())
     if not docs_patterns:
         errors.append("check.yml: required must own the docs/site path patterns")
+    release_patterns = " ".join(str((checks.get("env") or {}).get("RELEASE_PATH_PATTERNS", "")).split())
+    release_exemptions = " ".join(str((checks.get("env") or {}).get("RELEASE_EXEMPT_PATTERNS", "")).split())
+    if not release_patterns:
+        errors.append("check.yml: the workflow must own the shipped-artifact path patterns")
+    errors.extend(release_pattern_errors(release_patterns))
+    errors.extend(release_exemption_errors(release_exemptions))
+    errors.extend(release_shipped_input_errors(release_patterns, release_exemptions))
+    contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    if "RELEASE_PATH_PATTERNS" not in contributing:
+        errors.append("CONTRIBUTING.md: shipped-artifact policy must name the release filter owner")
     promotion_step = next((step for step in required_steps
                            if step.get("name") == "Require main promotions to come from testing"), {})
     promotion_run = str(promotion_step.get("run", ""))
@@ -534,9 +548,9 @@ def check_gate_proof(checks: dict, errors: list[str]) -> None:
                       "both gate steps own an inline copy")
     if "source scripts/docs-paths.sh" in check_text:
         errors.append("check.yml: gate steps must not source the candidate classifier")
-    if "docs_only" not in promotion_run or "git diff --name-only --no-renames" not in promotion_run:
+    if "docs_only" not in promotion_run or "diff --name-only --no-renames" not in promotion_run:
         errors.append("check.yml: main promotions must classify docs-only changes with --no-renames")
-    capture_diff = 'changed="$(git diff --name-only --no-renames "$base" "$HEAD_SHA")"'
+    capture_diff = 'changed="$(git -c core.quotePath=false diff --name-only --no-renames "$base" "$HEAD_SHA")"'
     missing_promotion_lines = missing_commands(
         promotion_run, ("set -euo pipefail",
                         "git fetch --no-tags origin main testing", capture_diff))
@@ -545,7 +559,7 @@ def check_gate_proof(checks: dict, errors: list[str]) -> None:
                       + ", ".join(missing_promotion_lines))
     if 'done <<< "$changed"' not in promotion_run:
         errors.append("check.yml: docs-only classification must iterate the captured diff")
-    if 'done < <(git diff --name-only --no-renames' in promotion_run:
+    if 'done < <(git -c core.quotePath=false diff --name-only --no-renames' in promotion_run:
         errors.append("check.yml: docs-only classification must not swallow git diff failures in a process substitution")
     commented_capture = "\n".join(
         "# " + line if capture_diff in line else line
@@ -582,8 +596,40 @@ def check_gate_proof(checks: dict, errors: list[str]) -> None:
         errors.append("check.yml: both inline is_docs_path declarations must be byte-identical")
     if promotion_run.count("is_docs_path() {") != 1 or full_gate_run.count("is_docs_path() {") != 1:
         errors.append("check.yml: each gate step must define exactly one inline is_docs_path")
+    merged_step = next((step for step in required_steps
+                        if step.get("name") == "Validate merged promotion"), {})
+    merged_run = str(merged_step.get("run", ""))
+    merged_docs_classifier = shell_declaration(merged_run, "is_docs_path")
+    if not merged_docs_classifier:
+        errors.append("check.yml: merged promotion validation must define is_docs_path inline")
+    elif promotion_classifier and merged_docs_classifier != promotion_classifier:
+        errors.append("check.yml: the promotion and merged is_docs_path declarations "
+                      "must be byte-identical")
+    promotion_release = shell_declaration(promotion_run, "is_release_path")
+    merged_release = shell_declaration(merged_run, "is_release_path")
+    if not promotion_release:
+        errors.append("check.yml: promotion classification must define is_release_path inline")
+    if not merged_release:
+        errors.append("check.yml: merged promotion validation must define is_release_path inline")
+    if promotion_release and merged_release and promotion_release != merged_release:
+        errors.append("check.yml: both inline is_release_path declarations must be byte-identical")
+    if promotion_run.count("is_release_path() {") != 1 or merged_run.count("is_release_path() {") != 1:
+        errors.append("check.yml: each release-classifying step must define exactly one "
+                      "inline is_release_path")
     errors.extend(docs_classifier_errors(promotion_run, docs_patterns))
     errors.extend(docs_classifier_errors(full_gate_run, docs_patterns))
+    errors.extend(docs_classifier_errors(merged_run, docs_patterns))
+    errors.extend(release_classifier_errors(promotion_run, release_patterns, release_exemptions))
+    errors.extend(release_classifier_errors(merged_run, release_patterns, release_exemptions))
+    reduced = " ".join(pattern for pattern in release_patterns.split() if pattern != "internal/**")
+    if not reduced or not release_classifier_errors(promotion_run, reduced, release_exemptions):
+        errors.append("workflows self-check: dropping internal/** from the release filter must fail")
+    for run, label in ((promotion_run, "promotion"), (merged_run, "merged promotion")):
+        for needle in ('release_needed=false',
+                       'is_release_path "$path"',
+                       'echo "release_needed=$release_needed" >> "$GITHUB_OUTPUT"'):
+            if needle not in run:
+                errors.append(f"check.yml: {label} classification is missing {needle}")
     if not docs_classifier_errors(promotion_run,
                                   docs_patterns + " .github/workflows/*.yml"):
         errors.append("workflows self-check: widening the classifier to the workflow family "
@@ -633,7 +679,7 @@ def check_gate_proof(checks: dict, errors: list[str]) -> None:
             "sort_by(.created_at, .id)",
             "branch=testing",
             "git merge-base --is-ancestor",
-            "git diff --name-only --no-renames",
+            "diff --name-only --no-renames",
             "sleep 10",
             "for attempt in 1 2 3 4 5 6",
             "--argjson suite",
@@ -770,5 +816,5 @@ def check_gate_proof(checks: dict, errors: list[str]) -> None:
         errors.append("check.yml: version promotion check must fetch release tags")
     elif "-newer-than" not in str(version_step.get("run", "")):
         errors.append("check.yml: version promotion check must compare SemVer precedence")
-    elif "steps.promotion.outputs.docs_only != 'true'" not in " ".join(str(version_step.get("if", "")).split()):
-        errors.append("check.yml: docs-only promotions must skip the version check")
+    elif "steps.promotion.outputs.release_needed == 'true'" not in " ".join(str(version_step.get("if", "")).split()):
+        errors.append("check.yml: only a shipped-artifact change may require a version")

@@ -10,7 +10,7 @@ import tempfile
 from fnmatch import fnmatchcase
 from pathlib import Path
 
-from .workflows_support import non_comment_lines, shell_declaration
+from .workflows_support import ROOT, non_comment_lines, shell_declaration
 
 
 def github_glob(pattern: str, path: str) -> bool:
@@ -151,6 +151,8 @@ DOCS_PATH_SAMPLES = (
     ("LICENSE", True),
     ("scripts/build_site.py", True),
     ("requirements-docs.txt", True),
+    ("internal/docs/docs.json", True),
+    ("internal/docs/docs.go", False),
     (".github/workflows/docs.yml", True),
     (".github/workflows/pages.yml", True),
     # security.yml runs govulncheck against the dependency graph and
@@ -165,6 +167,168 @@ DOCS_PATH_SAMPLES = (
     ("cmd/proxy/main.go", False),
     ("tests/support.py", False),
 )
+
+
+RELEASE_PATH_SAMPLES = (
+    # Shipped artifacts: compiled, embedded or copied into the image.
+    ("VERSION", True),
+    ("version.go", True),
+    ("go.mod", True),
+    ("go.sum", True),
+    ("proxy.example.yaml", True),
+    ("Dockerfile", True),
+    (".dockerignore", True),
+    ("LICENSE", True),
+    ("THIRD_PARTY_NOTICES.md", True),
+    ("cmd/proxy/main.go", True),
+    ("internal/docs/docs.go", True),
+    ("internal/docs/docs.json", False),
+    ("internal/web/static/js/theme_boot.js", True),
+    ("scripts/licenses/main.go", True),
+    # Everything else is release-free. Tests and workflows still need the
+    # full gate when they are not docs-only, but they do not ship.
+    ("docs/operations.md", False),
+    ("docs/images/overview/dashboard.png", False),
+    ("README.md", False),
+    ("CONTRIBUTING.md", False),
+    ("AGENTS.md", False),
+    ("site-src/assets/site.css", False),
+    ("scripts/build_site.py", False),
+    ("scripts/site_media.py", False),
+    ("scripts/site_plates.py", False),
+    ("scripts/brand/build.py", False),
+    ("scripts/gallery/data.py", False),
+    ("scripts/check.sh", False),
+    ("scripts/dev.sh", False),
+    ("tests/support.py", False),
+    ("tests/python/gallery.py", False),
+    ("tests/_go/internal/web/js_mirrors.go", False),
+    (".github/workflows/check.yml", False),
+    (".github/workflows/docs.yml", False),
+    (".github/workflows/pages.yml", False),
+    (".github/social-preview.png", False),
+    ("cmd/release/main.go", False),
+    ("cmd/mvctl/main.go", False),
+    ("cmd/stress/main.go", False),
+    ("cmd/docgen/main.go", False),
+    ("tools.go", False),
+    ("requirements-docs.txt", False),
+    ("requirements-dev.txt", False),
+    ("package.json", False),
+    ("package-lock.json", False),
+)
+
+
+def release_classifier_errors(run: str, patterns: str, exemptions: str = "") -> list[str]:
+    """Exercise the inline release classifier over shipped and non-shipped paths."""
+    body = shell_declaration(run, "is_release_path")
+    if not body:
+        return ["check.yml: inline release classifier is missing"]
+    if shutil.which("bash") is None:
+        return ["workflows self-check: bash is required to exercise the release classifier"]
+    script = "set -euo pipefail\n" + body + '\nis_release_path "$1"\n'
+    errors = []
+    for path, expected in RELEASE_PATH_SAMPLES:
+        result = subprocess.run(
+            ["bash", "-c", script, "bash", path],
+            env={**os.environ, "RELEASE_PATH_PATTERNS": patterns,
+                 "RELEASE_EXEMPT_PATTERNS": exemptions},
+            capture_output=True, text=True, timeout=10, check=False)
+        actual = result.returncode == 0
+        if actual is not expected:
+            errors.append(f"check.yml: inline release classifier must classify {path} as "
+                          f"{'shipped' if expected else 'release-free'}")
+    return errors
+
+
+def release_pattern_errors(patterns: str) -> list[str]:
+    """Require every declared release pattern to cover a sampled shipped path."""
+    if not patterns:
+        return ["check.yml: the release filter must not be empty"]
+    errors = []
+    for pattern in patterns.split():
+        if not any(fnmatchcase(path, pattern)
+                   for path, expected in RELEASE_PATH_SAMPLES if expected):
+            errors.append(f"check.yml: release pattern {pattern} covers no sampled shipped path")
+    return errors
+
+
+def release_exemption_errors(exemptions: str) -> list[str]:
+    """Keep generated documentation content out of the release trigger."""
+    if "internal/docs/docs.json" not in exemptions.split():
+        return ["check.yml: the generated docs index must be release-free"]
+    return []
+
+
+def dockerfile_copy_sources(text: str) -> list[str]:
+    """Return the source operands of every Dockerfile COPY, flag-free."""
+    lines: list[str] = []
+    buffer = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.endswith("\\"):
+            buffer += stripped[:-1] + " "
+            continue
+        lines.append(buffer + stripped)
+        buffer = ""
+    if buffer:
+        lines.append(buffer)
+    sources: list[str] = []
+    for line in lines:
+        parts = line.split()
+        if not parts or parts[0].upper() != "COPY":
+            continue
+        if any(part.startswith("--from=") for part in parts):
+            continue
+        args = [part for part in parts[1:] if not part.startswith("--")]
+        if len(args) >= 2:
+            sources.extend(args[:-1])
+    return sources
+
+
+def embed_targets() -> list[tuple[str, str]]:
+    """Return (go file, repository-relative target) for every go:embed line."""
+    files = [ROOT / "version.go"]
+    files.extend(sorted((ROOT / "internal").rglob("*.go")))
+    files.extend(sorted((ROOT / "cmd").rglob("*.go")))
+    files.extend(sorted((ROOT / "scripts" / "licenses").rglob("*.go")))
+    targets: list[tuple[str, str]] = []
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"(?m)^\s*//go:embed\s+(.+)$", text):
+            for pattern in match.group(1).split():
+                if pattern.startswith("all:"):
+                    pattern = pattern[4:]
+                target = (path.parent / pattern).relative_to(ROOT).as_posix()
+                targets.append((path.relative_to(ROOT).as_posix(), target))
+    return targets
+
+
+def release_shipped_input_errors(patterns: str, exemptions: str) -> list[str]:
+    """Require every image COPY source and go:embed target to be release-bearing."""
+    def covered(path: str) -> bool:
+        if any(fnmatchcase(path, exemption) for exemption in exemptions.split()):
+            return True
+        return any(fnmatchcase(path, pattern) for pattern in patterns.split())
+
+    def sample(path: str) -> str:
+        path = path.rstrip("/")
+        if "*" in path:
+            return path.replace("**", "nested/sample").replace("*", "sample")
+        if (ROOT / path).is_dir():
+            return path + "/sample"
+        return path
+
+    errors = []
+    for source in dockerfile_copy_sources((ROOT / "Dockerfile").read_text(encoding="utf-8")):
+        if not covered(sample(source)):
+            errors.append(f"check.yml: Dockerfile COPY source {source} is not release-bearing")
+    for go_file, target in embed_targets():
+        if not covered(sample(target)):
+            errors.append(f"check.yml: go:embed target {target} in {go_file} is not release-bearing")
+    return errors
 
 
 def docs_classifier_errors(run: str, patterns: str) -> list[str]:
@@ -192,8 +356,9 @@ def docs_only_fail_open_errors(run: str) -> list[str]:
     """Prove docs-only classification follows the diff and fails closed.
 
     The promotion step is executed with a fake git. A code path must classify as
-    a full gate, a docs-only path as docs-only, and a failing diff must abort
-    before writing a classification. The step's own `set -euo pipefail` is
+    a full gate, a docs-only path as docs-only, a tooling path as full-gate but
+    release-free, and a docs-only shipped notice as release-bearing. A failing
+    diff must abort before writing a classification. The step's own `set -euo pipefail` is
     required as a command line and is never injected here: a missing `set -e`
     must fail the static contract instead of being masked by the harness. The
     classifier is inline, so a malicious `scripts/docs-paths.sh` in the
@@ -207,6 +372,7 @@ def docs_only_fail_open_errors(run: str) -> list[str]:
     if "source scripts/docs-paths.sh" in non_comment_lines(run):
         return ["workflows self-check: docs-only classification must not source the candidate classifier"]
     fake_git = """git() {
+  if [ "$1" = "-c" ]; then shift 2; fi
   case "$1" in
     fetch) return 0 ;;
     merge-base)
@@ -219,6 +385,8 @@ def docs_only_fail_open_errors(run: str) -> list[str]:
       case "${FAKE_DIFF_MODE:-fail}" in
         code) printf '%s\\n' "internal/web/main.go"; return 0 ;;
         docs) printf '%s\\n' "README.md" "docs/operations.md"; return 0 ;;
+        tooling) printf '%s\\n' "tests/support.py" ".github/workflows/check.yml"; return 0 ;;
+        license) printf '%s\\n' "LICENSE"; return 0 ;;
         *) return 7 ;;
       esac
       ;;
@@ -228,11 +396,15 @@ def docs_only_fail_open_errors(run: str) -> list[str]:
 """
     script = fake_git + run + '\necho "reached-after-diff"\n'
     scenarios = (
-        ("code", {}, 0, "", "docs_only=false"),
-        ("docs", {}, 0, "reached-after-diff", "docs_only=true"),
-        ("fail", {}, None, "", ""),
-        ("docs", {"FAKE_TIP": "elsewhere"}, 1, "current testing tip", ""),
-        ("docs", {"FAKE_MAIN_ANCESTOR": "1"}, 1, "Merge main back into testing", ""),
+        ("code", {}, 0, "", {"docs_only": "false", "release_needed": "true"}),
+        ("docs", {}, 0, "reached-after-diff", {"docs_only": "true", "release_needed": "false"}),
+        ("tooling", {}, 0, "reached-after-diff", {"docs_only": "false", "release_needed": "false"}),
+        # The shipped notice is deliberately docs-only for the gate and
+        # release-bearing for the image.
+        ("license", {}, 0, "reached-after-diff", {"docs_only": "true", "release_needed": "true"}),
+        ("fail", {}, None, "", {}),
+        ("docs", {"FAKE_TIP": "elsewhere"}, 1, "current testing tip", {}),
+        ("docs", {"FAKE_MAIN_ANCESTOR": "1"}, 1, "Merge main back into testing", {}),
     )
     with tempfile.TemporaryDirectory(prefix="millivolt-docs-only-") as temp:
         scripts = Path(temp) / "scripts"
@@ -244,7 +416,8 @@ def docs_only_fail_open_errors(run: str) -> list[str]:
         for index, (mode, overrides, expected_code, needle, expected_output) in enumerate(scenarios):
             output = Path(temp) / f"github-output-{index}"
             env = {**os.environ, "GITHUB_OUTPUT": str(output),
-                   "HEAD_SHA": "testing", "DOCS_PATH_PATTERNS": "docs/** *.md",
+                   "HEAD_SHA": "testing", "DOCS_PATH_PATTERNS": "docs/** *.md LICENSE",
+                   "RELEASE_PATH_PATTERNS": "internal/** LICENSE",
                    "FAKE_DIFF_MODE": mode, **overrides}
             try:
                 result = subprocess.run(
@@ -260,7 +433,10 @@ def docs_only_fail_open_errors(run: str) -> list[str]:
                         f"got {result.returncode}: {(result.stderr or result.stdout).strip()}"]
             if needle and needle.lower() not in (result.stdout + result.stderr).lower():
                 return [f"workflows self-check: a {mode} diff must report {needle!r}"]
-            actual = output.read_text(encoding="utf-8").strip() if output.exists() else ""
+            actual = {}
+            if output.exists():
+                actual = dict(line.split("=", 1) for line in
+                              output.read_text(encoding="utf-8").splitlines() if "=" in line)
             if actual != expected_output:
                 return [f"workflows self-check: a {mode} diff must write {expected_output!r}, got {actual!r}"]
             if expected_code != 0 and "reached-after-diff" in result.stdout:

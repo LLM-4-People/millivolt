@@ -41,16 +41,20 @@ stay direct.
 [version.go](../version.go) owns VERSION validation and SemVer precedence. The
 [workflow](../.github/workflows/check.yml) owns the promotion gate and release
 publication: `unit`, `browser` and `container` run the full gate on all
-`testing` pull requests, code-bearing `testing` pushes, and manually pushed
-`v*` tags, plus Dependabot's `main` PRs; docs and site-only pushes use
-`docs.yml`.
+`testing` pull requests, non-docs `testing` pushes, and manually pushed `v*`
+tags, plus Dependabot's `main` PRs; docs and site-only pushes use `docs.yml`.
 
 The three gate jobs start independently and `required` aggregates them.
 `required` reuses that gate for ordinary promotions by requiring the head to
 be the current `testing` tip, `main` to be already merged back into it, a
 successful full-gate record for that exact commit or for the closest gated
 `testing` commit when every path since it is docs/site-only, and a VERSION
-newer than every tag for non-Dependabot code-bearing promotions.
+newer than every tag for non-Dependabot promotions that change a shipped
+artifact. Tests, workflows and site tooling still need the full gate when they
+are not docs-only, but they do not need a version and do not release.
+
+The shipped `LICENSE` and `THIRD_PARTY_NOTICES.md` are docs-filter paths but
+release-bearing; the generated docs index is the reverse exception.
 
 A non-Dependabot promotion also requires a successful
 [escalation](../.github/workflows/escalation.yml) run (forced full-race sweep
@@ -62,7 +66,9 @@ gate finish before opening or re-running a promotion PR.
 
 Docs/site-only promotions skip the VERSION and full-gate proofs and validate
 docs, workflow policy and the site in `required`. The `required` job has a
-ten-minute budget for that path.
+ten-minute budget for that path. Promotions that change only tests, workflows
+or site tooling run the full gate but skip the VERSION proof and publication,
+because no shipped artifact changed.
 
 `publish` tags the reviewed promotion merge, publishes the image and creates
 the release without pushing `main`; a manually pushed `v*` tag ships exactly
